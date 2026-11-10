@@ -5,10 +5,10 @@
 use chrono::Local;
 use rune::tok::Family;
 use rune::*;
-use std::borrow::Cow;
+
 
 use crate::types::Actions;
-use crate::ui::{UiState, chat_row, open_chat};
+use crate::ui::{HOVER, INK, MUTED, UiState, chat_row, open_chat};
 use app_backend::backend::Engine;
 use store::{HIGHLIGHT_END, HIGHLIGHT_START};
 
@@ -60,7 +60,7 @@ pub fn run(engine: &Engine, query: &str) -> Result<Results, String> {
         .into_iter()
         .map(|hit| MessageHit {
             conversation_id: hit.conversation_id,
-            sender: hit.sender_name,
+            sender: hit.sender_name.unwrap_or_default(),
             when: crate::bridge::format_when(hit.created_at, Local::now(), true),
             snippet: plain_snippet(&hit.snippet),
         })

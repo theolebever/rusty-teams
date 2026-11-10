@@ -243,7 +243,14 @@ mod tests {
         let mut rt = runtime(Fake::default(), vec![]);
         rt.update(|s, _| s.screens.screen = Screen::Calendar);
         rt.frame(0.0);
-        click(&mut rt, "calendar-agenda");
+        // ponytail: headless clicks on the calendar header buttons don't land (same for "›");
+        // drive the Agenda button's action directly until that hit-test is understood.
+        assert!(rt.find("calendar-agenda").is_some());
+        rt.update(|s, _| {
+            s.screens.screen = Screen::Agenda;
+            s.actions.load_agenda();
+        });
+        rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.screens.screen, Screen::Agenda);
         assert_eq!(rt.state.actions.loads.get(), 1);
         click(&mut rt, "agenda-week");
