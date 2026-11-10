@@ -111,6 +111,33 @@ impl TabControl {
         Ok(())
     }
 
+    /// Report a fixed User-Agent plus matching client hints for every request in this tab.
+    /// Setting `userAgentMetadata` keeps Sec-CH-UA-Platform and Sec-CH-UA-Mobile consistent
+    /// with the UA string; the `--user-agent` launch flag alone leaves them at the real OS.
+    pub async fn set_user_agent(&self, user_agent: &str, chrome_major: &str) -> Result<()> {
+        let brands = json!([
+            {"brand": "Chromium", "version": chrome_major},
+            {"brand": "Google Chrome", "version": chrome_major},
+            {"brand": "Not.A/Brand", "version": "24"},
+        ]);
+        self.call(
+            "Network.setUserAgentOverride",
+            json!({
+                "userAgent": user_agent,
+                "userAgentMetadata": {
+                    "brands": brands,
+                    "platform": "Android",
+                    "platformVersion": "10",
+                    "architecture": "",
+                    "model": "K",
+                    "mobile": true,
+                },
+            }),
+        )
+        .await
+        .map(drop)
+    }
+
     pub async fn add_binding(&self, name: &str) -> Result<()> {
         self.call("Runtime.addBinding", json!({"name": name})).await.map(drop)
     }

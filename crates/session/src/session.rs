@@ -17,6 +17,11 @@ use crate::transport::{CdpTransport, Transport};
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:9222";
 pub(crate) const FETCH_SCRIPT: &str = include_str!("../assets/fetch.js");
 pub(crate) const NOT_GRANTED_PREFIX: &str = "the app is not granted";
+/// User-Agent reported to the web app on every request, so it serves the mobile layout.
+/// Chrome major must match `MOBILE_CHROME_MAJOR` below, which drives the client-hint brands.
+pub(crate) const MOBILE_USER_AGENT: &str =
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+pub(crate) const MOBILE_CHROME_MAJOR: &str = "152";
 const MAX_DOWNLOAD_BYTES: u64 = 60 * 1024 * 1024;
 const DEFAULT_CONCURRENCY: usize = 6;
 
@@ -253,6 +258,8 @@ impl Session {
             let Some((control, _)) = self.transport.open(app, false).await? else {
                 return Ok(None);
             };
+            // Set the mobile UA before any fetch runs in this tab, so every API call carries it.
+            control.set_user_agent(MOBILE_USER_AGENT, MOBILE_CHROME_MAJOR).await?;
             *slot = Some(control);
         }
         let control = slot.as_ref().expect("connection set above");

@@ -145,7 +145,9 @@ async fn run_with_token_splices_body_after_the_token_lookup() {
         .unwrap();
     assert_eq!(answer["ok"], true);
     let calls = tab.calls.lock().unwrap();
-    let expression = calls[0].1["expression"].as_str().unwrap();
+    // The first call on a fresh tab is Network.setUserAgentOverride; the token splice follows.
+    let expression =
+        calls.iter().find_map(|call| call.1["expression"].as_str()).expect("an evaluate call");
     let lookup = expression.find("if (!token) return {noToken").unwrap();
     let body = expression.find("return {ok: !!token};").unwrap();
     assert!(lookup < body);
