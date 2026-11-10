@@ -27,15 +27,7 @@ pub struct AgendaDay {
     pub rows: Vec<AgendaRow>,
 }
 
-pub fn fetch_window(now: DateTime<Utc>, offset: FixedOffset) -> (DateTime<Utc>, DateTime<Utc>) {
-    let midnight = now
-        .with_timezone(&offset)
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|local| local.and_local_timezone(offset).single())
-        .map_or(now, |local| local.with_timezone(&Utc));
-    (midnight, midnight + Duration::days(AGENDA_DAYS))
-}
+pub use app_backend::schedule::fetch_window;
 
 pub fn join_available(
     row_start: DateTime<Utc>,

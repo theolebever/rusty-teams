@@ -3,7 +3,7 @@ pub mod banner_image;
 pub mod agent_api;
 pub mod agents;
 pub mod app_state;
-pub mod backend;
+pub use app_backend::backend;
 pub mod call;
 pub mod call_rows;
 pub mod card_actions;

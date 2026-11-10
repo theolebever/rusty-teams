@@ -13,7 +13,8 @@ use store::Store;
 use teams_core::{ChatsvcFolderSource, CoreEvent, SyncEngine};
 use tokio::sync::{Notify, mpsc, watch};
 
-use crate::call::{CallLauncher, fetch_window};
+use crate::launcher::CallLauncher;
+use crate::schedule::fetch_window;
 use crate::presence_link::{self, LinkSignal};
 
 pub type Engine = SyncEngine<Graph>;

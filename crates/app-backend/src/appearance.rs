@@ -1,6 +1,6 @@
 use store::Store;
 
-use crate::theme::{self, ColorScheme, Shade};
+use crate::schemes::{self as theme, ColorScheme, Shade};
 
 const META_KEY: &str = "appearance.settings";
 const COLOR_SCHEME_KEY: &str = "color_scheme";

@@ -4,9 +4,7 @@ use gpui_kit::component::elevation::{self, Elevation, ElevationTokens};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
-mod schemes;
-
-pub use schemes::{
+pub use app_backend::schemes::{
     ColorScheme, HIGH_CONTRAST, Palette, SCHEMES, Shade, active_palette as palette,
     active_scheme as scheme, active_shade as shade, default_scheme, palettes, scheme_by_id,
     set_active_scheme, set_active_shade, set_thread_scheme, set_thread_shade,

@@ -29,6 +29,7 @@ url = "2"
 uuid = { version = "1", default-features = false, features = ["v4"] }
 
 app-base = { path = "crates/app-base" }
+app-backend = { path = "crates/app-backend" }
 app-call-model = { path = "crates/app-call-model" }
 app-state = { path = "crates/app-state" }
 app-ui-kit = { path = "crates/app-ui-kit" }

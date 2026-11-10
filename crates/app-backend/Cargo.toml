@@ -1,0 +1,22 @@
+[package]
+name = "app-backend"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+calling.workspace = true
+chatsvc.workspace = true
+chrono.workspace = true
+directories.workspace = true
+graph.workspace = true
+log = "0.4"
+serde_json.workspace = true
+session.workspace = true
+store.workspace = true
+teams-core.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

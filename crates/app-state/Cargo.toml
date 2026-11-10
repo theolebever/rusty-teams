@@ -16,6 +16,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [dependencies]
+app-backend.workspace = true
 agents.workspace = true
 app-base.workspace = true
 app-call-model.workspace = true

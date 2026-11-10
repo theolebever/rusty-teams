@@ -5,7 +5,7 @@ pub mod end_actions;
 pub mod features;
 pub mod history;
 pub mod join;
-pub mod launcher;
+pub use app_backend::launcher;
 pub mod list;
 pub mod media;
 pub mod outlook_reminders;

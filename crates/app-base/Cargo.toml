@@ -10,6 +10,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [dependencies]
+app-backend.workspace = true
 agents.workspace = true
 calling.workspace = true
 chatsvc.workspace = true

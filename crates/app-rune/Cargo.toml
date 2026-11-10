@@ -10,16 +10,20 @@ name = "rusty-teams-rune"
 path = "src/main.rs"
 
 [dependencies]
-app-base.workspace = true
-app-state.workspace = true
+app-backend.workspace = true
+calling.workspace = true
+chatsvc.workspace = true
 chrono.workspace = true
 directories.workspace = true
 rune = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
+rune-notify = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
 scraper.workspace = true
 session.workspace = true
 store.workspace = true
 teams-core.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 webview.workspace = true
+windows = { version = "0.62", features = ["Win32_UI_Shell"] }

@@ -1,4 +1,6 @@
-use chatsvc::{Attendee, CalendarEvent, Repeat, Reply, ResponseType};
+use chatsvc::{CalendarEvent, Repeat, Reply, ResponseType};
+
+pub use app_backend::schedule::{Invitee, MeetingDraft, attendee_for};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use gpui_kit::Context;
 use tokio::sync::oneshot;
@@ -12,26 +14,6 @@ const HALF_HOUR_MINUTES: i64 = 30;
 const DEFAULT_LENGTH_MINUTES: i64 = 30;
 const READ_ONLY_MESSAGE: &str = "Meetings cannot be scheduled in read-only mode.";
 const RESPONSE_FAILED_NOTICE: &str = "Could not send your response";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invitee {
-    pub user_id: String,
-    pub name: String,
-    pub mail: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeetingDraft {
-    pub subject: String,
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
-    pub local_start: NaiveDateTime,
-    pub local_end: NaiveDateTime,
-    pub time_zone_name: Option<String>,
-    pub repeat: Repeat,
-    pub details: String,
-    pub people: Vec<Invitee>,
-}
 
 pub fn default_window(now: DateTime<Utc>, zone: &impl TimeZone) -> (NaiveDateTime, NaiveDateTime) {
     let local = now.with_timezone(zone).naive_local();
@@ -89,18 +71,6 @@ pub fn draft_from_form(
         repeat: values.repeat,
         details: values.details.trim().to_owned(),
         people: values.people,
-    })
-}
-
-pub fn attendee_for(invitee: &Invitee, looked_up: Option<String>) -> Result<Attendee, String> {
-    let address = invitee
-        .mail
-        .clone()
-        .or(looked_up)
-        .ok_or_else(|| format!("No email address found for {}.", invitee.name))?;
-    Ok(Attendee {
-        name: invitee.name.clone(),
-        address,
     })
 }
 

@@ -12,7 +12,7 @@ use calling::{
 };
 use session::{Session, SessionConfig, Transport};
 
-use super::schedule::{MeetingDraft, attendee_for};
+use crate::schedule::{MeetingDraft, attendee_for};
 
 const START_RETRY_STEPS: [Duration; 3] = [
     Duration::from_secs(1),
@@ -20,7 +20,7 @@ const START_RETRY_STEPS: [Duration; 3] = [
     Duration::from_secs(5),
 ];
 const START_RETRY_STEADY: Duration = Duration::from_secs(10);
-pub(super) const NOT_READY: &str =
+pub const NOT_READY: &str =
     "Could not reach the Teams calling service. Check your connection and try again.";
 const READY_WAIT: Duration = Duration::from_secs(30);
 const CALL_DUMPS_DIR: &str = "call-dumps";
