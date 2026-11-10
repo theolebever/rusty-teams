@@ -110,6 +110,7 @@ impl<A: Actions> UiState<A> {
                 if self.screens.week == week { self.screens.calendar = rows; }
             }
             Update::CalendarRefresh => self.actions.load_calendar(self.screens.week),
+            Update::Agenda(events) => self.screens.agenda = events,
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
                     self.search_results = Some(rows);
