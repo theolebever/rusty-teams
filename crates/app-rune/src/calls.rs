@@ -646,21 +646,21 @@ mod tests {
                 scale: 1.0,
             },
         );
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         let (x, y) = runtime.find("join-call").expect("join button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         assert_eq!(
             runtime.state.actions.actions.borrow().as_slice(),
             ["join https://teams.microsoft.com/meet/1234 false"]
         );
         runtime.update(|state, _| state.calls.apply(CallUpdate::State(CallState::Connecting)));
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         let (x, y) = runtime.find("call-leave").expect("leave button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         assert_eq!(
             runtime
                 .state

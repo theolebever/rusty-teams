@@ -273,8 +273,9 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
-                .child(rows)
-                .child(team_list(s)),
+                // Rune: a virtual/growth stack must be the last child of its scroll viewport.
+                .child(team_list(s))
+                .child(rows),
         )
 }
 
@@ -460,11 +461,11 @@ fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .min_h(0.0)
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
-        .child(col().w_full()
-            .child(row().key("load-older").h(36.0).center().hover(c(HOVER))
-                .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
-                .child(text("Load older messages").font(ts(13.0, 600.0)).color(c(INK))))
-            .child(rows))
+        .child(row().key("load-older").w_full().h(36.0).center().hover(c(HOVER))
+            .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
+            .child(text("Load older messages").font(ts(13.0, 600.0)).color(c(INK))))
+        // Rune: a virtual/growth stack must be the last child of its scroll viewport.
+        .child(rows)
 }
 
 fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {

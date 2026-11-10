@@ -516,12 +516,12 @@ mod tests {
             thread_id: None, response: chatsvc::ResponseType::NotResponded,
         }];
         let mut runtime = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         for key in ["calendar-meeting-2026-11-02", "calendar-send-response", "calendar-rsvp-Accept"] {
             let (x, y) = runtime.find(key).unwrap_or_else(|| panic!("missing {key}"));
             runtime.pointer_down(x, y);
             runtime.pointer_up(x, y);
-            runtime.frame(0.0);
+            runtime.frame(1.0);
         }
         assert_eq!(*runtime.state.actions.responses.borrow(), [("meeting".into(), chatsvc::Reply::Accept, false)]);
     }
