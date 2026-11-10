@@ -7,7 +7,6 @@ pub mod demo_scene;
 pub mod end_screen;
 pub mod fullscreen;
 pub mod health;
-pub mod media;
 pub mod mic;
 pub mod model;
 pub mod options_dialog;

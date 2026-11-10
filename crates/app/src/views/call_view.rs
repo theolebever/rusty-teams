@@ -1169,6 +1169,7 @@ pub fn render_call_view(
     app: &Entity<AppState>,
     state: &AppState,
     chat: Option<AnyView>,
+    people_scroll: &ScrollHandle,
     fullscreen: bool,
     island_width: f32,
 ) -> Option<AnyElement> {
@@ -1323,7 +1324,7 @@ pub fn render_call_view(
                 .flatten()
                 .map(IntoElement::into_any_element),
         )
-        .chain(people_panel(app, state, call))
+        .chain(people_panel(app, state, call, people_scroll))
         .collect();
     Some(
         h_flex()

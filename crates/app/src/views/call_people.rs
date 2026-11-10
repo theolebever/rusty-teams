@@ -424,7 +424,12 @@ fn lobby_section(app: &Entity<AppState>, state: &AppState, sections: &PeopleSect
     )
 }
 
-pub fn people_panel(app: &Entity<AppState>, state: &AppState, call: &ActiveCall) -> Option<AnyElement> {
+pub fn people_panel(
+    app: &Entity<AppState>,
+    state: &AppState,
+    call: &ActiveCall,
+    scroll: &ScrollHandle,
+) -> Option<AnyElement> {
     call.people_open.then_some(())?;
     let model = &call.model;
     let sections = people_sections(model);
@@ -443,7 +448,7 @@ pub fn people_panel(app: &Entity<AppState>, state: &AppState, call: &ActiveCall)
         .min_h_0()
         .w_full()
         .overflow_y_scrollbar()
-        .track_scroll(&call.people_scroll)
+        .track_scroll(scroll)
         .pb(px(12.))
         .children(model.can_admit().then(|| lobby_section(app, state, &sections)).flatten())
         .when(!sections.hands.is_empty(), |list| {
@@ -473,7 +478,7 @@ pub fn people_panel(app: &Entity<AppState>, state: &AppState, call: &ActiveCall)
             .overflow_hidden()
             .bg(theme::surface())
             .child(panel_header(app, model, sections.count))
-            .child(with_top_edge(body, &call.people_scroll, PEOPLE_SCROLL_DIVIDER))
+            .child(with_top_edge(body, scroll, PEOPLE_SCROLL_DIVIDER))
             .into_any_element(),
     )
 }
