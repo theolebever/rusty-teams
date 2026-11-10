@@ -247,21 +247,25 @@ impl Session {
         .to_string()
     }
 
+    /// The lock only guards connecting: calls share the connection and run side by side,
+    /// so opening a chat does not queue behind avatar or sidebar fetches in the same tab.
     pub(crate) async fn evaluate_in(&self, app: App, expression: &str) -> Result<Option<Value>> {
-        let mut slot = self.tabs[&app].lock().await;
-        if slot.is_none() {
-            let Some((control, _)) = self.transport.open(app, false).await? else {
-                return Ok(None);
-            };
-            // The WebView2 host sets the UA before its first navigation; a debug-port Chrome
-            // only gets it here, so set it again before any fetch runs in this tab.
-            control.set_user_agent().await?;
-            *slot = Some(control);
-        }
-        let control = slot.as_ref().expect("connection set above");
+        let control = {
+            let mut slot = self.tabs[&app].lock().await;
+            if slot.is_none() {
+                let Some((control, _)) = self.transport.open(app, false).await? else {
+                    return Ok(None);
+                };
+                // The WebView2 host sets the UA before its first navigation; a debug-port Chrome
+                // only gets it here, so set it again before any fetch runs in this tab.
+                control.set_user_agent().await?;
+                *slot = Some(control);
+            }
+            slot.clone().expect("connection set above")
+        };
         let outcome = control.evaluate_within(expression, self.config.evaluate_timeout).await;
         if outcome.is_err() {
-            *slot = None;
+            *self.tabs[&app].lock().await = None;
         }
         outcome.map(Some)
     }
@@ -353,6 +357,59 @@ mod tests {
         assert_eq!(*recorder.holds.lock().unwrap(), vec![(App::Teams, true)]);
         drop(hold);
         assert_eq!(*recorder.holds.lock().unwrap(), vec![(App::Teams, true), (App::Teams, false)]);
+    }
+
+    struct OneTab(StdMutex<Option<TabControl>>);
+
+    impl Transport for OneTab {
+        fn check(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn open(&self, _app: App, _with_events: bool) -> BoxFuture<'_, Result<Option<OpenedTab>>> {
+            let control = self.0.lock().unwrap().clone();
+            Box::pin(async move { Ok(control.map(|control| (control, None))) })
+        }
+
+        fn wake(&self, _app: App) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn diagnose(&self) -> BoxFuture<'_, Result<Diagnosis>> {
+            Box::pin(async { Ok(Diagnosis::default()) })
+        }
+
+        fn hold(&self, _app: App, _held: bool) {}
+    }
+
+    #[tokio::test]
+    async fn evaluations_in_one_tab_run_side_by_side() {
+        let channel = crate::TabChannel::new(false);
+        let mut commands = channel.commands;
+        // Answers the evaluations only once two are waiting: a serialized tab never gets there.
+        tokio::spawn(async move {
+            let mut waiting = Vec::new();
+            while let Some(command) = commands.recv().await {
+                if command.method != "Runtime.evaluate" {
+                    command.respond(Ok(json!({})));
+                    continue;
+                }
+                waiting.push(command);
+                if waiting.len() == 2 {
+                    for command in waiting.drain(..) {
+                        command.respond(Ok(json!({"result": {"value": 1}})));
+                    }
+                }
+            }
+        });
+        let transport = Arc::new(OneTab(StdMutex::new(Some(channel.control))));
+        let session = Session::with_transport(transport, SessionConfig::default()).await.unwrap();
+        let both = async {
+            tokio::join!(session.evaluate_in(App::Teams, "1"), session.evaluate_in(App::Teams, "1"))
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), both).await.expect("calls were serialized");
+        assert_eq!(first.unwrap(), Some(json!(1)));
+        assert_eq!(second.unwrap(), Some(json!(1)));
     }
 
     #[test]
