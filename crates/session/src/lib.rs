@@ -10,7 +10,10 @@ mod transport;
 
 pub use app::{App, Target, find_app_tab, has_login_tab, is_login_url};
 pub use error::{Error, Result};
-pub use events::{TabChannel, TabCommand, TabControl, TabEvent, TabEvents};
+pub use events::{
+    TabChannel, TabCommand, TabControl, TabEvent, TabEvents, USER_AGENT_OVERRIDE_METHOD,
+    user_agent_override,
+};
 pub use page_script::token_acquirer_script;
 pub use request::{ApiResponse, AugloopExchange, AugloopStage, BodyToken, Method, Request, SignalrExchange};
 pub use scope::{GRAPH, IC3, NestedApp, OUTLOOK, PRESENCE, SPACES, Scope};

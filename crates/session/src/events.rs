@@ -13,6 +13,34 @@ use crate::error::{Error, Result};
 
 const EVALUATE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// User-Agent reported to the web apps on every request, sign-in pages included.
+/// Chrome major must match `MOBILE_CHROME_MAJOR`, which drives the client-hint brands.
+const MOBILE_USER_AGENT: &str =
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+const MOBILE_CHROME_MAJOR: &str = "152";
+pub const USER_AGENT_OVERRIDE_METHOD: &str = "Network.setUserAgentOverride";
+
+/// Parameters for `Network.setUserAgentOverride`. Setting `userAgentMetadata` keeps
+/// Sec-CH-UA-Platform and Sec-CH-UA-Mobile consistent with the UA string; the
+/// `--user-agent` launch flag alone leaves them at the real OS.
+pub fn user_agent_override() -> Value {
+    json!({
+        "userAgent": MOBILE_USER_AGENT,
+        "userAgentMetadata": {
+            "brands": [
+                {"brand": "Chromium", "version": MOBILE_CHROME_MAJOR},
+                {"brand": "Google Chrome", "version": MOBILE_CHROME_MAJOR},
+                {"brand": "Not.A/Brand", "version": "24"},
+            ],
+            "platform": "Android",
+            "platformVersion": "10",
+            "architecture": "",
+            "model": "K",
+            "mobile": true,
+        },
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabEvent {
     pub method: String,
@@ -111,31 +139,11 @@ impl TabControl {
         Ok(())
     }
 
-    /// Report a fixed User-Agent plus matching client hints for every request in this tab.
-    /// Setting `userAgentMetadata` keeps Sec-CH-UA-Platform and Sec-CH-UA-Mobile consistent
-    /// with the UA string; the `--user-agent` launch flag alone leaves them at the real OS.
-    pub async fn set_user_agent(&self, user_agent: &str, chrome_major: &str) -> Result<()> {
-        let brands = json!([
-            {"brand": "Chromium", "version": chrome_major},
-            {"brand": "Google Chrome", "version": chrome_major},
-            {"brand": "Not.A/Brand", "version": "24"},
-        ]);
-        self.call(
-            "Network.setUserAgentOverride",
-            json!({
-                "userAgent": user_agent,
-                "userAgentMetadata": {
-                    "brands": brands,
-                    "platform": "Android",
-                    "platformVersion": "10",
-                    "architecture": "",
-                    "model": "K",
-                    "mobile": true,
-                },
-            }),
-        )
-        .await
-        .map(drop)
+    /// Report the mobile User-Agent plus matching client hints for every request in this tab.
+    pub async fn set_user_agent(&self) -> Result<()> {
+        self.call(USER_AGENT_OVERRIDE_METHOD, user_agent_override())
+            .await
+            .map(drop)
     }
 
     pub async fn add_binding(&self, name: &str) -> Result<()> {
@@ -271,6 +279,20 @@ fn answer_of(frame: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_agent_override_keeps_client_hints_in_line_with_the_ua() {
+        let params = user_agent_override();
+        let user_agent = params["userAgent"].as_str().unwrap();
+        assert!(user_agent.contains("Android 10"));
+        assert!(user_agent.contains(&format!("Chrome/{MOBILE_CHROME_MAJOR}.")));
+        let metadata = &params["userAgentMetadata"];
+        assert_eq!(metadata["platform"], "Android");
+        assert_eq!(metadata["mobile"], true);
+        assert!(metadata["brands"].as_array().unwrap().iter().any(|brand| {
+            brand["brand"] == "Google Chrome" && brand["version"] == MOBILE_CHROME_MAJOR
+        }));
+    }
 
     #[test]
     fn binding_payload_matches_name_only() {

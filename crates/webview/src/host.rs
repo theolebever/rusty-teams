@@ -264,11 +264,27 @@ fn create_view(
     watch_loads(&webview, app)?;
     watch_failures(&webview, app)?;
     forward_events(&webview, app)?;
-    unsafe { webview.Navigate(&HSTRING::from(app.start_url())) }?;
+    navigate_with_mobile_user_agent(&webview, app)?;
     Ok(View {
         controller,
         webview,
     })
+}
+
+// The override must land before the first request, sign-in redirects included, so the
+// start page is only loaded once the DevTools call has completed (or failed).
+fn navigate_with_mobile_user_agent(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
+    let target = webview.clone();
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |_, _| {
+        unsafe { target.Navigate(&HSTRING::from(app.start_url())) }
+    }));
+    unsafe {
+        webview.CallDevToolsProtocolMethod(
+            &HSTRING::from(session::USER_AGENT_OVERRIDE_METHOD),
+            &HSTRING::from(session::user_agent_override().to_string()),
+            &handler,
+        )
+    }
 }
 
 fn watch_source(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
