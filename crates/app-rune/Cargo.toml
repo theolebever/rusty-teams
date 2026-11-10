@@ -1,0 +1,17 @@
+[package]
+name = "app-rune"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rusty-teams-rune"
+path = "src/main.rs"
+
+[dependencies]
+app-state.workspace = true
+rune = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
+session.workspace = true
+store.workspace = true
+teams-core.workspace = true
