@@ -178,26 +178,30 @@ impl MediaState {
     }
 }
 
-pub fn attachments<A: Actions + 'static>(s: &UiState<A>, target: &SendTarget) -> El {
+/// Opens the file picker for `target`; the chosen file joins that draft's attachments.
+pub fn open_picker<A: Actions + 'static>(target: &SendTarget) -> impl Fn(&mut UiState<A>, &mut Tx) + 'static {
     let select_target = target.clone();
-    let mut body = col().key("attachments").w_full().gap(4.0)
-        .child(row().key("attach-file").padding(6.0).on_press_tx(move |_: &mut UiState<A>, tx| {
-            let target = select_target.clone();
-            tx.open_file(FileDialogOptions::default(), move |s: &mut UiState<A>, result, _| {
-                if s.read_only { return; }
-                match result {
-                    Ok(Some(path)) => {
-                        let pending = s.media.attachments.entry(target.clone()).or_default();
-                        if pending.iter().any(|file| file.path.as_ref() == Some(&path)) { return; }
-                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        pending.push(Attachment { path: Some(path.clone()), name, reference: None, uploaded: None, error: None });
-                        s.actions.upload_file(target, path);
-                    }
-                    Ok(None) => {},
-                    Err(error) => s.status = error.to_string(),
+    move |_: &mut UiState<A>, tx: &mut Tx| {
+        let target = select_target.clone();
+        tx.open_file(FileDialogOptions::default(), move |s: &mut UiState<A>, result, _| {
+            if s.read_only { return; }
+            match result {
+                Ok(Some(path)) => {
+                    let pending = s.media.attachments.entry(target.clone()).or_default();
+                    if pending.iter().any(|file| file.path.as_ref() == Some(&path)) { return; }
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    pending.push(Attachment { path: Some(path.clone()), name, reference: None, uploaded: None, error: None });
+                    s.actions.upload_file(target, path);
                 }
-            });
-        }).child(text("Attach file")));
+                Ok(None) => {},
+                Err(error) => s.status = error.to_string(),
+            }
+        });
+    }
+}
+
+pub fn attachments<A: Actions + 'static>(s: &UiState<A>, target: &SendTarget) -> El {
+    let mut body = col().key("attachments").w_full().gap(4.0);
     for (index, file) in s.media.attachments.get(target).into_iter().flatten().enumerate() {
         let target = target.clone();
         let label = match (&file.reference, &file.error) {

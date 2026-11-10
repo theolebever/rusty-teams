@@ -18,6 +18,7 @@ mod teams;
 mod theme;
 mod types;
 mod ui;
+mod view_composer;
 
 use std::sync::OnceLock;
 

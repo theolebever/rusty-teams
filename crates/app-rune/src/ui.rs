@@ -8,12 +8,11 @@ use rune::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-const PURPLE: &str = "#5B5FC7";
 pub(crate) const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
 pub(crate) const BUBBLE: &str = "#F5F5F5";
 pub(crate) const HOVER: &str = "#EBEBEB";
-const LINE: &str = "#E0E0E0";
+pub(crate) const LINE: &str = "#E0E0E0";
 pub(crate) const INK: &str = "#242424";
 pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
@@ -169,7 +168,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     tx.scroll_to_bottom_instant("messages");
 }
 
-fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
+pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
     let conversation_id = s.selected.clone()?;
     let channel = s.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == conversation_id);
     Some(SendTarget { conversation_id, thread_root_id: s.thread_root_id.clone(), channel })
@@ -189,7 +188,7 @@ fn restore_draft<A: Actions>(s: &mut UiState<A>) {
     }
 }
 
-fn select_thread<A: Actions>(s: &mut UiState<A>, root: Option<String>) {
+pub(crate) fn select_thread<A: Actions>(s: &mut UiState<A>, root: Option<String>) {
     save_draft(s);
     s.thread_root_id = root;
     if let (Some(conversation), Some(root)) = (&s.selected, &s.thread_root_id) {
@@ -206,7 +205,7 @@ fn join_draft(failed: &str, current: &str) -> String {
     }
 }
 
-fn send<A: Actions>(s: &mut UiState<A>) {
+pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     let Some(target) = active_target(s) else { return };
     let text = s.composer.text.trim().to_owned();
     let files = s.media.files(&target);
@@ -438,7 +437,7 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .child(text("Clear").font(ts(12.0, 400.0)).color(c(INK)))))
         .child(el().h(1.0).w_full().fill(c(LINE)))
         .child(message_list(s))
-        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { composer(s) })
+        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s) })
 }
 
 fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -527,57 +526,6 @@ fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
             }).child(text("Reply in thread").font(ts(12.0, 600.0)).color(c(INK))));
     }
     result
-}
-
-fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let field = text_input(&s.composer, ts(14.0, 400.0))
-        .key("composer")
-        .label("Message")
-        .placeholder("Type a message", c(MUTED))
-        .color(c(INK))
-        .w_full()
-        .on_edit(|s: &mut UiState<A>| &mut s.composer)
-        .on_submit(|s: &mut UiState<A>, _tx: &mut Tx| send(s));
-    let send_button = row()
-        .key("send")
-        .h(30.0)
-        .px(14.0)
-        .radius(15.0)
-        .fill(c(PURPLE))
-        .center()
-        .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
-            send(s);
-            tx.focus("composer", false);
-        })
-        .child(text("Send").font(ts(13.0, 600.0)).color(rune::color::hex(WHITE).expect("white")));
-    col()
-        .w_full()
-        .px(16.0)
-        .pt(8.0)
-        .pb(12.0)
-        .gap(6.0)
-        .children(active_target(s).map(|target| crate::media::attachments(s, &target)))
-        .children(s.thread_root_id.as_ref().map(|_| row().key("close-reply").h(28.0).px(8.0).hover(c(HOVER))
-            .on_press_tx(|s: &mut UiState<A>, _| select_thread(s, None))
-            .child(text("Replying in thread · Close").font(ts(12.0, 600.0)).color(c(INK)))))
-        .children(s.send_error.as_ref().map(|e| {
-            text(e.clone())
-                .key("send-error")
-                .font(ts(12.0, 400.0))
-                .color(c(RED))
-                .wrap()
-        }))
-        .child(
-            col()
-                .w_full()
-                .padding(8.0)
-                .gap(6.0)
-                .radius(8.0)
-                .fill(c(WHITE))
-                .border(1.0, c(LINE))
-                .child(auto_grow(field, 1, 8))
-                .child(row().w_full().justify_end().child(send_button)),
-        )
 }
 
 #[cfg(test)]
