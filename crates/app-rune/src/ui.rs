@@ -19,7 +19,6 @@ pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
 const WHITE: &str = "#FFFFFF";
 
-const CHAT_ROW_H: f32 = 56.0;
 const MESSAGE_ROW_H: f32 = 64.0;
 
 pub(crate) fn c(s: &str) -> Color {
@@ -43,6 +42,7 @@ pub struct UiState<A: Actions> {
     pub selected: Option<String>,
     pub teams: Vec<TeamRow>,
     pub expanded_teams: Vec<String>,
+    pub chatlist: crate::view_chatlist::ChatListState,
     /// Messages of `selected`, oldest first.
     pub messages: Vec<MessageRow>,
     pub send_error: Option<String>,
@@ -72,6 +72,7 @@ impl<A: Actions> UiState<A> {
             selected: None,
             teams: Vec::new(),
             expanded_teams: Vec::new(),
+            chatlist: Default::default(),
             messages: Vec::new(),
             send_error: None,
             composer: TextEdit::new(""),
@@ -233,153 +234,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
                 .min_h(0.0)
                 .w_full()
                 .child(crate::view_chrome::rail(s))
-                .child(if s.screens.screen == crate::screens::Screen::Chat { row().grow(1.0).h_full().child(chat_pane(s)).child(conversation(s)) } else { crate::screens::view(s) }),
+                .child(if s.screens.screen == crate::screens::Screen::Chat { row().grow(1.0).h_full().child(crate::view_chatlist::pane(s)).child(conversation(s)) } else { crate::screens::view(s) }),
         )
-}
-
-fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let ids: Vec<&str> = s.chats.iter().map(|ch| ch.id.as_str()).collect();
-    let searching = s.global_search.results.is_some();
-    let rows = col()
-        .key("chat-rows")
-        .w_full()
-        .px(8.0)
-        .pb(8.0)
-        .growth(GrowthSpec::default())
-        .virtual_rows(
-            s.chats.len(),
-            CHAT_ROW_H + 2.0,
-            |s: &UiState<A>, i| Cow::Owned(format!("chat-{}", s.chats[i].id)),
-            |s: &UiState<A>, i| chat_row(s, i),
-        )
-        .virtual_rows_version((ids, crate::theme::version()));
-    col()
-        .key("chats")
-        .w(320.0)
-        .h_full()
-        .min_h(0.0)
-        .fill(c(LIST))
-        .child(
-            row().w_full().h(32.0).px(16.0).center_y().child(
-                text(s.status.clone())
-                    .font(ts(12.0, 400.0))
-                    .color(c(MUTED))
-                    .truncate()
-                    .grow(1.0)
-                    .min_w(0.0),
-            ),
-        )
-        .child(crate::search::search_box(s))
-        .child(
-            col()
-                .key("chat-list")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                // Rune: a virtual/growth stack must be the last child of its scroll viewport.
-                .child(if searching { el() } else { team_list(s) })
-                .child(if searching { crate::search::results_list(s) } else { rows }),
-        )
-}
-
-fn team_list<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let mut list = col().key("teams").w_full().px(8.0).pb(8.0);
-    for team in &s.teams {
-        let expanded = s.expanded_teams.contains(&team.id);
-        let id = team.id.clone();
-        list = list.child(
-            row()
-                .key(format!("team-{}", team.id))
-                .w_full()
-                .h(36.0)
-                .px(10.0)
-                .center_y()
-                .hover(c(HOVER))
-                .on_press(move |s: &mut UiState<A>| {
-                    if let Some(index) = s.expanded_teams.iter().position(|item| item == &id) {
-                        s.expanded_teams.remove(index);
-                    } else {
-                        s.expanded_teams.push(id.clone());
-                    }
-                })
-                .child(
-                    text(format!(
-                        "{}  {}",
-                        if expanded { "▾" } else { "▸" },
-                        team.name
-                    ))
-                    .font(ts(14.0, 600.0))
-                    .color(c(INK))
-                    .truncate(),
-                ),
-        );
-        if expanded {
-            for channel in &team.channels {
-                let id = channel.id.clone();
-                let selected = s.selected.as_deref() == Some(channel.id.as_str());
-                list = list.child(
-                    row()
-                        .key(format!("channel-{}", channel.id))
-                        .w_full()
-                        .h(34.0)
-                        .px(28.0)
-                        .center_y()
-                        .radius(8.0)
-                        .fill(c(if selected { WHITE } else { LIST }))
-                        .hover(c(HOVER))
-                        .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| open_chat(s, &id, tx))
-                        .child(
-                            text(format!("# {}", channel.name))
-                                .font(ts(14.0, if channel.unread { 700.0 } else { 400.0 }))
-                                .color(c(INK))
-                                .truncate(),
-                        ),
-                );
-            }
-        }
-    }
-    list
-}
-
-pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
-    let ch = &s.chats[i];
-    let selected = s.selected.as_deref() == Some(ch.id.as_str());
-    let id = ch.id.clone();
-    let title_weight = if ch.unread { 700.0 } else { 400.0 };
-    let line = row()
-        .w_full()
-        .gap(6.0)
-        .center_y()
-        .child(
-            text(ch.title.clone())
-                .font(ts(14.0, title_weight))
-                .color(c(INK))
-                .truncate()
-                .grow(1.0)
-                .min_w(0.0),
-        )
-        .child(text(ch.when.clone()).font(ts(12.0, 400.0)).color(c(MUTED)));
-    let card = col()
-        .w_full()
-        .h(CHAT_ROW_H)
-        .px(10.0)
-        .py(8.0)
-        .gap(2.0)
-        .radius(8.0)
-        .fill(c(if selected { WHITE } else { LIST }))
-        .hover(c(HOVER))
-        .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| open_chat(s, &id, tx))
-        .child(line)
-        .child(
-            text(ch.preview.clone())
-                .font(ts(13.0, 400.0))
-                .color(c(MUTED))
-                .truncate(),
-        );
-    col().w_full().pb(2.0).child(card)
 }
 
 fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
