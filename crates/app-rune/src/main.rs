@@ -1,52 +1,113 @@
-//! Rune shell next to the GPUI app: one window, one label, real backend crates linked.
+//! Rusty Teams on Rune: chat list, conversation and composer on the real backend.
+//! Flags: `--database <path>`, `--no-sso`, `--demo` (sample data, no backend).
 
+mod bridge;
+mod types;
+mod ui;
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use bridge::Bridge;
 use rune::*;
+use types::{Actions, ChatRow, MessageRow, Update};
+use ui::UiState;
 
-struct State {
-    label: String,
+const TITLE: &str = "Rusty Teams";
+const SIZE: (f32, f32) = (1100.0, 700.0);
+
+/// `init` takes no arguments and runs before `setup` hands out the waker, so both go through statics.
+static WAKER: OnceLock<Waker> = OnceLock::new();
+
+struct Arguments {
+    database: Option<PathBuf>,
+    no_sso: bool,
+    demo: bool,
 }
 
-impl State {
-    fn new() -> State {
-        State { label: label() }
+fn arguments() -> Arguments {
+    let mut parsed = Arguments { database: None, no_sso: false, demo: false };
+    let mut input = std::env::args().skip(1);
+    while let Some(argument) = input.next() {
+        match argument.as_str() {
+            "--database" => parsed.database = input.next().map(PathBuf::from),
+            "--no-sso" => parsed.no_sso = true,
+            "--demo" => parsed.demo = true,
+            _ => {}
+        }
     }
+    parsed
 }
 
-/// Runs a few calls through store, teams-core, app-state and session so the binary links them.
-fn label() -> String {
-    let store = store::Store::open_in_memory().expect("in-memory store");
-    let ids = teams_core::default_reactions(&store);
-    let glyphs = state::default_reactions::quick_reaction_glyphs(&ids, teams_core::skin_tone(&store));
-    let login = session::is_login_url("https://login.microsoftonline.com/");
-    format!("Rusty Teams on Rune {} (login url check: {login})", glyphs.concat())
+fn init() -> UiState<Bridge> {
+    let arguments = arguments();
+    let bridge = Bridge::start(arguments.database, arguments.no_sso, || {
+        if let Some(wake) = WAKER.get() {
+            wake();
+        }
+    });
+    UiState::new(bridge)
 }
 
-fn view(s: &State, _cx: &mut Cx<State>) -> El {
-    col()
-        .key("root")
-        .w_full()
-        .h_full()
-        .justify_center()
-        .items_center()
-        .child(text(s.label.clone()).key("label"))
+fn setup(_: &mut UiState<Bridge>, wake: Waker) {
+    let _ = WAKER.set(wake.clone());
+    // Updates may have been queued before the waker existed.
+    wake();
+}
+
+fn poll(s: &mut UiState<Bridge>, _now: f64, _: &mut Tx) -> bool {
+    let updates = s.actions.poll();
+    let changed = !updates.is_empty();
+    for update in updates {
+        s.apply(update);
+    }
+    changed
 }
 
 fn main() {
-    App::new(AppSpec::new("Rusty Teams", (800.0, 600.0), State::new, view)).run();
+    if arguments().demo {
+        App::new(AppSpec::new(TITLE, SIZE, demo_init, ui::view::<DemoActions>)).run();
+        return;
+    }
+    App::new(AppSpec {
+        setup: Some(setup),
+        poll: Some(poll),
+        ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
+    })
+    .run();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rune::{Env, Runtime};
+/// Demo only: fake actions and sample data, so the view can be looked at without a backend.
+struct DemoActions;
 
-    #[test]
-    fn headless_frame_shows_the_label() {
-        let env = Env { system_dark: false, scale: 1.0 };
-        let mut rt = Runtime::new(State::new(), view, (800.0, 600.0), env);
-        rt.frame(0.0);
-        assert!(rt.find("label").is_some());
-        assert!(rt.state.label.starts_with("Rusty Teams on Rune "));
-        assert!(rt.state.label.ends_with("(login url check: true)"));
-    }
+impl Actions for DemoActions {
+    fn open(&self, _conversation_id: &str) {}
+    fn send(&self, _conversation_id: &str, _text: String) {}
+}
+
+fn demo_init() -> UiState<DemoActions> {
+    let mut s = UiState::new(DemoActions);
+    s.apply(Update::Status("Online (demo data)".into()));
+    let chats = (0..40)
+        .map(|i| ChatRow {
+            id: format!("c{i}"),
+            title: format!("Chat {i} with a fairly long display name"),
+            preview: "Ada: the preview is one line and gets truncated when it is too long".into(),
+            unread: i % 5 == 0,
+            when: format!("{:02}:{:02}", 9 + i % 12, i * 7 % 60),
+        })
+        .collect();
+    s.apply(Update::Chats(chats));
+    s.selected = Some("c0".into());
+    let rows = (0..60)
+        .map(|i| MessageRow {
+            id: format!("m{i}"),
+            sender: if i % 3 == 0 { "Me".into() } else { "Ada Example".into() },
+            when: format!("09:{:02}", i % 60),
+            text: format!("Message {i}. Lorem ipsum dolor sit amet, consectetur adipiscing elit.\nSecond line."),
+            mine: i % 3 == 0,
+        })
+        .collect();
+    s.apply(Update::Messages { conversation_id: "c0".into(), rows });
+    s
 }

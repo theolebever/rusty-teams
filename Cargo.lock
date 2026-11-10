@@ -471,11 +471,17 @@ dependencies = [
 name = "app-rune"
 version = "0.2.0"
 dependencies = [
+ "app-base",
  "app-state",
+ "chrono",
+ "directories",
  "rune",
+ "scraper",
  "session",
  "store",
  "teams-core",
+ "tokio",
+ "webview",
 ]
 
 [[package]]
