@@ -8,7 +8,8 @@ use rune::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-const PURPLE: &str = "#5B5FC7";
+pub(crate) const PURPLE: &str = "#5B5FC7";
+pub(crate) const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
 pub(crate) const HOVER: &str = "#EBEBEB";
 pub(crate) const LINE: &str = "#E0E0E0";
@@ -218,7 +219,7 @@ fn join_draft(failed: &str, current: &str) -> String {
     }
 }
 
-fn send<A: Actions>(s: &mut UiState<A>) {
+pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     let Some(target) = active_target(s) else { return };
     let text = s.composer.text.trim().to_owned();
     let files = s.media.files(&target);
@@ -273,58 +274,7 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
         .fill(c(WHITE))
         .child(crate::view_header::header(s, id))
         .child(crate::view_messages::message_list(s))
-        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { composer(s) })
-}
-
-fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let field = text_input(&s.composer, ts(14.0, 400.0))
-        .key("composer")
-        .label("Message")
-        .placeholder("Type a message", c(MUTED))
-        .color(c(INK))
-        .w_full()
-        .on_edit(|s: &mut UiState<A>| &mut s.composer)
-        .on_submit(|s: &mut UiState<A>, _tx: &mut Tx| send(s));
-    let send_button = row()
-        .key("send")
-        .h(30.0)
-        .px(14.0)
-        .radius(15.0)
-        .fill(c(PURPLE))
-        .center()
-        .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
-            send(s);
-            tx.focus("composer", false);
-        })
-        .child(text("Send").font(ts(13.0, 600.0)).color(rune::color::hex(WHITE).expect("white")));
-    col()
-        .w_full()
-        .px(16.0)
-        .pt(8.0)
-        .pb(12.0)
-        .gap(6.0)
-        .children(active_target(s).map(|target| crate::media::attachments(s, &target)))
-        .children(s.thread_root_id.as_ref().map(|_| row().key("close-reply").h(28.0).px(8.0).hover(c(HOVER))
-            .on_press_tx(|s: &mut UiState<A>, _| select_thread(s, None))
-            .child(text("Replying in thread · Close").font(ts(12.0, 600.0)).color(c(INK)))))
-        .children(s.send_error.as_ref().map(|e| {
-            text(e.clone())
-                .key("send-error")
-                .font(ts(12.0, 400.0))
-                .color(c(RED))
-                .wrap()
-        }))
-        .child(
-            col()
-                .w_full()
-                .padding(8.0)
-                .gap(6.0)
-                .radius(8.0)
-                .fill(c(WHITE))
-                .border(1.0, c(LINE))
-                .child(auto_grow(field, 1, 8))
-                .child(row().w_full().justify_end().child(send_button)),
-        )
+        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s) })
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ mod ui;
 mod view_chrome;
 mod view_header;
 mod view_messages;
+mod view_composer;
 
 use std::sync::OnceLock;
 
