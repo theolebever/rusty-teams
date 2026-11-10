@@ -59,18 +59,68 @@ enum Section {
 
 #[derive(Clone)]
 struct Msg {
+    /// Unique within its chat; the virtual row key is `m{id}`.
+    id: u64,
     mine: bool,
     who: &'static str,
     time: &'static str,
     text: String,
     heart: u32,
     file: bool,
+    /// An image attachment, drawn as a 320x180 block.
+    image: bool,
 }
 
 impl Msg {
     fn theirs(who: &'static str, time: &'static str, text: &str) -> Msg {
-        Msg { mine: false, who, time, text: text.into(), heart: 0, file: false }
+        Msg { id: 0, mine: false, who, time, text: text.into(), heart: 0, file: false, image: false }
     }
+}
+
+/// Messages in Marie's chat: `HISTORY` older ones paged in on demand, then the 8 demo messages.
+const HISTORY: usize = 9_992;
+const PAGE: usize = 50;
+const CHATS: usize = 2_000;
+
+/// Older message `n` of Marie's history, generated: short lines, wrapped paragraphs, explicit
+/// line breaks and image blocks, so rows vary in height.
+fn history_msg(n: usize) -> Msg {
+    const TIMES: [&str; 6] = ["08:12", "08:40", "09:03", "13:25", "15:47", "17:58"];
+    let mine = n % 3 == 0;
+    let text = match n % 10 {
+        0 => format!("IMG_{n:05}.png"),
+        3 | 7 => format!(
+            "Message {n}. A longer note that wraps over several lines in the bubble, so the row is taller than \
+             its estimate: the layout has to measure it as it mounts and keep the reader's row where it was."
+        ),
+        5 => format!("Message {n}\nsecond line\nthird line"),
+        _ => format!("Message {n}"),
+    };
+    Msg {
+        id: n as u64,
+        mine,
+        who: if mine { "You" } else { "Marie Beaudouin" },
+        time: TIMES[n / 4 % TIMES.len()],
+        text,
+        heart: u32::from(n % 13 == 0),
+        file: false,
+        image: n % 10 == 0,
+    }
+}
+
+/// Prepends the next page of older messages. True when a page was loaded.
+fn load_older(chat: &mut Chat) -> bool {
+    if chat.history == 0 {
+        return false;
+    }
+    let n = chat.history.min(PAGE);
+    chat.history -= n;
+    let page: Vec<Msg> = (chat.history..chat.history + n).map(history_msg).collect();
+    chat.msgs.splice(0..0, page);
+    if chat.history == 0 {
+        eprintln!("history fully loaded: {} messages", chat.msgs.len());
+    }
+    true
 }
 
 #[derive(Clone)]
@@ -84,14 +134,31 @@ struct Chat {
     preview: String,
     time: &'static str,
     msgs: Vec<Msg>,
+    /// Older messages not loaded yet.
+    history: usize,
 }
 
 struct State {
+    /// Pinned chats first (`pinned` of them), then recent ones.
     chats: Vec<Chat>,
+    pinned: usize,
     selected: usize,
     collapsed: [bool; 2],
     composer: TextEdit,
     calling: bool,
+    /// First visible message row, from `on_visible_rows`.
+    msg_top: usize,
+    bench: Option<Bench>,
+}
+
+/// `--bench`: the poll hook scrolls the window itself and logs frame intervals.
+#[derive(Default)]
+struct Bench {
+    phase: u8,
+    frames_in_phase: u32,
+    last: Option<f64>,
+    start: f64,
+    gaps: Vec<f64>,
 }
 
 impl State {
@@ -123,10 +190,17 @@ impl State {
                 preview: preview.into(),
                 time,
                 msgs: vec![Msg::theirs(name, time, preview)],
+                history: 0,
             })
             .collect();
-        chats[7].msgs = marie_messages();
-        State { chats, selected: 7, collapsed: [false; 2], composer: TextEdit::new(""), calling: false }
+        chats.extend((rows.len()..CHATS).map(generated_chat));
+        let marie = &mut chats[7];
+        marie.msgs = marie_messages();
+        marie.history = HISTORY;
+        load_older(marie);
+        let pinned = chats.iter().take_while(|ch| ch.section == Section::Pinned).count();
+        let bench = std::env::args().any(|a| a == "--bench").then(Bench::default);
+        State { chats, pinned, selected: 7, collapsed: [false; 2], composer: TextEdit::new(""), calling: false, msg_top: 0, bench }
     }
 
     fn select(&mut self, i: usize) {
@@ -136,10 +210,35 @@ impl State {
     }
 }
 
+/// Recent chat `i` of the 2,000, beyond the 12 hand-written ones.
+fn generated_chat(i: usize) -> Chat {
+    const FIRST: [&str; 8] = ["Alex", "Bea", "Chen", "Dana", "Eli", "Femi", "Gus", "Hana"];
+    const LAST: [&str; 8] = ["Adler", "Brandt", "Costa", "Diaz", "Engel", "Fischer", "Gomez", "Ito"];
+    const TINTS: [&str; 4] = ["#C7E0F4", "#D4E8D0", "#F4D6E8", "#FCE7B2"];
+    const DAYS: [&str; 5] = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+    let (first, last) = (FIRST[i % 8], LAST[i / 8 % 8]);
+    // ponytail: leaked strings keep `Chat`'s `&'static str` fields; a real port owns `String`s.
+    let name: &'static str = Box::leak(format!("{first} {last} {i}").into_boxed_str());
+    let initials: &'static str = Box::leak(format!("{}{}", &first[..1], &last[..1]).into_boxed_str());
+    let preview = format!("Last message in chat {i}");
+    Chat {
+        name,
+        initials,
+        tint: TINTS[i % 4],
+        section: Section::Recent,
+        online: i % 3 == 0,
+        unread: i % 17 == 0,
+        msgs: vec![Msg::theirs(name, DAYS[i % 5], &preview)],
+        preview,
+        time: DAYS[i % 5],
+        history: 0,
+    }
+}
+
 fn marie_messages() -> Vec<Msg> {
     let them = |time: &'static str, text: &str| Msg::theirs("Marie Beaudouin", time, text);
-    let me = |time: &'static str, text: &str| Msg { mine: true, who: "You", time, text: text.into(), heart: 0, file: false };
-    vec![
+    let me = |time: &'static str, text: &str| Msg { mine: true, who: "You", ..Msg::theirs("", time, text) };
+    let mut msgs = vec![
         them("09:02", "Hi! Did you get a chance to look at the new onboarding flow?"),
         them("09:02", "I left some comments on the mockups."),
         me("09:10", "Yes, I went through them this morning. Most of them look good."),
@@ -148,7 +247,11 @@ fn marie_messages() -> Vec<Msg> {
         them("10:31", "Here is the latest version of the brief."),
         Msg { file: true, ..them("10:31", "Design Brief.docx") },
         me("10:36", "Thanks, I'll read it after lunch."),
-    ]
+    ];
+    for (k, m) in msgs.iter_mut().enumerate() {
+        m.id = (HISTORY + k) as u64;
+    }
+    msgs
 }
 
 fn send(s: &mut State, tx: &mut Tx) {
@@ -158,7 +261,8 @@ fn send(s: &mut State, tx: &mut Tx) {
     }
     s.composer = TextEdit::new("");
     let chat = &mut s.chats[s.selected];
-    chat.msgs.push(Msg { mine: true, who: "You", time: NOW, text: body.clone(), heart: 0, file: false });
+    let id = chat.msgs.last().map_or(0, |m| m.id + 1);
+    chat.msgs.push(Msg { id, mine: true, who: "You", ..Msg::theirs("", NOW, &body) });
     chat.preview = format!("You: {body}");
     chat.time = NOW;
     tx.scroll_to_bottom("messages");
@@ -290,35 +394,66 @@ fn rail_item(label: &'static str, glyph: &'static Icon, active: bool, badge: Opt
         }))
 }
 
+const SECTIONS: [&str; 2] = ["Pinned", "Recent"];
+
+/// A row of the chat list: a section header or a chat, by index into `State::chats`.
+enum ListRow {
+    Header(usize),
+    Chat(usize),
+}
+
+/// The flat chat list: Pinned header, pinned chats, Recent header, recent chats; collapsed
+/// sections keep only their header.
+fn list_row(s: &State, i: usize) -> ListRow {
+    let pinned = if s.collapsed[0] { 0 } else { s.pinned };
+    match i {
+        0 => ListRow::Header(0),
+        i if i <= pinned => ListRow::Chat(i - 1),
+        i if i == pinned + 1 => ListRow::Header(1),
+        i => ListRow::Chat(s.pinned + i - pinned - 2),
+    }
+}
+
+fn list_len(s: &State) -> usize {
+    let pinned = if s.collapsed[0] { 0 } else { s.pinned };
+    let recent = if s.collapsed[1] { 0 } else { s.chats.len() - s.pinned };
+    2 + pinned + recent
+}
+
+fn section_header(idx: usize, collapsed: bool) -> El {
+    row()
+        .w_full()
+        .h(28.0)
+        .px(8.0)
+        .gap(4.0)
+        .center_y()
+        .radius(4.0)
+        .hover(c("#EBEBEB"))
+        .on_press(move |s: &mut State| s.collapsed[idx] = !s.collapsed[idx])
+        .child(icon(if collapsed { &CHEVRON_RIGHT } else { &CHEVRON_DOWN }, 12.0).color(c(MUTED)))
+        .child(text(SECTIONS[idx]).font(ts(12.0, 600.0)).color(c(MUTED)))
+}
+
 fn chat_list(s: &State) -> El {
-    let section = |idx: usize, label: &'static str, which: Section| -> Vec<El> {
-        let collapsed = s.collapsed[idx];
-        let header = row()
-            .key(format!("section-{label}"))
-            .w_full()
-            .h(28.0)
-            .px(8.0)
-            .gap(4.0)
-            .center_y()
-            .radius(4.0)
-            .hover(c("#EBEBEB"))
-            .on_press(move |s: &mut State| s.collapsed[idx] = !s.collapsed[idx])
-            .child(icon(if collapsed { &CHEVRON_RIGHT } else { &CHEVRON_DOWN }, 12.0).color(c(MUTED)))
-            .child(text(label).font(ts(12.0, 600.0)).color(c(MUTED)));
-        let mut out = vec![header];
-        if !collapsed {
-            out.extend(
-                s.chats
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, ch)| ch.section == which)
-                    .map(|(i, ch)| chat_row(i, ch, i == s.selected)),
-            );
-        }
-        out
-    };
-    let mut rows = section(0, "Pinned", Section::Pinned);
-    rows.extend(section(1, "Recent", Section::Recent));
+    let rows = col()
+        .key("chat-rows")
+        .w_full()
+        .px(8.0)
+        .pb(8.0)
+        .growth(GrowthSpec::default())
+        .virtual_rows(
+            list_len(s),
+            58.0,
+            |s: &State, i| match list_row(s, i) {
+                ListRow::Header(idx) => format!("section-{}", SECTIONS[idx]).into(),
+                ListRow::Chat(i) => format!("chat-{i}").into(),
+            },
+            |s: &State, i| match list_row(s, i) {
+                ListRow::Header(idx) => section_header(idx, s.collapsed[idx]),
+                ListRow::Chat(i) => col().w_full().pb(2.0).child(chat_row(i, &s.chats[i], i == s.selected)),
+            },
+        )
+        .virtual_rows_version(s.collapsed);
     col()
         .key("chats")
         .w(320.0)
@@ -342,11 +477,8 @@ fn chat_list(s: &State) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .px(8.0)
-                .pb(8.0)
-                .gap(2.0)
                 .scroll(ScrollSpec { stick_bottom: false })
-                .children(rows),
+                .child(rows),
         )
 }
 
@@ -354,7 +486,6 @@ fn chat_row(i: usize, ch: &Chat, selected: bool) -> El {
     let dot = el().size(6.0, 6.0).radius(3.0).fill(if ch.unread { c(PURPLE) } else { Color::BLACK.alpha(0.0) });
     let name_weight = if ch.unread { 700.0 } else { 400.0 };
     row()
-        .key(format!("chat-{i}"))
         .w_full()
         .h(56.0)
         .px(10.0)
@@ -415,7 +546,7 @@ fn conversation(s: &State) -> El {
         .child(conversation_header(chat))
         .children(s.calling.then(|| call_banner(chat.name)))
         .child(el().h(1.0).w_full().fill(c(LINE)))
-        .child(message_list(chat))
+        .child(message_list(s))
         .child(composer(s))
 }
 
@@ -487,36 +618,54 @@ fn call_banner(name: &str) -> El {
         )
 }
 
-fn message_list(chat: &Chat) -> El {
-    let rows: Vec<El> = chat
-        .msgs
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let header = i
-                .checked_sub(1)
-                .map_or(true, |p| {
-                    let prev = &chat.msgs[p];
-                    prev.mine != m.mine || prev.who != m.who || prev.time != m.time
-                });
-            message(chat, m, header)
-        })
-        .collect();
+/// Message row `i` of the selected chat, with 12 points below it.
+fn message_row(s: &State, i: usize) -> El {
+    let chat = &s.chats[s.selected];
+    let m = &chat.msgs[i];
+    let header = i.checked_sub(1).map_or(true, |p| {
+        let prev = &chat.msgs[p];
+        prev.mine != m.mine || prev.who != m.who || prev.time != m.time
+    });
+    col().w_full().pb(12.0).child(message(chat, m, header))
+}
+
+fn message_list(s: &State) -> El {
+    let chat = &s.chats[s.selected];
+    let rows = col()
+        .key("message-rows")
+        .w_full()
+        .px(20.0)
+        .pt(12.0)
+        .growth(GrowthSpec::default())
+        .virtual_rows(
+            chat.msgs.len(),
+            64.0,
+            |s: &State, i| format!("m{}", s.chats[s.selected].msgs[i].id).into(),
+            message_row,
+        )
+        .virtual_rows_version((s.selected, chat.msgs.first().map(|m| m.id)))
+        .on_visible_rows(|s: &mut State, r| {
+            s.msg_top = r.start;
+            r.start < 10 && load_older(&mut s.chats[s.selected])
+        });
     col()
         .key("messages")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .px(20.0)
-        .py(12.0)
-        .gap(12.0)
-        .justify_end()
         .scroll(ScrollSpec { stick_bottom: true })
-        .children(rows)
+        .child(rows)
 }
 
 fn message(chat: &Chat, m: &Msg, header: bool) -> El {
-    let bubble = if m.file {
+    let bubble = if m.image {
+        col()
+            .size(320.0, 180.0)
+            .radius(8.0)
+            .fill(c("#C9D6E8"))
+            .center()
+            .child(text(m.text.clone()).font(ts(12.0, 400.0)).color(c(MUTED)))
+    } else if m.file {
         row()
             .w(320.0)
             .padding(10.0)
@@ -631,8 +780,53 @@ fn composer(s: &State) -> El {
     )
 }
 
+/// `--bench` in a window: page the conversation up one page (90% of the viewport) per frame
+/// until all 10,000 messages are loaded and the top shows, then 300 frames down the 2,000-chat
+/// list, then print frame intervals and quit. Each frame asks for the next one.
+fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
+    let (top, history) = (s.msg_top, s.chats[s.selected].history);
+    let Some(b) = s.bench.as_mut() else { return false };
+    match b.last {
+        None => b.start = now,
+        Some(last) => b.gaps.push((now - last) * 1000.0),
+    }
+    b.last = Some(now);
+    b.frames_in_phase += 1;
+    match b.phase {
+        0 if history == 0 && top == 0 => next_phase(b, now, "conversation at the top, 10,000 loaded"),
+        0 => tx.scroll_page("messages", -1),
+        1 if b.frames_in_phase > 300 => next_phase(b, now, "chat list"),
+        1 => tx.scroll_page("chat-list", 1),
+        _ => {
+            tx.quit();
+            return false;
+        }
+    }
+    tx.wake_at(now);
+    false
+}
+
+fn next_phase(b: &mut Bench, now: f64, label: &str) {
+    let mut gaps = std::mem::take(&mut b.gaps);
+    gaps.sort_by(f64::total_cmp);
+    let q = |p: f64| gaps.get(((gaps.len().max(1) - 1) as f64 * p) as usize).copied().unwrap_or(0.0);
+    let slow = gaps.iter().filter(|&&g| g > 25.0).count();
+    eprintln!(
+        "bench {label}: {} frames in {:.1} s, interval p50 {:.1} p95 {:.1} p99 {:.1} max {:.1} ms, {slow} over 25 ms",
+        gaps.len(),
+        now - b.start,
+        q(0.5),
+        q(0.95),
+        q(0.99),
+        q(1.0)
+    );
+    b.phase += 1;
+    b.frames_in_phase = 0;
+    b.start = now;
+}
+
 fn main() {
-    App::new(AppSpec::new("Microsoft Teams", (1600.0, 900.0), State::new, view))
+    App::new(AppSpec { poll: Some(poll), ..AppSpec::new("Microsoft Teams", (1600.0, 900.0), State::new, view) })
         .titlebar(Titlebar::new(48.0))
         .run();
 }
@@ -662,5 +856,50 @@ mod tests {
         assert_eq!(rt.state.chats[4].msgs.last().unwrap().text, "Hello there");
         assert_eq!(rt.state.chats[4].preview, "You: Hello there");
         assert!(rt.state.composer.text.is_empty());
+    }
+
+    /// Visible message rows: (key, top y).
+    fn visible_messages(rt: &Runtime<State>) -> Vec<(String, f32)> {
+        rt.elements()
+            .into_iter()
+            .filter(|e| e.visible[3] > 0.0 && e.path.rsplit_once('/').is_some_and(|(p, _)| p.ends_with("/message-rows")))
+            .filter_map(|e| Some((e.key?, e.rect[1])))
+            .collect()
+    }
+
+    #[test]
+    fn older_pages_prepend_without_moving_the_reader_and_reach_10000() {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(State::new(), view, (1600.0, 900.0), env);
+        rt.frame(0.0);
+        assert_eq!(rt.state.chats[7].msgs.len(), 58);
+        assert_eq!(visible_messages(&rt).last().unwrap().0, "m9999", "stuck to the bottom");
+        assert!(rt.state.chats.len() == CHATS && rt.elements().len() < 2_000, "only the window is built");
+
+        // Read a little way up, then a page lands above: the reader's rows stay put.
+        rt.wheel(1100.0, 500.0, 400.0);
+        rt.frame(1.0 / 60.0);
+        let before = visible_messages(&rt);
+        rt.update(|s, _| {
+            load_older(&mut s.chats[7]);
+        });
+        rt.frame(1.0 / 60.0);
+        let after = visible_messages(&rt);
+        assert_eq!(rt.state.chats[7].msgs.len(), 108);
+        for (key, y) in &before {
+            let now = after.iter().find(|(k, _)| k == key).map(|r| r.1);
+            assert!(now.is_some_and(|now| (now - y).abs() < 0.5), "{key} moved from {y} to {now:?}");
+        }
+
+        // Scrolling up pages in the rest, 50 at a time, until the first message shows.
+        for _ in 0..4_000 {
+            rt.wheel(1100.0, 500.0, 600.0);
+            rt.frame(1.0 / 60.0);
+            if rt.state.chats[7].history == 0 && rt.state.msg_top == 0 {
+                break;
+            }
+        }
+        assert_eq!(rt.state.chats[7].msgs.len(), HISTORY + 8, "top row {}, visible {:?}", rt.state.msg_top, visible_messages(&rt));
+        assert_eq!(visible_messages(&rt)[0].0, "m0");
     }
 }
