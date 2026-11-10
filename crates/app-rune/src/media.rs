@@ -305,4 +305,90 @@ mod tests {
         assert!(!state.is_uploading(&reply));
         assert!(state.attachments[&reply][0].uploaded.is_none(), "uncertain delivery must keep the shared file intact");
     }
+
+    #[derive(Default)]
+    struct Recorder {
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Actions for Recorder {
+        fn open(&self, _: &str) {}
+        fn send(&self, _: SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+        fn load_image(&self, image: ImageRef) {
+            self.calls.borrow_mut().push(format!("load {}", image.key()));
+        }
+    }
+
+    fn rt() -> rune::Runtime<UiState<Recorder>> {
+        let env = rune::Env { system_dark: false, scale: 1.0 };
+        let mut rt = rune::Runtime::new(UiState::new(Recorder::default()), crate::ui::view::<Recorder>, (1000.0, 700.0), env);
+        rt.frame(0.0);
+        rt
+    }
+
+    fn click(rt: &mut rune::Runtime<UiState<Recorder>>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    }
+
+    fn message(id: &str, media: Content) -> crate::types::MessageRow {
+        crate::types::MessageRow {
+            id: id.into(),
+            reply_to_id: None,
+            deleted: false,
+            can_delete: false,
+            reactions: vec![],
+            sender: "Ada".into(),
+            when: "14:06".into(),
+            text: "see attached".into(),
+            mine: false,
+            media,
+        }
+    }
+
+    fn show(rt: &mut rune::Runtime<UiState<Recorder>>, row: crate::types::MessageRow) {
+        rt.update(|s, _| {
+            s.selected = Some("chat".into());
+            s.apply(Update::Messages { conversation_id: "chat".into(), rows: vec![row] });
+        });
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn images_load_when_their_chat_opens_and_a_failed_one_retries_on_click() {
+        let mut rt = rt();
+        let image = ImageRef { id: "i".into(), url: "https://example.com/a.png".into(), width: None, height: None, alt: None };
+        show(&mut rt, message("m", Content { images: vec![image.clone()], files: vec![] }));
+        assert_eq!(rt.state.actions.calls.borrow().as_slice(), ["load https://example.com/a.png"]);
+        rt.update(|s, _| s.apply(Update::ImageFailed { key: image.key().into(), error: "offline".into() }));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.actions.calls.borrow().len(), 1, "a failed image is not re-requested on every update");
+        click(&mut rt, "image-m-0");
+        assert_eq!(rt.state.actions.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn file_chips_open_web_links_and_save_only_downloadable_files() {
+        let mut rt = rt();
+        let card = |name: &str, kind, open_url: &str| teams_core::FileCard {
+            name: name.into(),
+            kind,
+            content_type: None,
+            size: None,
+            open_url: open_url.into(),
+        };
+        let files = vec![
+            card("plan.docx", teams_core::FileKind::Word, "https://contoso.sharepoint.com/plan.docx"),
+            card("Loop page", teams_core::FileKind::Loop, "https://loop.microsoft.com/page"),
+            card("tool.exe", teams_core::FileKind::Other, "file:///C:/Windows/notepad.exe"),
+        ];
+        show(&mut rt, message("m", Content { images: vec![], files }));
+        assert!(rt.find("file-open-m-0").is_some() && rt.find("file-save-m-0").is_some());
+        assert!(rt.find("file-open-m-1").is_some(), "loop components open in the web app");
+        assert!(rt.find("file-save-m-1").is_none(), "loop components are not downloadable");
+        assert!(rt.find("file-open-m-2").is_none(), "local paths never get an open action");
+        assert!(rt.find("file-save-m-2").is_none());
+    }
 }
