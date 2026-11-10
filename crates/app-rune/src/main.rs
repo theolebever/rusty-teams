@@ -10,6 +10,7 @@ mod media;
 mod notifications;
 mod reactions;
 mod screens;
+mod search;
 mod settings;
 mod teams;
 mod theme;

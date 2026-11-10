@@ -225,6 +225,13 @@ impl Actions for Bridge {
             Err(error) => self.shared.publish(Update::Status(format!("Search failed: {error}"))),
         }
     }
+    fn search_all(&self, query: &str) {
+        let Some(engine) = self.shared.engine() else { return };
+        match crate::search::run(&engine, query) {
+            Ok(results) => self.shared.publish(Update::GlobalSearch(results)),
+            Err(error) => self.shared.publish(Update::Status(format!("Search failed: {error}"))),
+        }
+    }
     fn upload_file(&self, target: SendTarget, path: PathBuf) { crate::media::upload_file(self.shared.clone(), target, path); }
     fn discard_attachment(&self, uploaded: teams_core::UploadedFile) { crate::media::discard_attachment(self.shared.clone(), uploaded); }
     fn set_appearance(&self, settings: app_backend::appearance::AppearanceSettings) {

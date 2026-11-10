@@ -73,6 +73,8 @@ pub enum Update {
     /// Calendar events of the agenda window (next seven days), raw from the backend.
     Agenda(Vec<chatsvc::CalendarEvent>),
     Search { conversation_id: String, query: String, rows: Vec<MessageRow> },
+    /// Answer to the chat-list search box (`search.rs`).
+    GlobalSearch(crate::search::Results),
     /// Full message list of one conversation, replaces the previous one for that id.
     Messages {
         conversation_id: String,
@@ -95,6 +97,8 @@ pub trait Actions {
     fn load_older(&self, _conversation_id: &str) {}
     fn open_thread(&self, _conversation_id: &str, _root: &str) {}
     fn search(&self, _conversation_id: &str, _query: &str) {}
+    /// Chats matching the query and messages across all cached conversations.
+    fn search_all(&self, _query: &str) {}
     fn react(&self, _conversation_id: &str, _message_id: &str, _reaction: &str, _remove: bool) {}
     fn delete_message(&self, _conversation_id: &str, _message_id: &str) {}
     fn read_only(&self) -> bool { false }

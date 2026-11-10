@@ -49,6 +49,7 @@ pub struct UiState<A: Actions> {
     pub composer: TextEdit,
     search: TextEdit,
     search_results: Option<Vec<MessageRow>>,
+    pub global_search: crate::search::SearchState,
     pub thread_root_id: Option<String>,
     pub picker: crate::reactions::Picker,
     confirm_delete: Option<String>,
@@ -76,6 +77,7 @@ impl<A: Actions> UiState<A> {
             composer: TextEdit::new(""),
             search: TextEdit::new(""),
             search_results: None,
+            global_search: Default::default(),
             thread_root_id: None,
             picker: Default::default(),
             confirm_delete: None,
@@ -116,6 +118,7 @@ impl<A: Actions> UiState<A> {
                     self.search_results = Some(rows);
                 }
             }
+            Update::GlobalSearch(results) => crate::search::apply(&mut self.global_search, results),
             Update::Messages {
                 conversation_id,
                 rows,
@@ -235,6 +238,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
 
 fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
     let ids: Vec<&str> = s.chats.iter().map(|ch| ch.id.as_str()).collect();
+    let searching = s.global_search.results.is_some();
     let rows = col()
         .key("chat-rows")
         .w_full()
@@ -264,6 +268,7 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .min_w(0.0),
             ),
         )
+        .child(crate::search::search_box(s))
         .child(
             col()
                 .key("chat-list")
@@ -274,8 +279,8 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
                     stick_bottom: false,
                 })
                 // Rune: a virtual/growth stack must be the last child of its scroll viewport.
-                .child(team_list(s))
-                .child(rows),
+                .child(if searching { el() } else { team_list(s) })
+                .child(if searching { crate::search::results_list(s) } else { rows }),
         )
 }
 
@@ -338,7 +343,7 @@ fn team_list<A: Actions + 'static>(s: &UiState<A>) -> El {
     list
 }
 
-fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
+pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
     let ch = &s.chats[i];
     let selected = s.selected.as_deref() == Some(ch.id.as_str());
     let id = ch.id.clone();
