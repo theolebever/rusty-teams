@@ -652,9 +652,10 @@ async fn answer_offer(
 ) -> Result<AnsweredMedia> {
     let remote = from_teams_offer(teams_offer)?;
     let description = parse_sdp(&remote.browser_sdp, SdpType::Offer)?;
-    peer.set_remote_description(description)
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
+    peer.set_remote_description(description).await.map_err(|error| {
+        let lines: Vec<String> = remote.lines.iter().map(|line| format!("{:?}{:?}", line.role, line.browser_mids)).collect();
+        Error::Webrtc(format!("{error} (offer lines: {})", lines.join(" ")))
+    })?;
     let camera_mid = main_video_mid(&remote).filter(|_| !matches!(video, AnswerVideo::Reject));
     let kept_share_mids = if matches!(video, AnswerVideo::Reject) { Vec::new() } else { share_mids(&remote) };
     for transceiver in peer.transceivers() {
