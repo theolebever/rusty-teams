@@ -193,6 +193,7 @@ fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .px(20.0)
         .pt(12.0)
         .growth(GrowthSpec::default())
+        .instant_changes()
         .virtual_rows(
             s.messages.len(),
             MESSAGE_ROW_H,
@@ -327,6 +328,16 @@ mod tests {
         rt.state.actions.calls.borrow().clone()
     }
 
+    /// Laid-out rect `[x, y, w, h]` of the built element at `key`.
+    fn rect(rt: &Runtime<UiState<Fake>>, key: &str) -> [f32; 4] {
+        let suffix = format!("/{key}");
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("no built element {key}"))
+            .rect
+    }
+
     /// State changes made outside a handler must go through `update` so the view re-runs.
     fn apply(rt: &mut Runtime<UiState<Fake>>, update: Update) {
         rt.update(|s, _| s.apply(update));
@@ -398,6 +409,27 @@ mod tests {
         press(&mut rt, Key::Enter, Mods::default());
         assert_eq!(calls(&rt), ["open b", "send b x"]);
         assert!(rt.state.composer.text.is_empty());
+    }
+
+    #[test]
+    fn a_row_starts_below_a_taller_message_before_it() {
+        let mut rt = rt();
+        apply(&mut rt, Update::Chats(vec![chat("b", "Bo")]));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "chat-b");
+        let long = (0..12).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        apply(
+            &mut rt,
+            Update::Messages {
+                conversation_id: "b".into(),
+                rows: vec![msg("b1", "Bo", &long, false), msg("b2", "Me", "yo", true)],
+            },
+        );
+        rt.frame(0.0);
+        let [_, top1, _, h1] = rect(&rt, "msg-b1");
+        let [_, top2, _, _] = rect(&rt, "msg-b2");
+        assert!(h1 > MESSAGE_ROW_H, "first row should be taller than the estimate, got {h1}");
+        assert!(top2 >= top1 + h1, "second row at {top2} overlaps first row ending at {}", top1 + h1);
     }
 
     #[test]

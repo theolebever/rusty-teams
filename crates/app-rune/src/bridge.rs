@@ -53,10 +53,17 @@ impl Shared {
         self.open.lock().unwrap_or_else(PoisonError::into_inner).as_deref() == Some(conversation_id)
     }
 
-    fn publish_chats(&self, engine: &Engine) {
+    /// Publishes the chat list. False when the sidebar could not be read (the error is the status).
+    fn publish_chats(&self, engine: &Engine) -> bool {
         match engine.sidebar() {
-            Ok(sidebar) => self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now()))),
-            Err(error) => self.publish(Update::Status(format!("Chats unavailable: {error}"))),
+            Ok(sidebar) => {
+                self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now())));
+                true
+            }
+            Err(error) => {
+                self.publish(Update::Status(format!("Chats unavailable: {error}")));
+                false
+            }
         }
     }
 
@@ -158,14 +165,21 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
             BackendEvent::Engine(engine) => {
                 *shared.engine.lock().unwrap_or_else(PoisonError::into_inner) =
                     Some(engine.clone());
-                shared.publish_chats(&engine);
+                // The engine exists only after a session, and its cached chats are shown now.
+                // The backend's own Online comes after its first sidebar refresh (and folders),
+                // so set it here; later Connection events, sent after this one, still override it.
+                if shared.publish_chats(&engine) {
+                    shared.publish(Update::Status(status_text(&ConnectionState::Online)));
+                }
             }
             BackendEvent::Core(event) => {
                 let Some(engine) = shared.engine() else {
                     continue;
                 };
                 match event {
-                    CoreEvent::SidebarChanged => shared.publish_chats(&engine),
+                    CoreEvent::SidebarChanged => {
+                            shared.publish_chats(&engine);
+                        }
                     CoreEvent::MessagesChanged { conversation_id }
                     | CoreEvent::MessagesStoredLate { conversation_id, .. } => {
                         if shared.is_open(&conversation_id) {
