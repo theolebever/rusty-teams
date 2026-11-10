@@ -21,6 +21,7 @@ mod view_chatlist;
 mod ui;
 mod view_chrome;
 mod view_header;
+mod view_messages;
 
 use std::sync::OnceLock;
 

@@ -1,12 +1,17 @@
 //! Message reactions: the chips under a message, and the quick picker that adds or removes one.
 //! A chip and a picker entry both toggle the viewer's own reaction through `Actions::react`.
 
+use crate::avatar::rgb;
 use crate::types::{Actions, MessageRow};
-use crate::ui::{BUBBLE, HOVER, INK, LAVENDER, UiState, c, ts};
+use crate::ui::{UiState, ts};
+use crate::view_messages::action_button;
+use app_backend::schemes::active_palette;
 use rune::*;
 
 const HEART: &str = "\u{2764}";
 const VARIATION_SELECTOR: char = '\u{FE0F}';
+const PILL_HEIGHT: f32 = 24.0;
+const WHITE: u32 = 0xFFFFFF;
 
 /// The message whose quick picker is open. One at a time, cleared when the chat changes.
 #[derive(Default)]
@@ -57,22 +62,41 @@ pub fn is_mine(message: &MessageRow, glyph: &str) -> bool {
         .any(|reaction| reaction.mine && bare(&reaction.emoji) == bare(glyph))
 }
 
-/// The chips of a message and the "React" trigger, plus the quick set when it is open.
-/// Read-only views show the chips without the controls.
+/// The hover toolbar's react button: it opens or closes the quick set under the message.
+pub fn trigger<A: Actions + 'static>(message: &MessageRow) -> El {
+    let message_id = message.id.clone();
+    action_button::<A>(format!("react-{}", message.id), "mood", move |s: &mut UiState<A>, _| s.picker.toggle(&message_id))
+}
+
+/// The reaction pills of a message, plus the quick set when it is open. Read-only views show the
+/// pills without the quick set.
 pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> El {
     let conversation_id = s.selected.clone().unwrap_or_default();
+    let palette = active_palette();
     let mut chips = row().gap(4.0).center_y();
     for reaction in &message.reactions {
         let glyph = reaction.emoji.clone();
+        let (fill, ink) = if reaction.mine {
+            (palette.accent, WHITE)
+        } else if message.mine {
+            (palette.reaction_on_own, palette.text_soft)
+        } else {
+            (palette.border_strong, palette.text_soft)
+        };
         let mut chip = row()
             .key(format!("reaction-{}-{glyph}", message.id))
-            .padding(4.0)
-            .radius(6.0)
-            .fill(c(if reaction.mine { LAVENDER } else { BUBBLE }))
-            .child(text(format!("{glyph} {}", reaction.count)).font(ts(12.0, 400.0)).color(c(INK)));
+            .h(PILL_HEIGHT)
+            .pl(5.0)
+            .pr(8.0)
+            .gap(3.0)
+            .center_y()
+            .radius(PILL_HEIGHT / 2.0)
+            .fill(rgb(fill))
+            .child(text(glyph.clone()).font(ts(14.0, 400.0)).color(rgb(ink)))
+            .child(text(reaction.count.to_string()).font(ts(12.0, 400.0)).color(rgb(ink)));
         if !s.read_only {
             let (conversation_id, message_id, mine) = (conversation_id.clone(), message.id.clone(), reaction.mine);
-            chip = chip.hover(c(HOVER)).on_press_tx(move |s: &mut UiState<A>, _| {
+            chip = chip.hover(rgb(palette.row_hover)).on_press_tx(move |s: &mut UiState<A>, _| {
                 s.actions.react(&conversation_id, &message_id, &wire(&glyph), mine)
             });
         }
@@ -81,17 +105,7 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
     if s.read_only {
         return chips;
     }
-    let message_id = message.id.clone();
-    let mut column = col().gap(4.0).child(chips.child(
-        row()
-            .key(format!("react-{}", message.id))
-            .h(24.0)
-            .px(8.0)
-            .radius(6.0)
-            .hover(c(HOVER))
-            .on_press_tx(move |s: &mut UiState<A>, _| s.picker.toggle(&message_id))
-            .child(text("React").font(ts(12.0, 600.0)).color(c(INK))),
-    ));
+    let mut column = col().gap(4.0).child(chips);
     if s.picker.open.as_deref() == Some(message.id.as_str()) {
         let mut quick = row().key(format!("quick-{}", message.id)).gap(4.0);
         for glyph in quick_glyphs() {
@@ -102,9 +116,9 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
                 row()
                     .key(format!("pick-{}-{glyph}", message.id))
                     .padding(4.0)
-                    .radius(6.0)
-                    .fill(c(if mine { LAVENDER } else { BUBBLE }))
-                    .hover(c(HOVER))
+                    .radius(PILL_HEIGHT / 2.0)
+                    .fill(rgb(if mine { palette.reaction_on_own } else { palette.border_strong }))
+                    .hover(rgb(palette.row_hover))
                     .on_press_tx(move |s: &mut UiState<A>, _| {
                         s.picker.close();
                         s.actions.react(&conversation_id, &message_id, &wire(&glyph), mine);

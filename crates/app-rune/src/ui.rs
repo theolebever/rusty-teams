@@ -9,9 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 const PURPLE: &str = "#5B5FC7";
-pub(crate) const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
-pub(crate) const BUBBLE: &str = "#F5F5F5";
 pub(crate) const HOVER: &str = "#EBEBEB";
 pub(crate) const LINE: &str = "#E0E0E0";
 pub(crate) const INK: &str = "#242424";
@@ -19,7 +17,6 @@ pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
 pub(crate) const WHITE: &str = "#FFFFFF";
 
-const MESSAGE_ROW_H: f32 = 64.0;
 
 pub(crate) fn c(s: &str) -> Color {
     crate::settings::color(s)
@@ -58,7 +55,9 @@ pub struct UiState<A: Actions> {
     pub global_search: crate::search::SearchState,
     pub thread_root_id: Option<String>,
     pub picker: crate::reactions::Picker,
-    confirm_delete: Option<String>,
+    pub(crate) confirm_delete: Option<String>,
+    /// The message whose "more" actions are showing, if any.
+    pub(crate) more_open: Option<String>,
     drafts: HashMap<SendTarget, String>,
     send_errors: HashMap<SendTarget, String>,
 }
@@ -91,6 +90,7 @@ impl<A: Actions> UiState<A> {
             thread_root_id: None,
             picker: Default::default(),
             confirm_delete: None,
+            more_open: None,
             drafts: HashMap::new(),
             send_errors: HashMap::new(),
         }
@@ -171,6 +171,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     s.thread_root_id = None;
     s.picker.close();
     s.confirm_delete = None;
+    s.more_open = None;
     s.messages.clear();
     s.search.clear();
     s.search_open = false;
@@ -180,7 +181,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     tx.scroll_to_bottom_instant("messages");
 }
 
-fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
+pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
     let conversation_id = s.selected.clone()?;
     let channel = s.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == conversation_id);
     Some(SendTarget { conversation_id, thread_root_id: s.thread_root_id.clone(), channel })
@@ -200,7 +201,7 @@ fn restore_draft<A: Actions>(s: &mut UiState<A>) {
     }
 }
 
-fn select_thread<A: Actions>(s: &mut UiState<A>, root: Option<String>) {
+pub(crate) fn select_thread<A: Actions>(s: &mut UiState<A>, root: Option<String>) {
     save_draft(s);
     s.thread_root_id = root;
     if let (Some(conversation), Some(root)) = (&s.selected, &s.thread_root_id) {
@@ -271,96 +272,8 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
         .min_h(0.0)
         .fill(c(WHITE))
         .child(crate::view_header::header(s, id))
-        .child(message_list(s))
+        .child(crate::view_messages::message_list(s))
         .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { composer(s) })
-}
-
-fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
-    // The version is the id sequence: a reload with the same count but other messages must re-key.
-    let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
-    let ids: Vec<&str> = displayed.iter().map(|m| m.id.as_str()).collect();
-    let rows = col()
-        .key("message-rows")
-        .w_full()
-        .px(20.0)
-        .pt(12.0)
-        .growth(GrowthSpec::default())
-        .instant_changes()
-        .virtual_rows(
-            displayed.len(),
-            MESSAGE_ROW_H,
-            |s: &UiState<A>, i| Cow::Owned(format!("msg-{}", s.search_results.as_ref().unwrap_or(&s.messages)[i].id)),
-            |s: &UiState<A>, i| message_row(s, i),
-        )
-        .virtual_rows_version((ids, crate::theme::version()));
-    let id = s.selected.clone().unwrap_or_default();
-    col()
-        .key("messages")
-        .grow(1.0)
-        .min_h(0.0)
-        .w_full()
-        .scroll(ScrollSpec { stick_bottom: true })
-        .child(row().key("load-older").w_full().h(36.0).center().hover(c(HOVER))
-            .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
-            .child(text("Load older messages").font(ts(13.0, 600.0)).color(c(INK))))
-        // Rune: a virtual/growth stack must be the last child of its scroll viewport.
-        .child(rows)
-}
-
-fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
-    let m = &s.search_results.as_ref().unwrap_or(&s.messages)[i];
-    let head = row()
-        .gap(8.0)
-        .center_y()
-        .child(text(m.sender.clone()).font(ts(12.0, 700.0)).color(c(INK)))
-        .child(text(m.when.clone()).font(ts(12.0, 400.0)).color(c(MUTED)));
-    let bubble = col()
-        .max_w(560.0)
-        .radius(12.0)
-        .px(12.0)
-        .py(8.0)
-        .fill(c(if m.mine { LAVENDER } else { BUBBLE }))
-        .child(
-            text(m.text.clone())
-                .font(ts(14.0, 400.0))
-                .color(c(INK))
-                .wrap(),
-        ).child(crate::media::view(s, &m.media, &m.id));
-    let body = if m.mine {
-        row()
-            .w_full()
-            .justify_end()
-            .child(col().items_end().gap(4.0).child(head).child(bubble))
-    } else {
-        row()
-            .w_full()
-            .child(col().items_start().gap(4.0).child(head).child(bubble))
-    };
-    // Replies sit one step in under their post.
-    let indent = if m.reply_to_id.is_some() { 32.0 } else { 0.0 };
-    let mut result = col().w_full().pl(indent).pb(12.0).child(body);
-    if !m.deleted {
-        result = result.child(crate::reactions::controls(s, m));
-    }
-    if !s.read_only && m.can_delete && !m.deleted {
-        let id = m.id.clone();
-        let conversation_id = s.selected.clone().unwrap_or_default();
-        let confirming = s.confirm_delete.as_deref() == Some(&id);
-        result = result.child(row().key(format!("delete-{id}")).h(28.0).px(8.0).hover(c(HOVER))
-            .on_press_tx(move |s: &mut UiState<A>, _| {
-                if confirming { s.actions.delete_message(&conversation_id, &id); s.confirm_delete = None; }
-                else { s.confirm_delete = Some(id.clone()); }
-            }).child(text(if confirming { "Confirm delete" } else { "Delete" }).font(ts(12.0, 400.0)).color(c(RED))));
-    }
-    if !s.read_only && !m.deleted && m.reply_to_id.is_none() && active_target(s).is_some_and(|target| target.channel) {
-        let root = m.id.clone();
-        result = result.child(row().key(format!("reply-{}", m.id)).h(28.0).px(8.0).hover(c(HOVER))
-            .on_press_tx(move |s: &mut UiState<A>, tx| {
-                select_thread(s, Some(root.clone()));
-                tx.focus("composer", false);
-            }).child(text("Reply in thread").font(ts(12.0, 600.0)).color(c(INK))));
-    }
-    result
 }
 
 fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -657,7 +570,7 @@ mod tests {
         let [_, top1, _, h1] = rect(&rt, "msg-b1");
         let [_, top2, _, _] = rect(&rt, "msg-b2");
         assert!(
-            h1 > MESSAGE_ROW_H,
+            h1 > crate::view_messages::MESSAGE_ROW_H,
             "first row should be taller than the estimate, got {h1}"
         );
         assert!(
@@ -773,6 +686,7 @@ mod tests {
         let mut row = msg("m", "Me", "hello", true);
         row.can_delete = true;
         apply(&mut rt, Update::Messages { conversation_id: "a".into(), rows: vec![row] });
+        click(&mut rt, "more-m");
         click(&mut rt, "delete-m");
         assert_eq!(calls(&rt), ["open a"]);
         click(&mut rt, "delete-m");
