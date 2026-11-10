@@ -221,19 +221,20 @@ fn send<A: Actions>(s: &mut UiState<A>) {
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
     crate::theme::apply(cx, &s.appearance);
-    let mut rail = col().key("rail").w(80.0).h_full().fill(c(LIST));
-    for (label, screen) in [("Chat", crate::screens::Screen::Chat), ("Activity", crate::screens::Screen::Activity), ("Calendar", crate::screens::Screen::Calendar), ("Calls", crate::screens::Screen::Calls), ("Settings", crate::screens::Screen::Settings)] {
-        rail = rail.child(row().key(format!("nav-{label}")).w_full().h(48.0).center().hover(c(HOVER))
-            .on_press_tx(move |s: &mut UiState<A>, _| crate::screens::navigate(s, screen))
-            .child(text(label).font(ts(12.0, 600.0)).color(c(INK))));
-    }
-    row()
+    col()
         .key("root")
         .w_full()
         .h_full()
         .fill(c(WHITE))
-        .child(rail)
-        .child(if s.screens.screen == crate::screens::Screen::Chat { row().grow(1.0).h_full().child(chat_pane(s)).child(conversation(s)) } else { crate::screens::view(s) })
+        .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
+        .child(
+            row()
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(crate::view_chrome::rail(s))
+                .child(if s.screens.screen == crate::screens::Screen::Chat { row().grow(1.0).h_full().child(chat_pane(s)).child(conversation(s)) } else { crate::screens::view(s) }),
+        )
 }
 
 fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {

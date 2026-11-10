@@ -117,6 +117,8 @@ impl Content {
 
 pub struct MediaState {
     cache: ImageCache,
+    /// The app icon the title bar draws.
+    logo: Image,
     pub images: HashMap<String, Image>,
     pub errors: HashMap<String, String>,
     attachments: HashMap<SendTarget, Vec<Attachment>>,
@@ -124,10 +126,12 @@ pub struct MediaState {
 
 impl Default for MediaState {
     fn default() -> Self {
+        let cache = ImageCache::new(Arc::new(|| {
+            if let Some(wake) = crate::WAKER.get() { wake(); }
+        }));
         Self {
-            cache: ImageCache::new(Arc::new(|| {
-                if let Some(wake) = crate::WAKER.get() { wake(); }
-            })),
+            logo: cache.load(app_backend::appearance::AppIcon::default().png()),
+            cache,
             images: HashMap::new(),
             errors: HashMap::new(),
             attachments: HashMap::new(),
@@ -136,6 +140,11 @@ impl Default for MediaState {
 }
 
 impl MediaState {
+    pub fn logo(&self) -> &Image {
+        &self.logo
+    }
+
+
     pub fn loaded(&mut self, key: String, bytes: Vec<u8>) {
         self.errors.remove(&key);
         self.images.insert(key, self.cache.load(bytes));

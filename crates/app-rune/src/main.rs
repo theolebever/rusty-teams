@@ -18,6 +18,7 @@ mod teams;
 mod theme;
 mod types;
 mod ui;
+mod view_chrome;
 
 use std::sync::OnceLock;
 
@@ -122,6 +123,7 @@ fn main() {
             ],
             ..AppSpec::new(TITLE, SIZE, demo_init, ui::view::<DemoActions>)
         })
+        .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
         .run();
         return;
     }
@@ -130,6 +132,7 @@ fn main() {
         poll: Some(poll),
         ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
     })
+    .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
     .on_quit(|state, _| {
         state.actions.shutdown();
         app_backend::presence_link::unregister_on_exit(std::time::Duration::from_millis(800));
