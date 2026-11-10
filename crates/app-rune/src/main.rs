@@ -3,9 +3,11 @@
 
 mod agenda;
 mod arguments;
+mod avatar;
 mod bridge;
 mod calls;
 mod calls_backend;
+mod icons;
 mod media;
 mod notifications;
 mod reactions;
