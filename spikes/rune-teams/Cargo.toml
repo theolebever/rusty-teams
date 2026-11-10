@@ -1,0 +1,10 @@
+[package]
+name = "rune-teams"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
