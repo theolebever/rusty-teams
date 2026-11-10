@@ -14,6 +14,7 @@ pub enum Screen {
     Chat,
     Activity,
     Calendar,
+    Agenda,
     Calls,
     Settings,
 }
@@ -45,6 +46,7 @@ pub struct ScreenState {
     pub screen: Screen,
     pub activity: ActivitySnapshot,
     pub calendar: Vec<CalendarRow>,
+    pub agenda: Vec<chatsvc::CalendarEvent>,
     pub week: NaiveDate,
     pub filter: ActivityFilter,
     pub selected_event: Option<String>,
@@ -57,6 +59,7 @@ impl Default for ScreenState {
             screen: Screen::Chat,
             activity: ActivitySnapshot::default(),
             calendar: Vec::new(),
+            agenda: Vec::new(),
             week: monday(Local::now().date_naive()),
             filter: ActivityFilter::All,
             selected_event: None,
@@ -91,15 +94,15 @@ fn shift_week<A: Actions>(s: &mut UiState<A>, days: i64) {
     s.actions.load_calendar(s.screens.week);
 }
 
-fn color(hex: &str) -> Color {
+pub(crate) fn color(hex: &str) -> Color {
     crate::settings::color(hex)
 }
 
-fn style(size: f32, weight: f32) -> TextStyle {
+pub(crate) fn style(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
 }
 
-fn button<A: Actions + 'static>(
+pub(crate) fn button<A: Actions + 'static>(
     label: &str,
     key: &str,
     action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
@@ -124,6 +127,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     match s.screens.screen {
         Screen::Activity => activity(s),
         Screen::Calendar => calendar(s),
+        Screen::Agenda => crate::agenda::view(s),
         Screen::Calls => crate::calls::view(s),
         Screen::Settings => crate::settings::view(s),
         Screen::Chat => col(),
@@ -152,6 +156,10 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
             shift_week(s, -7)
         }))
         .child(button::<A>("›", "calendar-next", |s, _| shift_week(s, 7)))
+        .child(button::<A>("Agenda", "calendar-agenda", |s, _| {
+            s.screens.screen = Screen::Agenda;
+            s.actions.load_agenda();
+        }))
         .child(
             text(format!(
                 "{} – {}",
@@ -433,8 +441,7 @@ mod tests {
     struct Fake { responses: RefCell<Vec<(String, chatsvc::Reply, bool)>> }
     impl Actions for Fake {
         fn open(&self, _: &str) {}
-        fn send(&self, _: &str, _: String) {}
-        fn post(&self, _: &str, _: String) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn respond_event(&self, id: &str, _: Option<&str>, reply: chatsvc::Reply, send_response: bool) {
             self.responses.borrow_mut().push((id.to_owned(), reply, send_response));
         }

@@ -70,6 +70,8 @@ pub enum Update {
     Attachment { target: SendTarget, path: std::path::PathBuf, result: Result<teams_core::UploadedFile, String> },
     Calendar { week: chrono::NaiveDate, rows: Vec<crate::screens::CalendarRow> },
     CalendarRefresh,
+    /// Calendar events of the agenda window (next seven days), raw from the backend.
+    Agenda(Vec<chatsvc::CalendarEvent>),
     Search { conversation_id: String, query: String, rows: Vec<MessageRow> },
     /// Full message list of one conversation, replaces the previous one for that id.
     Messages {
@@ -98,6 +100,7 @@ pub trait Actions {
     fn read_only(&self) -> bool { false }
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}
+    fn load_agenda(&self) {}
     fn respond_event(&self, _id: &str, _ical_uid: Option<&str>, _reply: chatsvc::Reply, _send_response: bool) {}
     fn mark_activity_read(&self, _id: &str) {}
     fn mark_all_activity_read(&self) {}

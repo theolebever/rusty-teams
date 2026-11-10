@@ -275,6 +275,22 @@ impl Actions for Bridge {
         });
     }
 
+    fn load_agenda(&self) {
+        let calls = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(calls) = calls else {
+            self.shared.publish(Update::Status("Calendar is not connected yet".into()));
+            return;
+        };
+        let (start, end) = crate::agenda::window(Utc::now());
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            match calls.calendar_view(start, end).await {
+                Ok(events) => shared.publish(Update::Agenda(events)),
+                Err(error) => shared.publish(Update::Status(format!("Agenda unavailable: {error}"))),
+            }
+        });
+    }
+
     fn mark_activity_read(&self, id: &str) {
         if self.shared.read_only { return; }
         let Some(engine) = self.shared.engine() else { return };
