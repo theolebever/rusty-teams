@@ -183,6 +183,8 @@ pub struct AppShell {
     shown_quick_view: Option<QuickView>,
     conversation: Entity<ConversationView>,
     call_chat: Option<(String, Entity<ConversationView>)>,
+    /// People panel scroll, keyed by call id so every call opens the list at the top.
+    call_people_scroll: (u64, ScrollHandle),
     prejoin: Option<Entity<PrejoinView>>,
     switcher: Option<Entity<Switcher>>,
     notifications: Entity<NotificationCenter>,
@@ -437,6 +439,7 @@ impl AppShell {
             shown_quick_view: None,
             conversation,
             call_chat: None,
+            call_people_scroll: (0, ScrollHandle::new()),
             prejoin: None,
             switcher: None,
             notifications,
@@ -1065,7 +1068,13 @@ impl Render for AppShell {
             - RAIL_WIDTH
             - if show_sidebar { SIDEBAR_WIDTH + ISLAND_GAP } else { 0. }
             - ISLAND_GAP;
-        let call_view = render_call_view(&self.state, state, chat_panel, call_fullscreen, island_width)
+        if let Some(call) = &state.call
+            && call.id != self.call_people_scroll.0
+        {
+            self.call_people_scroll = (call.id, ScrollHandle::new());
+        }
+        let people_scroll = &self.call_people_scroll.1;
+        let call_view = render_call_view(&self.state, state, chat_panel, people_scroll, call_fullscreen, island_width)
             .filter(|_| state.viewing_call())
             .or_else(|| render_call_end(&self.state, state));
         let (call_view, call_overlay) = match call_view {
