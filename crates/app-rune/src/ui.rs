@@ -123,7 +123,7 @@ impl<A: Actions> UiState<A> {
                             self.actions.load_image(image.clone());
                         }
                     }
-                    self.messages = rows;
+                    self.messages = crate::teams::group_replies(rows);
                 }
             }
             Update::SendFailed {
@@ -495,7 +495,9 @@ fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
             .w_full()
             .child(col().items_start().gap(4.0).child(head).child(bubble))
     };
-    let mut result = col().w_full().pb(12.0).child(body);
+    // Replies sit one step in under their post.
+    let indent = if m.reply_to_id.is_some() { 32.0 } else { 0.0 };
+    let mut result = col().w_full().pl(indent).pb(12.0).child(body);
     if !m.deleted {
         let mut reactions = row().gap(4.0);
         for reaction in &m.reactions {

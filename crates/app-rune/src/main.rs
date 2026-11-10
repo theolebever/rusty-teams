@@ -9,6 +9,7 @@ mod media;
 mod notifications;
 mod screens;
 mod settings;
+mod teams;
 mod types;
 mod ui;
 
