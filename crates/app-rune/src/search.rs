@@ -8,7 +8,10 @@ use rune::*;
 
 
 use crate::types::Actions;
-use crate::ui::{HOVER, INK, MUTED, UiState, chat_row, open_chat};
+use crate::ui::{HOVER, INK, MUTED, UiState, open_chat};
+use crate::icons::sym;
+use crate::view_chatlist::{chat_row, tone};
+use app_backend::schemes::active_palette;
 use app_backend::backend::Engine;
 use store::{HIGHLIGHT_END, HIGHLIGHT_START};
 
@@ -89,33 +92,45 @@ fn submit<A: Actions>(s: &mut UiState<A>) {
 }
 
 pub fn search_box<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let p = active_palette();
     row()
         .key("chat-search")
         .w_full()
-        .px(8.0)
+        .px(16.0)
         .pb(8.0)
-        .gap(6.0)
-        .center_y()
-        .child(
-            text_input(&s.global_search.edit, ts(13.0, 400.0))
-                .key("chat-search-input")
-                .label("Search chats and messages")
-                .placeholder("Search chats and messages", c(MUTED))
-                .color(c(INK))
-                .grow(1.0)
-                .on_edit(|s: &mut UiState<A>| &mut s.global_search.edit)
-                .on_submit(|s: &mut UiState<A>, _| submit(s)),
-        )
         .child(
             row()
-                .key("chat-search-clear")
-                .padding(8.0)
-                .hover(c(HOVER))
-                .on_press_tx(|s: &mut UiState<A>, _| {
-                    s.global_search.edit.clear();
-                    s.global_search.results = None;
-                })
-                .child(text("Clear").font(ts(12.0, 400.0)).color(c(INK))),
+                .w_full()
+                .h(32.0)
+                .px(10.0)
+                .gap(8.0)
+                .center_y()
+                .radius(8.0)
+                .fill(tone(p.surface_raised))
+                .child(sym("search", 14.0).color(tone(p.text_muted)))
+                .child(
+                    text_input(&s.global_search.edit, ts(13.0, 400.0))
+                        .key("chat-search-input")
+                        .label("Search chats and messages")
+                        .placeholder("Search chats and messages", tone(p.text_muted))
+                        .color(tone(p.foreground))
+                        .grow(1.0)
+                        .on_edit(|s: &mut UiState<A>| &mut s.global_search.edit)
+                        .on_submit(|s: &mut UiState<A>, _| submit(s)),
+                )
+                .child(
+                    row()
+                        .key("chat-search-clear")
+                        .size(20.0, 20.0)
+                        .center()
+                        .radius(6.0)
+                        .hover(tone(p.popup_hover))
+                        .on_press_tx(|s: &mut UiState<A>, _| {
+                            s.global_search.edit.clear();
+                            s.global_search.results = None;
+                        })
+                        .child(sym("close", 14.0).color(tone(p.text_muted))),
+                ),
         )
 }
 

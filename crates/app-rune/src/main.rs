@@ -17,6 +17,7 @@ mod settings;
 mod teams;
 mod theme;
 mod types;
+mod view_chatlist;
 mod ui;
 
 use std::sync::OnceLock;
