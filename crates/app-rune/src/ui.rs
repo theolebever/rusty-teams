@@ -9,24 +9,24 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 const PURPLE: &str = "#5B5FC7";
-const LAVENDER: &str = "#E8EBFA";
+pub(crate) const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
-const BUBBLE: &str = "#F5F5F5";
-const HOVER: &str = "#EBEBEB";
+pub(crate) const BUBBLE: &str = "#F5F5F5";
+pub(crate) const HOVER: &str = "#EBEBEB";
 const LINE: &str = "#E0E0E0";
-const INK: &str = "#242424";
-const MUTED: &str = "#616161";
+pub(crate) const INK: &str = "#242424";
+pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
 const WHITE: &str = "#FFFFFF";
 
 const CHAT_ROW_H: f32 = 56.0;
 const MESSAGE_ROW_H: f32 = 64.0;
 
-fn c(s: &str) -> Color {
+pub(crate) fn c(s: &str) -> Color {
     crate::settings::color(s)
 }
 
-fn ts(size: f32, weight: f32) -> TextStyle {
+pub(crate) fn ts(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
 }
 
@@ -50,6 +50,7 @@ pub struct UiState<A: Actions> {
     search: TextEdit,
     search_results: Option<Vec<MessageRow>>,
     pub thread_root_id: Option<String>,
+    pub picker: crate::reactions::Picker,
     confirm_delete: Option<String>,
     drafts: HashMap<SendTarget, String>,
     send_errors: HashMap<SendTarget, String>,
@@ -76,6 +77,7 @@ impl<A: Actions> UiState<A> {
             search: TextEdit::new(""),
             search_results: None,
             thread_root_id: None,
+            picker: Default::default(),
             confirm_delete: None,
             drafts: HashMap::new(),
             send_errors: HashMap::new(),
@@ -153,6 +155,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     save_draft(s);
     s.selected = Some(id.to_owned());
     s.thread_root_id = None;
+    s.picker.close();
     s.confirm_delete = None;
     s.messages.clear();
     s.search.clear();
@@ -459,11 +462,11 @@ fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .min_h(0.0)
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
-        .child(col().w_full()
-            .child(row().key("load-older").h(36.0).center().hover(c(HOVER))
-                .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
-                .child(text("Load older messages").font(ts(13.0, 600.0)).color(c(INK))))
-            .child(rows))
+        // Rune requires the virtual stack to be a direct child of the scroll viewport.
+        .child(row().key("load-older").w_full().h(36.0).center().hover(c(HOVER))
+            .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
+            .child(text("Load older messages").font(ts(13.0, 600.0)).color(c(INK))))
+        .child(rows)
 }
 
 fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
@@ -497,28 +500,7 @@ fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
     };
     let mut result = col().w_full().pb(12.0).child(body);
     if !m.deleted {
-        let mut reactions = row().gap(4.0);
-        for reaction in &m.reactions {
-            let label = format!("{} {}", reaction.emoji, reaction.count);
-            let emoji = reaction.emoji.clone();
-            let mine = reaction.mine;
-            let message_id = m.id.clone();
-            let conversation_id = s.selected.clone().unwrap_or_default();
-            let mut pill = row().key(format!("reaction-{}-{emoji}", m.id)).padding(4.0).radius(6.0)
-                .fill(c(if mine { LAVENDER } else { BUBBLE })).child(text(label).font(ts(12.0, 400.0)).color(c(INK)));
-            if !s.read_only {
-                pill = pill.on_press_tx(move |s: &mut UiState<A>, _| s.actions.react(&conversation_id, &message_id, &emoji, mine));
-            }
-            reactions = reactions.child(pill);
-        }
-        if !s.read_only && !m.reactions.iter().any(|reaction| reaction.emoji == "👍") {
-            let message_id = m.id.clone();
-            let conversation_id = s.selected.clone().unwrap_or_default();
-            reactions = reactions.child(row().key(format!("like-{}", m.id)).padding(4.0).hover(c(HOVER))
-                .on_press_tx(move |s: &mut UiState<A>, _| s.actions.react(&conversation_id, &message_id, "👍", false))
-                .child(text("👍").font(ts(12.0, 400.0))));
-        }
-        result = result.child(reactions);
+        result = result.child(crate::reactions::controls(s, m));
     }
     if !s.read_only && m.can_delete && !m.deleted {
         let id = m.id.clone();

@@ -7,6 +7,7 @@ mod calls;
 mod calls_backend;
 mod media;
 mod notifications;
+mod reactions;
 mod screens;
 mod settings;
 mod types;
