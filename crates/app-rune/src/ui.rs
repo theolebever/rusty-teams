@@ -12,21 +12,21 @@ const PURPLE: &str = "#5B5FC7";
 const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
 const BUBBLE: &str = "#F5F5F5";
-const HOVER: &str = "#EBEBEB";
+pub(crate) const HOVER: &str = "#EBEBEB";
 const LINE: &str = "#E0E0E0";
-const INK: &str = "#242424";
-const MUTED: &str = "#616161";
+pub(crate) const INK: &str = "#242424";
+pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
 const WHITE: &str = "#FFFFFF";
 
 const CHAT_ROW_H: f32 = 56.0;
 const MESSAGE_ROW_H: f32 = 64.0;
 
-fn c(s: &str) -> Color {
+pub(crate) fn c(s: &str) -> Color {
     crate::settings::color(s)
 }
 
-fn ts(size: f32, weight: f32) -> TextStyle {
+pub(crate) fn ts(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
 }
 
@@ -49,6 +49,7 @@ pub struct UiState<A: Actions> {
     pub composer: TextEdit,
     search: TextEdit,
     search_results: Option<Vec<MessageRow>>,
+    pub global_search: crate::search::SearchState,
     pub thread_root_id: Option<String>,
     confirm_delete: Option<String>,
     drafts: HashMap<SendTarget, String>,
@@ -75,6 +76,7 @@ impl<A: Actions> UiState<A> {
             composer: TextEdit::new(""),
             search: TextEdit::new(""),
             search_results: None,
+            global_search: Default::default(),
             thread_root_id: None,
             confirm_delete: None,
             drafts: HashMap::new(),
@@ -113,6 +115,7 @@ impl<A: Actions> UiState<A> {
                     self.search_results = Some(rows);
                 }
             }
+            Update::GlobalSearch(results) => crate::search::apply(&mut self.global_search, results),
             Update::Messages {
                 conversation_id,
                 rows,
@@ -234,6 +237,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
 
 fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
     let ids: Vec<&str> = s.chats.iter().map(|ch| ch.id.as_str()).collect();
+    let searching = s.global_search.results.is_some();
     let rows = col()
         .key("chat-rows")
         .w_full()
@@ -263,6 +267,7 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .min_w(0.0),
             ),
         )
+        .child(crate::search::search_box(s))
         .child(
             col()
                 .key("chat-list")
@@ -272,8 +277,8 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
-                .child(rows)
-                .child(team_list(s)),
+                .child(if searching { crate::search::results_list(s) } else { rows })
+                .child(if searching { el() } else { team_list(s) }),
         )
 }
 
@@ -336,7 +341,7 @@ fn team_list<A: Actions + 'static>(s: &UiState<A>) -> El {
     list
 }
 
-fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
+pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
     let ch = &s.chats[i];
     let selected = s.selected.as_deref() == Some(ch.id.as_str());
     let id = ch.id.clone();

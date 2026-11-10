@@ -8,6 +8,7 @@ mod calls_backend;
 mod media;
 mod notifications;
 mod screens;
+mod search;
 mod settings;
 mod types;
 mod ui;

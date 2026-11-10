@@ -606,8 +606,7 @@ mod tests {
 
     impl Actions for Fake {
         fn open(&self, _: &str) {}
-        fn send(&self, _: &str, _: String) {}
-        fn post(&self, _: &str, _: String) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn join_call(&self, url: &str, video: bool) {
             self.actions
                 .borrow_mut()
@@ -647,21 +646,21 @@ mod tests {
                 scale: 1.0,
             },
         );
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         let (x, y) = runtime.find("join-call").expect("join button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         assert_eq!(
             runtime.state.actions.actions.borrow().as_slice(),
             ["join https://teams.microsoft.com/meet/1234 false"]
         );
         runtime.update(|state, _| state.calls.apply(CallUpdate::State(CallState::Connecting)));
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         let (x, y) = runtime.find("call-leave").expect("leave button");
         runtime.pointer_down(x, y);
         runtime.pointer_up(x, y);
-        runtime.frame(0.0);
+        runtime.frame(1.0);
         assert_eq!(
             runtime
                 .state
