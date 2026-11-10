@@ -10,6 +10,7 @@ mod notifications;
 mod reactions;
 mod screens;
 mod settings;
+mod teams;
 mod theme;
 mod types;
 mod ui;
