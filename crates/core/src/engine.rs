@@ -220,9 +220,11 @@ impl<R: Remote> SyncEngine<R> {
         };
         let (fetched, ()) = tokio::join!(fetch, heal);
         let mut delta = fetched?;
+        // Show the stored messages first; link cards arrive with a second announce.
+        self.announce(conversation_id, !delta.is_empty());
         let cache_changed = self.attach_delta_links(conversation_id, &mut delta).await
             | self.backfill_links(conversation_id).await;
-        self.announce(conversation_id, !delta.is_empty() || cache_changed);
+        self.announce(conversation_id, cache_changed);
         Ok(delta)
     }
 
