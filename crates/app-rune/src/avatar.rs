@@ -110,7 +110,7 @@ fn palette_index(key: &str, len: usize) -> usize {
     hash as usize % len
 }
 
-fn rgb(value: u32) -> Color {
+pub(crate) fn rgb(value: u32) -> Color {
     rune::color::hex(&format!("#{value:06X}")).expect("palette colour")
 }
 

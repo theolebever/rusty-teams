@@ -45,6 +45,14 @@ pub struct MessageRow {
     pub media: crate::media::Content,
 }
 
+/// The pinned message of a conversation, shown in the bar under its header.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinnedRow {
+    pub conversation_id: String,
+    pub sender: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SendTarget {
     pub conversation_id: String,
