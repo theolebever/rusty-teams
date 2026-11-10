@@ -36,6 +36,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("notifications_off", include_str!("../../app/assets/symbols/notifications_off.svg")),
     ("person_add", include_str!("../../app/assets/symbols/person_add.svg")),
     ("reply", include_str!("../../app/assets/symbols/reply.svg")),
+    ("right_panel_open", include_str!("../../app/assets/symbols/right_panel_open.svg")),
     ("schedule", include_str!("../../app/assets/symbols/schedule.svg")),
     ("search", include_str!("../../app/assets/symbols/search.svg")),
     ("send", include_str!("../../app/assets/symbols/send.svg")),

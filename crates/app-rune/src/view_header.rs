@@ -1,0 +1,286 @@
+//! The conversation header, the in-conversation search field and the pinned-message bar, drawn
+//! as the GPUI app draws them (`crates/app/src/views/conversation.rs` `render_header`,
+//! `crates/app-ui-kit/src/channel_tabs.rs`, `crates/app/src/views/pin_banner.rs`).
+
+use app_backend::schemes::active_palette;
+use rune::*;
+
+use crate::avatar::{avatar, rgb};
+use crate::icons::sym;
+use crate::types::{Actions, PinnedRow};
+use crate::ui::{c, ts, UiState, HOVER, INK, LINE, MUTED, WHITE};
+
+const HEADER_H: f32 = 60.0;
+const HEADER_PAD: f32 = 20.0;
+const HEADER_GAP: f32 = 12.0;
+const LEAD: f32 = 36.0;
+const BUTTON: f32 = 32.0;
+const GLYPH: f32 = 16.0;
+const CALL_H: f32 = 30.0;
+const DIVIDER_H: f32 = 20.0;
+const TAB_PAD: f32 = 10.0;
+const TAB_BAR: f32 = 3.0;
+const TITLE_MAX_W: f32 = 240.0;
+const PIN_H: f32 = 40.0;
+const PIN_INSET: f32 = 8.0;
+
+/// The header of conversation `id`: avatar, title with its edit pencil, the Chat/Shared tabs,
+/// Meet now, the participant count and the icon buttons; then the search field when open, and
+/// the pinned-message bar when this conversation has a pinned message.
+pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
+    let channel = s.teams.iter().flat_map(|team| &team.channels).find(|channel| channel.id == id);
+    let title = s
+        .chats
+        .iter()
+        .find(|ch| ch.id == id)
+        .map(|ch| ch.title.as_str())
+        .or(channel.map(|channel| channel.name.as_str()))
+        .unwrap_or(id);
+    let palette = active_palette();
+
+    let mut bar = row()
+        .key("conversation-header")
+        .w_full()
+        .h(HEADER_H)
+        .px(HEADER_PAD)
+        .gap(HEADER_GAP)
+        .center_y()
+        .child(avatar(title, LEAD, None))
+        .child(
+            row()
+                .max_w(TITLE_MAX_W)
+                .min_w(0.0)
+                .gap(4.0)
+                .center_y()
+                .child(text(title.to_owned()).font(ts(15.0, 600.0)).color(c(INK)).truncate().min_w(0.0))
+                .child(sym("edit", 14.0).color(rgb(palette.text_muted))),
+        )
+        .child(tab(if channel.is_some() { "Posts" } else { "Chat" }, true))
+        .child(tab("Shared", false))
+        .child(el().grow(1.0));
+    if channel.is_none() {
+        bar = bar.child(meet_now());
+    }
+    if let Some(count) = s.member_counts.get(id) {
+        bar = bar.child(
+            row()
+                .key("participants")
+                .gap(4.0)
+                .center_y()
+                .child(sym("group", GLYPH).color(rgb(palette.text_soft)))
+                .child(text(count.to_string()).font(ts(13.0, 400.0)).color(rgb(palette.text_soft))),
+        );
+        bar = bar.child(el().w(1.0).h(DIVIDER_H).mx(4.0).fill(c(LINE)));
+    }
+    bar = bar
+        .child(icon_button("search-toggle", "search", s.search_open).on_press_tx(|s: &mut UiState<A>, _| toggle_search(s)))
+        .child(icon_button("side-panel", "right_panel_open", false))
+        .child(icon_button("more", "more_horiz", false));
+
+    let mut block = col()
+        .key("header-block")
+        .w_full()
+        .child(bar)
+        .child(el().h(1.0).w_full().fill(c(LINE)));
+    if s.search_open {
+        block = block.child(search_row(s));
+    }
+    if let Some(pinned) = s.pinned.as_ref().filter(|pinned| pinned.conversation_id == id) {
+        block = block.child(col().w_full().padding(PIN_INSET).child(pinned_bar(pinned)));
+    }
+    block
+}
+
+fn toggle_search<A: Actions>(s: &mut UiState<A>) {
+    s.search_open = !s.search_open;
+    if !s.search_open {
+        s.search.clear();
+        s.search_results = None;
+    }
+}
+
+/// A header tab: label centred in the header height, with a 3 px accent bar under it when active.
+fn tab(label: &str, active: bool) -> El {
+    let palette = active_palette();
+    let bar = el().h(TAB_BAR).w_full().radius(TAB_BAR / 2.0);
+    let bar = if active { bar.fill(rgb(palette.accent)) } else { bar };
+    col()
+        .h_full()
+        .px(TAB_PAD)
+        .child(
+            row().grow(1.0).center_y().child(
+                text(label.to_owned())
+                    .font(ts(14.0, if active { 600.0 } else { 400.0 }))
+                    .color(if active { c(INK) } else { c(MUTED) }),
+            ),
+        )
+        .child(bar)
+}
+
+/// The Meet now split button: video glyph with label, and a chevron for the options.
+fn meet_now() -> El {
+    let palette = active_palette();
+    row()
+        .key("meet-now")
+        .h(CALL_H)
+        .radius(6.0)
+        .hover(c(HOVER))
+        .child(
+            row()
+                .h(CALL_H)
+                .px(8.0)
+                .gap(6.0)
+                .center_y()
+                .child(sym("videocam", GLYPH).color(rgb(palette.text_soft)))
+                .child(text("Meet now").font(ts(14.0, 600.0)).color(c(INK))),
+        )
+        .child(
+            row()
+                .key("meet-now-options")
+                .w(18.0)
+                .h(CALL_H)
+                .center()
+                .child(sym("keyboard_arrow_down", 12.0).color(rgb(palette.text_soft))),
+        )
+}
+
+/// A 32 px icon button; `active` fills it as the open search toggle does. The handler is added
+/// by the caller, so buttons without one (no action wired yet) only show their glyph.
+fn icon_button(key: &str, glyph: &str, active: bool) -> El {
+    let palette = active_palette();
+    row()
+        .key(key)
+        .w(BUTTON)
+        .h(BUTTON)
+        .radius(8.0)
+        .center()
+        .fill(c(if active { HOVER } else { WHITE }))
+        .hover(c(HOVER))
+        .child(sym(glyph, GLYPH).color(rgb(palette.text_soft)))
+}
+
+fn search_row<A: Actions + 'static>(s: &UiState<A>) -> El {
+    row()
+        .key("search-row")
+        .w_full()
+        .px(HEADER_PAD)
+        .py(6.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text_input(&s.search, ts(13.0, 400.0))
+                .key("search")
+                .label("Search messages")
+                .placeholder("Search cached messages", c(MUTED))
+                .color(c(INK))
+                .grow(1.0)
+                .on_edit(|s: &mut UiState<A>| &mut s.search)
+                .on_submit(|s: &mut UiState<A>, _| {
+                    if let Some(id) = &s.selected {
+                        s.actions.search(id, s.search.text.trim());
+                    }
+                }),
+        )
+}
+
+/// The pinned message under the header: pin glyph, "Pinned", the sender in bold and the text.
+fn pinned_bar(pinned: &PinnedRow) -> El {
+    let palette = active_palette();
+    let mut bar = row()
+        .key("pinned-bar")
+        .w_full()
+        .h(PIN_H)
+        .pl(12.0)
+        .pr(12.0)
+        .gap(8.0)
+        .center_y()
+        .radius(8.0)
+        .fill(c(HOVER))
+        .hover(rgb(palette.surface_raised))
+        .child(sym("keep", 14.0).color(rgb(palette.accent_text)))
+        .child(text("Pinned").font(ts(12.0, 400.0)).color(c(MUTED)));
+    if !pinned.sender.is_empty() {
+        bar = bar.child(text(pinned.sender.clone()).font(ts(13.0, 600.0)).color(c(INK)));
+    }
+    bar.child(
+        text(pinned.text.clone())
+            .font(ts(13.0, 400.0))
+            .color(rgb(palette.text_soft))
+            .truncate()
+            .grow(1.0)
+            .min_w(0.0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ChatRow, SendTarget};
+    use rune::{Env, Runtime};
+
+    #[derive(Default)]
+    struct Quiet;
+
+    impl Actions for Quiet {
+        fn open(&self, _conversation_id: &str) {}
+        fn send(&self, _target: SendTarget, _text: String, _files: Vec<teams_core::FileReference>) {}
+    }
+
+    fn runtime(selected: &str) -> Runtime<UiState<Quiet>> {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut state = UiState::new(Quiet);
+        state.chats = vec![ChatRow {
+            id: "c0".into(),
+            title: "Release planning".into(),
+            preview: String::new(),
+            unread: false,
+            when: String::new(),
+        }];
+        state.selected = Some(selected.into());
+        let mut rt = Runtime::new(state, crate::ui::view::<Quiet>, (1280.0, 800.0), env);
+        rt.frame(0.0);
+        rt
+    }
+
+    /// Presses the built element at `key`, at its top-left corner inside the box.
+    fn click(rt: &mut Runtime<UiState<Quiet>>, key: &str) {
+        let suffix = format!("/{key}");
+        let [x, y, _, _] = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("no built element {key}"))
+            .rect;
+        rt.pointer_down(x + 4.0, y + 4.0);
+        rt.pointer_up(x + 4.0, y + 4.0);
+        rt.frame(1.0 / 60.0);
+    }
+
+    fn pin_c0(rt: &mut Runtime<UiState<Quiet>>) {
+        rt.update(|s, _| {
+            s.pinned = Some(PinnedRow { conversation_id: "c0".into(), sender: "Mara".into(), text: "Rollout".into() });
+        });
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn search_button_reveals_the_field_and_pressing_it_again_hides_it() {
+        let mut rt = runtime("c0");
+        assert!(rt.find("search").is_none());
+        click(&mut rt, "search-toggle");
+        assert!(rt.find("search").is_some());
+        click(&mut rt, "search-toggle");
+        assert!(rt.find("search").is_none());
+    }
+
+    #[test]
+    fn pinned_bar_shows_only_in_the_conversation_it_belongs_to() {
+        let mut shown = runtime("c0");
+        pin_c0(&mut shown);
+        assert!(shown.find("pinned-bar").is_some());
+
+        let mut other = runtime("other");
+        pin_c0(&mut other);
+        assert!(other.find("pinned-bar").is_none());
+    }
+}

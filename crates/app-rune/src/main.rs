@@ -20,6 +20,7 @@ mod types;
 mod view_chatlist;
 mod ui;
 mod view_chrome;
+mod view_header;
 
 use std::sync::OnceLock;
 
@@ -200,6 +201,12 @@ fn demo_init() -> UiState<DemoActions> {
         }],
     }]));
     s.selected = Some("c0".into());
+    s.member_counts.insert("c0".into(), 5);
+    s.pinned = Some(types::PinnedRow {
+        conversation_id: "c0".into(),
+        sender: "Ada Example".into(),
+        text: "Rollout for Friday:".into(),
+    });
     let rows = (0..60)
         .map(|i| MessageRow {
             id: format!("m{i}"),

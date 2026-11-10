@@ -13,11 +13,11 @@ pub(crate) const LAVENDER: &str = "#E8EBFA";
 const LIST: &str = "#F5F5F5";
 pub(crate) const BUBBLE: &str = "#F5F5F5";
 pub(crate) const HOVER: &str = "#EBEBEB";
-const LINE: &str = "#E0E0E0";
+pub(crate) const LINE: &str = "#E0E0E0";
 pub(crate) const INK: &str = "#242424";
 pub(crate) const MUTED: &str = "#616161";
 const RED: &str = "#C4314B";
-const WHITE: &str = "#FFFFFF";
+pub(crate) const WHITE: &str = "#FFFFFF";
 
 const MESSAGE_ROW_H: f32 = 64.0;
 
@@ -47,8 +47,14 @@ pub struct UiState<A: Actions> {
     pub messages: Vec<MessageRow>,
     pub send_error: Option<String>,
     pub composer: TextEdit,
-    search: TextEdit,
-    search_results: Option<Vec<MessageRow>>,
+    /// The in-conversation search field, shown while `search_open`.
+    pub(crate) search: TextEdit,
+    pub(crate) search_open: bool,
+    pub(crate) search_results: Option<Vec<MessageRow>>,
+    /// Pinned message of the open conversation, if any (`view_header.rs`).
+    pub pinned: Option<crate::types::PinnedRow>,
+    /// Member counts by conversation id; the header shows the count when one is known.
+    pub member_counts: HashMap<String, usize>,
     pub global_search: crate::search::SearchState,
     pub thread_root_id: Option<String>,
     pub picker: crate::reactions::Picker,
@@ -77,7 +83,10 @@ impl<A: Actions> UiState<A> {
             send_error: None,
             composer: TextEdit::new(""),
             search: TextEdit::new(""),
+            search_open: false,
             search_results: None,
+            pinned: None,
+            member_counts: HashMap::new(),
             global_search: Default::default(),
             thread_root_id: None,
             picker: Default::default(),
@@ -164,6 +173,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     s.confirm_delete = None;
     s.messages.clear();
     s.search.clear();
+    s.search_open = false;
     s.search_results = None;
     restore_draft(s);
     s.actions.open(id);
@@ -253,19 +263,6 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .color(c(MUTED)),
             );
     };
-    let title = s
-        .chats
-        .iter()
-        .find(|ch| ch.id == id)
-        .map(|ch| ch.title.as_str())
-        .or_else(|| {
-            s.teams
-                .iter()
-                .flat_map(|team| &team.channels)
-                .find(|channel| channel.id == id)
-                .map(|channel| channel.name.as_str())
-        })
-        .unwrap_or(id);
     col()
         .key("conversation")
         .grow(1.0)
@@ -273,27 +270,7 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
         .h_full()
         .min_h(0.0)
         .fill(c(WHITE))
-        .child(
-            row().w_full().h(56.0).px(20.0).center_y().child(
-                text(title.to_owned())
-                    .font(ts(16.0, 700.0))
-                    .color(c(INK))
-                    .truncate()
-                    .grow(1.0)
-                    .min_w(0.0),
-            ),
-        )
-        .child(row().w_full().px(20.0).gap(8.0).center_y()
-            .child(text_input(&s.search, ts(13.0, 400.0)).key("search").label("Search messages")
-                .placeholder("Search cached messages", c(MUTED)).color(c(INK)).grow(1.0)
-                .on_edit(|s: &mut UiState<A>| &mut s.search)
-                .on_submit(|s: &mut UiState<A>, _| {
-                    if let Some(id) = &s.selected { s.actions.search(id, s.search.text.trim()); }
-                }))
-            .child(row().key("search-close").padding(8.0).hover(c(HOVER))
-                .on_press_tx(|s: &mut UiState<A>, _| { s.search.clear(); s.search_results = None; })
-                .child(text("Clear").font(ts(12.0, 400.0)).color(c(INK)))))
-        .child(el().h(1.0).w_full().fill(c(LINE)))
+        .child(crate::view_header::header(s, id))
         .child(message_list(s))
         .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { composer(s) })
 }
