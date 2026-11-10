@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -192,11 +193,21 @@ fn create_views(shared: &Rc<Shared>) -> std::result::Result<(), String> {
     Ok(())
 }
 
+static NO_SINGLE_SIGN_ON: AtomicBool = AtomicBool::new(false);
+
+/// Stop signing in with the Windows account, so the sign-in page asks for any account.
+/// Call before `start`: every environment on a user data folder must use the same options.
+pub fn disable_single_sign_on() {
+    NO_SINGLE_SIGN_ON.store(true, Ordering::SeqCst);
+}
+
 pub(crate) fn environment_options() -> ICoreWebView2EnvironmentOptions {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
         options.set_additional_browser_arguments(BROWSER_ARGUMENTS.to_owned());
-        options.set_allow_single_sign_on_using_os_primary_account(true);
+        options.set_allow_single_sign_on_using_os_primary_account(
+            !NO_SINGLE_SIGN_ON.load(Ordering::SeqCst),
+        );
     }
     options.into()
 }

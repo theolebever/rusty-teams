@@ -68,6 +68,9 @@ fn parse_arguments() -> Arguments {
         match flag.as_str() {
             "--demo" => arguments.demo = true,
             "--read-only" => arguments.read_only = true,
+            // Sign in with an account other than the Windows one; pair with its own --database.
+            #[cfg(windows)]
+            "--no-sso" => webview::disable_single_sign_on(),
             "--switcher" => {
                 arguments.switcher_query.get_or_insert_with(String::new);
             }

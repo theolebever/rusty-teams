@@ -24,7 +24,7 @@ pub use dialog::{DialogEvent, DialogHandle, DialogMode, DialogSpec, NEW_WINDOW_K
 pub use embed::{EmbedEvent, EmbedSpec};
 pub use geometry::{EmbedBounds, local_cutouts};
 #[cfg(windows)]
-pub use host::{HostConfig, start};
+pub use host::{HostConfig, disable_single_sign_on, start};
 #[cfg(windows)]
 pub use main_embed::{EmbedHost, MainEmbed};
 #[cfg(windows)]
