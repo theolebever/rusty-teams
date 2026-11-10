@@ -19,6 +19,7 @@ pub fn color(hex: &str) -> Color {
         "#616161" => Some(palette.text_muted),
         "#5B5FC7" => Some(palette.accent),
         "#E8EBFA" => Some(palette.bubble_own),
+        "#DADDF5" => Some(palette.reaction_on_own),
         "#C4314B" => Some(palette.red),
         _ => None,
     };

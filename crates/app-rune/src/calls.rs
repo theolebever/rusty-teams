@@ -606,8 +606,7 @@ mod tests {
 
     impl Actions for Fake {
         fn open(&self, _: &str) {}
-        fn send(&self, _: &str, _: String) {}
-        fn post(&self, _: &str, _: String) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn join_call(&self, url: &str, video: bool) {
             self.actions
                 .borrow_mut()

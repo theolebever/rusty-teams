@@ -213,10 +213,7 @@ fn send<A: Actions>(s: &mut UiState<A>) {
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
-    app_backend::schemes::set_thread_scheme(Some(s.appearance.color_scheme.id));
-    app_backend::schemes::set_thread_shade(Some(s.appearance.theme.shade(app_backend::appearance::SystemTheme {
-        dark: cx.system_dark(), high_contrast: app_backend::appearance::system_high_contrast(),
-    })));
+    crate::theme::apply(cx, &s.appearance);
     let mut rail = col().key("rail").w(80.0).h_full().fill(c(LIST));
     for (label, screen) in [("Chat", crate::screens::Screen::Chat), ("Activity", crate::screens::Screen::Activity), ("Calendar", crate::screens::Screen::Calendar), ("Calls", crate::screens::Screen::Calls), ("Settings", crate::screens::Screen::Settings)] {
         rail = rail.child(row().key(format!("nav-{label}")).w_full().h(48.0).center().hover(c(HOVER))
@@ -246,7 +243,7 @@ fn chat_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
             |s: &UiState<A>, i| Cow::Owned(format!("chat-{}", s.chats[i].id)),
             |s: &UiState<A>, i| chat_row(s, i),
         )
-        .virtual_rows_version(ids);
+        .virtual_rows_version((ids, crate::theme::version()));
     col()
         .key("chats")
         .w(320.0)
@@ -451,7 +448,7 @@ fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
             |s: &UiState<A>, i| Cow::Owned(format!("msg-{}", s.search_results.as_ref().unwrap_or(&s.messages)[i].id)),
             |s: &UiState<A>, i| message_row(s, i),
         )
-        .virtual_rows_version(ids);
+        .virtual_rows_version((ids, crate::theme::version()));
     let id = s.selected.clone().unwrap_or_default();
     col()
         .key("messages")

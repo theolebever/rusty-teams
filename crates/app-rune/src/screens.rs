@@ -433,8 +433,7 @@ mod tests {
     struct Fake { responses: RefCell<Vec<(String, chatsvc::Reply, bool)>> }
     impl Actions for Fake {
         fn open(&self, _: &str) {}
-        fn send(&self, _: &str, _: String) {}
-        fn post(&self, _: &str, _: String) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn respond_event(&self, id: &str, _: Option<&str>, reply: chatsvc::Reply, send_response: bool) {
             self.responses.borrow_mut().push((id.to_owned(), reply, send_response));
         }
