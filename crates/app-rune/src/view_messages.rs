@@ -147,8 +147,8 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
 /// The history sticks to the bottom, so it sits under the last message and above the composer.
 fn typing<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let id = s.selected.as_deref()?;
-    let typers: Vec<_> = s.typing.values()
-        .filter(|e| e.conversation_id == id && (chrono::Utc::now() - e.received_at).num_seconds() < 8).collect();
+    // `main::poll` already drops events older than eight seconds.
+    let typers: Vec<_> = s.typing.values().filter(|e| e.conversation_id == id).collect();
     let first = typers.first()?;
     let names: Vec<&str> = typers.iter().map(|e| e.display_name.as_str()).collect();
     let palette = active_palette();
@@ -202,13 +202,13 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
-    let mut row = col().w_full().pt(gap).pl(indent).hover_group().child(content);
+    let mut line = col().w_full().pt(gap).pl(indent).hover_group().child(content);
     if !s.read_only && !m.deleted {
         let id = m.id.clone();
-        row = row.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
+        line = line.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
     }
-    if s.appearing.contains(&m.id) { row = row.transition(arrival(own)); }
-    crate::find::mark(s, &m.id, row)
+    if s.appearing.contains(&m.id) { line = line.transition(arrival(own)); }
+    crate::find::mark(s, &m.id, line)
 }
 
 fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
