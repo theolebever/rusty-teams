@@ -117,8 +117,9 @@ fn search<A: Actions>(s: &mut UiState<A>) {
 
 fn press_row<A: Actions>(s: &mut UiState<A>, row: DriveEntry) {
     if row.is_folder() {
-        s.compose.cloud.crumbs.push((row.name.clone(), row.folder()));
-        show(s, Place::Folder(row.folder()));
+        let folder = row.folder();
+        s.compose.cloud.crumbs.push((row.name, folder.clone()));
+        show(s, Place::Folder(folder));
         return;
     }
     let selected = &mut s.compose.cloud.selected;

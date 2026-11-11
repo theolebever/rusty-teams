@@ -793,15 +793,16 @@ impl Actions for Bridge {
         };
         let shared = self.shared.clone();
         app_backend::runtime::handle().spawn(async move {
-            let result = match &place {
-                Place::Recent => engine.picker_recent().await
-                    .map(|files| files.into_iter().map(|(file, owner)| entry(file, owner)).collect()),
-                Place::MyFiles => async { engine.picker_folder(&engine.picker_root(None).await?).await }.await,
-                Place::Shared => engine.picker_shared().await,
-                Place::Folder(folder) => engine.picker_folder(folder).await,
-                Place::Search(query) => engine.search_cloud_files(&teams_core::substrate_search::SearchSession::new(), query).await
-                    .map(|files| files.into_iter().map(|file| entry(file, None)).collect()),
-            };
+            let result: teams_core::Result<Vec<_>> = async {
+                Ok(match &place {
+                    Place::Recent => engine.picker_recent().await?.into_iter().map(|(file, owner)| entry(file, owner)).collect(),
+                    Place::MyFiles => engine.picker_folder(&engine.picker_root(None).await?).await?,
+                    Place::Shared => engine.picker_shared().await?,
+                    Place::Folder(folder) => engine.picker_folder(folder).await?,
+                    Place::Search(query) => engine.search_cloud_files(&teams_core::substrate_search::SearchSession::new(), query).await?
+                        .into_iter().map(|file| entry(file, None)).collect(),
+                })
+            }.await;
             shared.publish(Update::CloudFiles { place, result: result.map_err(|error| error.to_string()) });
         });
     }
