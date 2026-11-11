@@ -11,7 +11,7 @@ use crate::avatar::rgb;
 use crate::icons::sym;
 use crate::media;
 use crate::types::Actions;
-use crate::ui::{INK, LINE, MUTED, UiState, active_target, c, select_thread, send, ts};
+use crate::ui::{INK, MUTED, UiState, active_target, c, select_thread, send, ts};
 
 const ICON: f32 = 20.0;
 const BUTTON: f32 = 32.0;
@@ -68,7 +68,7 @@ fn format_selection(edit: &mut TextEdit, before: &str, after: &str) {
     edit.set_selection(start + before.len(), start + insertion.len() - after.len());
 }
 
-pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
+pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> El {
     let palette = active_palette();
     let target = active_target(s);
     let has_text = !s.composer.text.trim().is_empty();
@@ -136,7 +136,15 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
         })
         .child(sym("send", ICON).color(if has_text { c(ACCENT) } else { c(MUTED) }));
 
-    let bar = row()
+    let actions = row().key("composer-actions").gap(INSET).center_y()
+        .child(toolbar).child(el().grow(1.0)).child(send_button);
+    let contents = if stacked {
+        col().w_full().gap(INSET).child(field).child(actions.w_full())
+    } else {
+        row().w_full().gap(INSET).center_y().child(field)
+            .child(actions)
+    };
+    let bar = col()
         .key("composer-bar")
         .w_full()
         .px(INSET)
@@ -146,10 +154,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>) -> El {
         .radius(6.0)
         .border(1.0, rgb(palette.border_strong))
         .fill(rgb(palette.surface))
-        .child(field)
-        .child(toolbar)
-        .child(el().w(1.0).h(20.0).fill(c(LINE)))
-        .child(send_button);
+        .child(contents);
 
     col()
         .w_full()
@@ -277,7 +282,11 @@ mod tests {
 
     #[test]
     fn attach_icon_and_send_sit_inline_right_of_the_field() {
-        let rt = rt();
+        let mut rt = rt();
+        rt.viewport = (1440.0, 900.0);
+        rt.update(|_, _| {});
+        rt.frame(0.1);
+        rt.frame(0.2);
         let [field_x, _, field_w, _] = rect(&rt, "composer");
         let [attach_x, attach_y, attach_w, attach_h] = rect(&rt, "attach-file");
         let [send_x, send_y, send_w, send_h] = rect(&rt, "send");

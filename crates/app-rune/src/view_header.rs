@@ -312,6 +312,21 @@ mod tests {
     }
 
     #[test]
+    fn narrow_composer_keeps_actions_below_the_input() {
+        let mut rt = runtime("c0");
+        rt.viewport = (900.0, 700.0);
+        rt.update(|_, _| {});
+        rt.frame(0.1);
+        rt.frame(0.2);
+        let elements = rt.elements();
+        let rect = |key: &str| elements.iter().find(|e| e.path.ends_with(&format!("/{key}"))).unwrap().rect;
+        let field = rect("composer-field");
+        let actions = rect("composer-actions");
+        assert!(field[2] >= 200.0, "input must retain usable width: {field:?}");
+        assert!(actions[1] >= field[1] + field[3], "actions {actions:?} overlap input {field:?}");
+    }
+
+    #[test]
     fn windowed_header_actions_fit_inside_the_conversation() {
         let mut rt = runtime("c0");
         for width in [900.0, 1100.0, 1440.0] {

@@ -388,7 +388,7 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool) -> El {
         .child(crate::find::bar(s))
         .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s) })
         .child(crate::find::jump_bar(s))
-        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s) })
+        .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s, compact) })
 }
 
 #[cfg(test)]
