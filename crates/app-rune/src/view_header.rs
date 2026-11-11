@@ -110,11 +110,6 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
                 }
             })));
     }
-    let names: Vec<_> = s.typing.values().filter(|e| e.conversation_id == id && (chrono::Utc::now() - e.received_at).num_seconds() < 8)
-        .map(|e| e.display_name.as_str()).collect();
-    if !names.is_empty() {
-        block = block.child(text(format!("{} is typing…", names.join(", "))).key("typing-indicator").font(ts(12.0, 400.0)).color(c(MUTED)).px(HEADER_PAD));
-    }
     if let Some(pinned) = s.pinned.as_ref().filter(|pinned| pinned.conversation_id == id) {
         block = block.child(col().w_full().padding(PIN_INSET).child(pinned_bar(pinned)));
     }

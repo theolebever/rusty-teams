@@ -159,7 +159,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
     col()
         .w_full()
         .px(20.0)
-        .pt(8.0)
+        .pt(16.0)
         .pb(16.0)
         .gap(6.0)
         .children(s.format_open.then(|| {

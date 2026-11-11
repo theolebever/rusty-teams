@@ -125,7 +125,7 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
         .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
         .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s)));
     let id = s.selected.clone().unwrap_or_default();
-    col()
+    let history = col()
         .key("messages")
         .grow(1.0)
         .min_h(0.0)
@@ -135,7 +135,26 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
             .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
             .child(text("Load older messages").font(ts(13.0, 600.0)).color(rgb(active_palette().foreground))))
         // Rune: a virtual/growth stack must be the last child of its scroll viewport.
-        .child(rows)
+        .child(rows);
+    col().grow(1.0).min_h(0.0).w_full().child(history).children(typing(s))
+}
+
+/// Who is typing in the open chat, as one more incoming message under the history: their
+/// avatar and a bubble with three still dots (no loop: Rune presents every frame while one runs).
+/// The history sticks to the bottom, so it sits under the last message and above the composer.
+fn typing<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    let id = s.selected.as_deref()?;
+    let typers: Vec<_> = s.typing.values()
+        .filter(|e| e.conversation_id == id && (chrono::Utc::now() - e.received_at).num_seconds() < 8).collect();
+    let first = typers.first()?;
+    let names: Vec<&str> = typers.iter().map(|e| e.display_name.as_str()).collect();
+    let palette = active_palette();
+    let dot = || el().size(6.0, 6.0).radius(3.0).fill(rgb(palette.text_muted));
+    Some(row().key("typing-indicator").w_full().px(20.0).pt(16.0).pb(8.0).gap(AVATAR_GAP).center_y()
+        .label(format!("{} is typing", names.join(", ")))
+        .child(crate::avatar::person(s, &first.display_name, Some(&first.user_id), AVATAR, None))
+        .child(row().h(AVATAR).px(12.0).gap(4.0).center_y().radius(AVATAR / 2.0).fill(rgb(palette.bubble_other))
+            .child(dot()).child(dot()).child(dot())))
 }
 
 pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
@@ -460,6 +479,25 @@ mod tests {
         rt.update(|s, tx| crate::ui::open_chat(s, "a", tx));
         arrive(&mut rt, vec![msg("m1", "Ada", false, "hi"), msg("m3", "Bo", false, "new")]);
         assert!(rt.state.appearing.is_empty(), "reopening a chat is no arrival");
+    }
+
+    #[test]
+    fn someone_typing_shows_as_a_bubble_under_the_last_message() {
+        let mut rt = show(vec![msg("m1", "Ada", false, "hi")]);
+        assert!(rt.find("typing-indicator").is_none());
+        let event = |conversation: &str| chatsvc::TypingEvent { conversation_id: conversation.into(), user_id: "bo".into(), display_name: "Bo".into(), active: true, received_at: chrono::Utc::now() };
+        rt.update(move |s, _| s.apply(Update::Typing(event("other"))));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("typing-indicator").is_none(), "typing in another chat shows nothing here");
+        rt.update(move |s, _| s.apply(Update::Typing(event("a"))));
+        rt.frame(1.0 / 60.0);
+        let bubble = rt.find("typing-indicator").expect("typing bubble");
+        let last = rt.find("msg-m1").unwrap();
+        let composer = rt.find("composer").unwrap();
+        assert!(last.1 < bubble.1 && bubble.1 < composer.1, "between the last message {last:?} and the composer {composer:?}: {bubble:?}");
+        rt.update(move |s, _| s.apply(Update::Typing(chatsvc::TypingEvent { active: false, ..event("a") })));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("typing-indicator").is_none());
     }
 
     #[test]
