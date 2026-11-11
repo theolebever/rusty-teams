@@ -14,8 +14,6 @@ use crate::ui::{INK, LINE, MUTED, UiState, c, text, ts};
 
 const LIST_H: f32 = 240.0;
 const ROW_H: f32 = 40.0;
-const ERROR: &str = "#C4314B";
-const ACCENT: &str = "#5B5FC7";
 const TABS: [(Place, &str, &str); 3] =
     [(Place::Recent, "Recent", "cloud-tab-recent"), (Place::MyFiles, "My files", "cloud-tab-mine"), (Place::Shared, "Shared with me", "cloud-tab-shared")];
 
@@ -176,7 +174,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
         let current = index == cloud.tab && !matches!(cloud.asked, Some(Place::Search(_)));
         tabs = tabs.child(row().key(*key).h(28.0).px(10.0).center_y().radius(6.0).hover(hover)
             .on_press(move |s: &mut UiState<A>| open_tab(s, index))
-            .child(text(*label).font(ts(13.0, if current { 700.0 } else { 400.0 })).color(c(if current { ACCENT } else { INK }))));
+            .child(text(*label).font(ts(13.0, if current { 700.0 } else { 400.0 })).color(if current { rgb(palette.accent_text) } else { c(INK) })));
     }
 
     let search_box = row().w_full().h(32.0).px(8.0).center_y().radius(6.0).border(1.0, c(LINE)).child(
@@ -194,12 +192,12 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
     let crumbs = (!cloud.crumbs.is_empty()).then(|| {
         let tab = cloud.tab;
         let mut trail = row().key("cloud-crumbs").gap(4.0).center_y()
-            .child(text(TABS[tab].1).key("cloud-crumb-root").font(ts(12.0, 600.0)).color(c(ACCENT))
+            .child(text(TABS[tab].1).key("cloud-crumb-root").font(ts(12.0, 600.0)).color(rgb(palette.accent_text))
                 .on_press(move |s: &mut UiState<A>| open_tab(s, tab)));
         for (index, (name, folder)) in cloud.crumbs.iter().enumerate() {
             let folder = folder.clone();
             trail = trail.child(text("›").font(ts(12.0, 400.0)).color(c(MUTED)))
-                .child(text(name.clone()).key(format!("cloud-crumb-{index}")).font(ts(12.0, 600.0)).color(c(ACCENT))
+                .child(text(name.clone()).key(format!("cloud-crumb-{index}")).font(ts(12.0, 600.0)).color(rgb(palette.accent_text))
                     .on_press(move |s: &mut UiState<A>| {
                         s.compose.cloud.crumbs.truncate(index + 1);
                         show(s, Place::Folder(folder.clone()));
@@ -212,7 +210,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
     match &cloud.rows {
         Rows::Loading => list = list.child(note("Loading…".into())),
         Rows::Failed(error) => list = list.child(text(format!("Couldn't load files: {error}")).key("cloud-error")
-            .font(ts(13.0, 400.0)).color(c(ERROR)).wrap()),
+            .font(ts(13.0, 400.0)).color(rgb(palette.red)).wrap()),
         Rows::Ready(rows) if rows.is_empty() => list = list.child(note(match cloud.asked {
             Some(Place::Search(_)) => "No files found.".into(),
             Some(Place::Folder(_)) => "This folder is empty.".into(),
@@ -222,7 +220,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
             for (index, entry) in rows.iter().enumerate() {
                 let picked = cloud.selected.iter().any(|file| file.web_url == entry.web_url);
                 let mark = if entry.is_folder() { sym("keyboard_arrow_right", 16.0).color(c(MUTED)) }
-                    else if picked { sym("check", 16.0).color(c(ACCENT)) }
+                    else if picked { sym("check", 16.0).color(rgb(palette.accent_text)) }
                     else { el().size(16.0, 16.0) };
                 let pressed = entry.clone();
                 list = list.child(row().key(format!("cloud-row-{index}")).w_full().h(ROW_H).px(8.0).gap(10.0).center_y().radius(6.0)
@@ -240,13 +238,13 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(text(if count == 0 { String::new() } else { format!("{count} selected") }).font(ts(12.0, 400.0)).color(c(MUTED)).grow(1.0))
         .child(crate::screens::button("Cancel", "cloud-cancel", |s: &mut UiState<A>, tx| { close(s); tx.focus("composer", false); }))
         .child(row().key("cloud-attach").h(32.0).px(12.0).center().radius(6.0)
-            .fill(c(if count == 0 { LINE } else { ACCENT }))
+            .fill(if count == 0 { c(LINE) } else { rgb(palette.accent) })
             .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
                 if s.compose.cloud.selected.is_empty() { return; }
                 attach(s);
                 tx.focus("composer", false);
             })
-            .child(text("Attach").font(ts(13.0, 600.0)).color(c(if count == 0 { MUTED } else { "#FFFFFF" }))));
+            .child(text("Attach").font(ts(13.0, 600.0)).color(if count == 0 { c(MUTED) } else { rgb(palette.on_accent) })));
 
     col()
         .key("cloud-picker")

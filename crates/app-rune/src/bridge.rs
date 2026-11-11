@@ -796,10 +796,7 @@ impl Actions for Bridge {
             let result = match &place {
                 Place::Recent => engine.picker_recent().await
                     .map(|files| files.into_iter().map(|(file, owner)| entry(file, owner)).collect()),
-                Place::MyFiles => match engine.picker_root(None).await {
-                    Ok(root) => engine.picker_folder(&root).await,
-                    Err(error) => Err(error),
-                },
+                Place::MyFiles => async { engine.picker_folder(&engine.picker_root(None).await?).await }.await,
                 Place::Shared => engine.picker_shared().await,
                 Place::Folder(folder) => engine.picker_folder(folder).await,
                 Place::Search(query) => engine.search_cloud_files(&teams_core::substrate_search::SearchSession::new(), query).await
@@ -902,7 +899,7 @@ const WARM_CHATS: usize = 15;
 
 fn recent_chat_ids(chats: &[ChatRecord], count: usize) -> Vec<String> {
     let mut recent: Vec<_> = chats.iter().collect();
-    recent.sort_by(|left, right| right.last_message_at.cmp(&left.last_message_at));
+    recent.sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at));
     recent.into_iter().take(count).map(|chat| chat.id.clone()).collect()
 }
 
