@@ -6,19 +6,12 @@
   const sealed = [];
   let activeHome = null;
   let opened = 0;
+  let plain = 0;
+  let loaded = false;
   const take = (key, entry) => {
     if (key.endsWith('active-account-filters') && entry.homeAccountId) activeHome = entry.homeAccountId;
     if (typeof entry.secret === 'string') entries.push(entry);
   };
-  for (let index = 0; index < localStorage.length; index++) {
-    const key = localStorage.key(index);
-    let entry;
-    try { entry = JSON.parse(localStorage.getItem(key)); } catch (error) { continue; }
-    if (!entry || typeof entry !== 'object') continue;
-    if (entry.id && entry.nonce && entry.data) sealed.push([key, entry]);
-    else take(key, entry);
-  }
-  const plain = entries.length;
   // Newer MSAL.js seals its localStorage cache: AES-GCM under a key from the msal.cache.encryption session cookie.
   const unseal = async () => {
     const cookie = document.cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('msal.cache.encryption='));
@@ -51,10 +44,26 @@
       }
     }
   };
-  if (sealed.length) await unseal();
+  // Teams keeps megabytes in localStorage: parse it only when the in-page token memo misses.
+  const load = async () => {
+    if (loaded) return;
+    loaded = true;
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      let entry;
+      try { entry = JSON.parse(localStorage.getItem(key)); } catch (error) { continue; }
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.id && entry.nonce && entry.data) sealed.push([key, entry]);
+      else take(key, entry);
+    }
+    plain = entries.length;
+    if (sealed.length) await unseal();
+  };
   const ownAccount = (entry) => !activeHome || entry.homeAccountId === activeHome;
   const homeTenant = (entry) => (entry.homeAccountId || '').split('.')[1];
   const cache = (window.__rustyTeamsTokens = window.__rustyTeamsTokens || {});
+  // Lives until the page reloads, which a sign-out or the 401 path triggers anyway.
+  const memo = (window.__rustyTeamsGrants = window.__rustyTeamsGrants || {});
   const acquire = async (resource, scope) => {
     const base = resource.replace(/\/+$/, '');
     const wanted = (base + '/' + scope).toLowerCase();
@@ -63,6 +72,11 @@
     const grants = (scopes) => scopes.some(s => (scope === '.default' ? underResource(s) : covers(normalize(s), wanted))
       || (base === 'https://graph.microsoft.com' && covers(s.toLowerCase(), short)));
     const cacheKey = nestedApp ? base + '|' + nestedApp.clientId : base;
+    const memoKey = cacheKey + '|' + short;
+    const hit = memo[memoKey];
+    if (forceRefresh) delete memo[memoKey];
+    else if (hit && fresh(hit.expires)) return {token: hit.token, refreshError: null};
+    await load();
     let token = null, expiresOn = 0;
     for (const entry of forceRefresh ? [] : entries) {
       if (entry.credentialType !== 'AccessToken' || (entry.tokenType && entry.tokenType !== 'Bearer')) continue;
@@ -74,7 +88,7 @@
     }
     const cached = cache[cacheKey];
     if (!token && !forceRefresh && cached && fresh(cached.expires)) {
-      if (grants(cached.scopes)) token = cached.token;
+      if (grants(cached.scopes)) { token = cached.token; expiresOn = cached.expires; }
       else return {token: null, refreshError: `the app is not granted ${scope}`};
     }
     const refreshTokens = entries
@@ -100,12 +114,13 @@
         if (!response.ok) { refreshError = answer.error || `HTTP ${response.status}`; continue; }
         const scopes = (answer.scope || '').split(' ');
         cache[cacheKey] = {token: answer.access_token, scopes, expires: Date.now() + answer.expires_in * 1000};
-        if (grants(scopes)) { token = answer.access_token; break; }
+        if (grants(scopes)) { token = answer.access_token; expiresOn = cache[cacheKey].expires; break; }
         refreshError = `the app is not granted ${scope}`;
       } catch (error) {
         refreshError = String(error);
       }
     }
+    if (token) memo[memoKey] = {token, expires: expiresOn};
     return {token, refreshError};
   };
   const {token, refreshError} = await acquire(resource, scope);
