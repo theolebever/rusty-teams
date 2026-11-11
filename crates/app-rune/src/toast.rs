@@ -85,10 +85,12 @@ impl State {
     }
 }
 
-pub fn reconnect<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bool) -> El {
+/// The icon holds still. On Windows a moving icon redraws the window as fast as present
+/// returns, hundreds of frames a second, for as long as the connection takes; the status line
+/// under it already shows progress.
+pub fn reconnect<A: Actions + 'static>(s: &UiState<A>, _reduced_motion: bool) -> El {
     let palette = active_palette();
     let indicator = sym("smart_toy", 42.0).color(rgb(palette.accent));
-    let indicator = if reduced_motion { indicator } else { indicator.looping(LoopSpec::rotation(2.0)) };
     col().key("reconnecting").w_full().grow(1.0).min_h(0.0).center().gap(18.0).padding(24.0)
         .child(indicator)
         .child(text("Connecting to Teams").font(ts(20.0, 600.0)).color(rgb(palette.foreground)))
