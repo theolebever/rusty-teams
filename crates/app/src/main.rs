@@ -135,6 +135,7 @@ fn transport(
         let transport = webview::start(webview::HostConfig {
             user_data_folder,
             window_title: format!("{APP_NAME} - Sign in"),
+            log: |message| app_base::diagnostics::record(message.to_owned()),
         });
         task_dialog::install_host(transport.clone());
         return transport;
@@ -160,6 +161,7 @@ fn open_store(path: &std::path::Path) -> Store {
 }
 
 fn main() {
+    session::ensure_crypto_provider();
     app_base::version::set_build_version(VERSION_MARKER.trim_start_matches("teams-build:"));
     if let Some(tag) = option_env!("TEAMS_RELEASE_TAG") {
         app_base::version::set_release_tag(tag);

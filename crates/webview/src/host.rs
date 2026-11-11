@@ -26,6 +26,7 @@ use crate::cdp_failure::{CallContext, failure_reason, tab_state};
 use crate::fanout::Subscribers;
 use crate::host_dialog::{self, Dialog};
 use crate::park::{ParkDecision, ParkGate};
+use crate::sleep::{Activity, CallTally, Sleep, blocker, call_label};
 use crate::transport::{HostState, UiRequest, WebViewTransport};
 use crate::{BROWSER_ARGUMENTS, FORWARDED_EVENTS};
 
@@ -36,6 +37,9 @@ const LOGIN_TIMER: usize = 1;
 const LOGIN_SHOW_DELAY_MS: u32 = 4000;
 const PARK_TIMER: usize = 2;
 const PARK_DELAY_MS: u32 = 60_000;
+const SLEEP_TIMER: usize = 3;
+const SLEEP_CHECK_MS: u32 = 60_000;
+const BUSY_REPORT_EVERY: u32 = 10;
 const LOGIN_PROMPT_INTERVAL: Duration = Duration::from_secs(600);
 const WINDOW_WIDTH: i32 = 1100;
 const WINDOW_HEIGHT: i32 = 800;
@@ -44,6 +48,7 @@ const WINDOW_HEIGHT: i32 = 800;
 pub struct HostConfig {
     pub user_data_folder: PathBuf,
     pub window_title: String,
+    pub log: fn(&str),
 }
 
 struct View {
@@ -63,6 +68,10 @@ pub(crate) struct Shared {
     requests: mpsc::Receiver<UiRequest>,
     restarting: Cell<bool>,
     last_login_prompt: Cell<Option<Instant>>,
+    sleep: RefCell<Sleep<TabCommand>>,
+    sleep_blocker: Cell<Option<&'static str>>,
+    calls: RefCell<CallTally>,
+    busy_checks: Cell<u32>,
 }
 
 thread_local! {
@@ -124,9 +133,14 @@ fn run(
         requests,
         restarting: Cell::new(false),
         last_login_prompt: Cell::new(None),
+        sleep: RefCell::new(Sleep::default()),
+        sleep_blocker: Cell::new(None),
+        calls: RefCell::new(CallTally::default()),
+        busy_checks: Cell::new(0),
     });
     SHARED.with(|slot| *slot.borrow_mut() = Some(shared.clone()));
     load(&shared);
+    unsafe { SetTimer(Some(shared.windows[&App::Teams]), SLEEP_TIMER, SLEEP_CHECK_MS, None) };
     let mut message = MSG::default();
     while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
         unsafe {
@@ -170,7 +184,7 @@ fn create_windows(title: &str) -> windows::core::Result<HashMap<App, HWND>> {
 }
 
 fn load(shared: &Rc<Shared>) {
-    match create_views(shared) {
+    match create_views(shared, |app| app.start_url()) {
         Ok(()) => shared.state.send_modify(|state| {
             state.ready = true;
             state.failure = None;
@@ -182,11 +196,11 @@ fn load(shared: &Rc<Shared>) {
     }
 }
 
-fn create_views(shared: &Rc<Shared>) -> std::result::Result<(), String> {
+fn create_views(shared: &Rc<Shared>, first_url: impl Fn(App) -> &'static str) -> std::result::Result<(), String> {
     let environment = create_environment(&shared.config.user_data_folder)?;
     *shared.environment.borrow_mut() = Some(environment.clone());
     for app in App::ALL {
-        let view = create_view(shared, &environment, app)
+        let view = create_view(shared, &environment, app, first_url(app))
             .map_err(|error| format!("{app} webview: {error}"))?;
         shared.views.borrow_mut().insert(app, view);
     }
@@ -241,6 +255,7 @@ fn create_view(
     shared: &Rc<Shared>,
     environment: &ICoreWebView2Environment,
     app: App,
+    first_url: &str,
 ) -> windows::core::Result<View> {
     let window = shared.windows[&app];
     let (sender, receiver) = mpsc::channel();
@@ -275,7 +290,7 @@ fn create_view(
     watch_loads(&webview, app)?;
     watch_failures(&webview, app)?;
     forward_events(&webview, app)?;
-    navigate_with_mobile_user_agent(&webview, app)?;
+    navigate_with_mobile_user_agent(&webview, first_url)?;
     Ok(View {
         controller,
         webview,
@@ -284,10 +299,11 @@ fn create_view(
 
 // The override must land before the first request, sign-in redirects included, so the
 // start page is only loaded once the DevTools call has completed (or failed).
-fn navigate_with_mobile_user_agent(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
+fn navigate_with_mobile_user_agent(webview: &ICoreWebView2, first_url: &str) -> windows::core::Result<()> {
     let target = webview.clone();
+    let first_url = first_url.to_owned();
     let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |_, _| {
-        unsafe { target.Navigate(&HSTRING::from(app.start_url())) }
+        unsafe { target.Navigate(&HSTRING::from(&first_url)) }
     }));
     unsafe {
         webview.CallDevToolsProtocolMethod(
@@ -316,8 +332,16 @@ fn watch_loads(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
             return Ok(());
         };
         let url = current_url(&shared, app);
+        let waiting = shared.sleep.borrow_mut().loaded(app);
+        for command in waiting {
+            call(&shared, app, command);
+        }
         if is_running_app(app, &url) {
             unsafe { SetTimer(Some(shared.windows[&app]), PARK_TIMER, PARK_DELAY_MS, None) };
+            if shared.park_gate.borrow().held(app) {
+                set_memory_level(&sender, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+                release_memory(&sender);
+            }
         } else if app.is_park_url(&url) {
             release_memory(&sender);
         }
@@ -338,6 +362,21 @@ fn park(shared: &Shared, app: App) {
         unsafe {
             let _ = webview.Navigate(&HSTRING::from(app.park_url()));
         }
+    }
+}
+
+/// A held tab stays loaded for the whole call, so its renderer is told to shrink instead of being parked.
+fn hold(shared: &Rc<Shared>, app: App, held: bool) {
+    if held {
+        wake_views(shared, None);
+    }
+    shared.park_gate.borrow_mut().hold(app, held);
+    if held
+        && let Some(webview) = webview_of(shared, app)
+        && is_running_app(app, &current_url(shared, app))
+    {
+        set_memory_level(&webview, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+        release_memory(&webview);
     }
 }
 
@@ -369,6 +408,9 @@ fn watch_failures(webview: &ICoreWebView2, app: App) -> windows::core::Result<()
         };
         let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
         unsafe { arguments.ProcessFailedKind(&mut kind) }?;
+        if shared.sleep.borrow().asleep() {
+            return Ok(());
+        }
         if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED {
             if !shared.restarting.replace(true) {
                 unsafe {
@@ -457,13 +499,14 @@ fn drain(shared: &Rc<Shared>) {
             UiRequest::Call { app, command } => call(shared, app, command),
             UiRequest::Subscribe { app, sink } => shared.subscribers.borrow_mut().add(app, sink),
             UiRequest::Wake { app } => wake(shared, app),
-            UiRequest::Hold { app, held } => shared.park_gate.borrow_mut().hold(app, held),
+            UiRequest::Hold { app, held } => hold(shared, app, held),
             UiRequest::Retry => {
                 if !shared.state.borrow().ready && !shared.restarting.replace(true) {
                     restart(shared);
                 }
             }
             UiRequest::OpenDialog { id, spec, events } => {
+                wake_views(shared, None);
                 host_dialog::open(shared, id, spec, events)
             }
             UiRequest::Dialog { id, command } => host_dialog::run(shared, id, command),
@@ -471,7 +514,13 @@ fn drain(shared: &Rc<Shared>) {
     }
 }
 
-fn call(shared: &Shared, app: App, command: TabCommand) {
+fn call(shared: &Rc<Shared>, app: App, command: TabCommand) {
+    shared.sleep.borrow_mut().touch(Instant::now());
+    shared.calls.borrow_mut().note(format!("{app} {}", call_label(&command.method, &command.params)));
+    wake_views(shared, None);
+    let Some(command) = shared.sleep.borrow_mut().admit(app, command) else {
+        return;
+    };
     let Some(webview) = webview_of(shared, app) else {
         return command.respond(Err(Error::Cdp("webview is restarting".into())));
     };
@@ -529,7 +578,11 @@ fn describe_failure(app: App, method: &str, parameters_bytes: usize, hresult: &s
     failure_reason(&context, hresult, json)
 }
 
-fn wake(shared: &Shared, app: App) {
+fn wake(shared: &Rc<Shared>, app: App) {
+    if shared.sleep.borrow().asleep() {
+        wake_views(shared, Some(app));
+        return;
+    }
     let Some(webview) = webview_of(shared, app) else {
         return;
     };
@@ -573,6 +626,10 @@ fn show(shared: &Shared, app: App) {
 
 fn restart(shared: &Rc<Shared>) {
     shared.state.send_modify(|state| state.ready = false);
+    let stranded = shared.sleep.borrow_mut().reset();
+    for command in stranded {
+        command.respond(Err(Error::Cdp("webview is restarting".into())));
+    }
     shared.subscribers.borrow_mut().clear();
     shared.park_gate.borrow_mut().forget_commands();
     host_dialog::close_all(shared);
@@ -589,6 +646,70 @@ fn restart(shared: &Rc<Shared>) {
     }
     load(shared);
     shared.restarting.set(false);
+}
+
+/// Both apps parked and unused for a while: the web views close so the browser processes exit.
+fn maybe_sleep(shared: &Rc<Shared>) {
+    let urls: Vec<String> = App::ALL.iter().map(|&app| current_url(shared, app)).collect();
+    let activity = Activity {
+        restarting: shared.restarting.get(),
+        all_parked: App::ALL.iter().zip(&urls).all(|(app, url)| app.is_park_url(url)),
+        login_pending: urls.iter().any(|url| is_login_url(url)),
+        held: App::ALL.iter().any(|&app| shared.park_gate.borrow().held(app)),
+        in_flight: App::ALL.iter().any(|&app| shared.park_gate.borrow().in_flight(app) > 0),
+        dialogs_open: !shared.dialogs.borrow().is_empty(),
+        subscribed: shared.subscribers.borrow_mut().has_live(),
+    };
+    if !shared.sleep.borrow().quiet(Instant::now()) {
+        let checks = shared.busy_checks.get() + 1;
+        shared.busy_checks.set(checks % BUSY_REPORT_EVERY);
+        if checks == BUSY_REPORT_EVERY && !shared.sleep.borrow().asleep() {
+            let summary = shared.calls.borrow_mut().summary();
+            (shared.config.log)(&format!("webview: busy, calls in the last {BUSY_REPORT_EVERY} min: {summary}"));
+        }
+        return;
+    }
+    shared.busy_checks.set(0);
+    let blocked = blocker(activity);
+    if blocked != shared.sleep_blocker.replace(blocked)
+        && let Some(reason) = blocked
+    {
+        (shared.config.log)(&format!("webview: stays awake, {reason}"));
+    }
+    if blocked.is_some() {
+        return;
+    }
+    shared.sleep.borrow_mut().fall_asleep();
+    (shared.config.log)("webview: asleep");
+    let views: Vec<View> = shared.views.borrow_mut().drain().map(|(_, view)| view).collect();
+    for view in views {
+        unsafe {
+            let _ = view.controller.Close();
+        }
+    }
+    *shared.environment.borrow_mut() = None;
+}
+
+/// Brings the web views back at the park page, or `full` at the running app when it was asked to reload.
+fn wake_views(shared: &Rc<Shared>, full: Option<App>) {
+    if !shared.sleep.borrow_mut().wake() {
+        return;
+    }
+    (shared.config.log)(&match full {
+        Some(app) => format!("webview: awake, {app} reloads"),
+        None => "webview: awake".to_owned(),
+    });
+    let outcome = create_views(shared, |app| if Some(app) == full { app.start_url() } else { app.park_url() });
+    if let Err(reason) = outcome {
+        let stranded = shared.sleep.borrow_mut().reset();
+        for command in stranded {
+            command.respond(Err(Error::Cdp(reason.clone())));
+        }
+        shared.state.send_modify(|state| {
+            state.ready = false;
+            state.failure = Some(reason);
+        });
+    }
 }
 
 pub(crate) fn fit(window: HWND, controller: &ICoreWebView2Controller) {
@@ -637,6 +758,7 @@ extern "system" fn window_procedure(
                 shared.last_login_prompt.set(Some(Instant::now()));
             }
         }
+        WM_TIMER if wparam.0 == SLEEP_TIMER => maybe_sleep(&shared),
         WM_TIMER if wparam.0 == PARK_TIMER => {
             unsafe {
                 let _ = KillTimer(Some(window), PARK_TIMER);

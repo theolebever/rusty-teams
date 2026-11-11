@@ -114,6 +114,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
 }
 
 fn main() {
+    session::ensure_crypto_provider();
     if std::env::args().any(|argument| matches!(argument.as_str(), "--help" | "-h")) {
         print!("{}", arguments::HELP);
         return;

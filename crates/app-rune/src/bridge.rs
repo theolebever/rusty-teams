@@ -1132,6 +1132,7 @@ fn transport(database: &Path, no_sso: bool) -> Arc<dyn session::Transport> {
     webview::start(webview::HostConfig {
         user_data_folder,
         window_title: WINDOW_TITLE.into(),
+        log: |message| app_backend::diagnostics::record(message.to_owned()),
     })
 }
 

@@ -2,6 +2,7 @@ mod app;
 mod error;
 mod events;
 mod http;
+mod native;
 mod page_script;
 mod request;
 mod scope;
@@ -14,6 +15,7 @@ pub use events::{
     TabChannel, TabCommand, TabControl, TabEvent, TabEvents, USER_AGENT_OVERRIDE_METHOD,
     user_agent_override,
 };
+pub use native::ensure_crypto_provider;
 pub use page_script::token_acquirer_script;
 pub use request::{ApiResponse, AugloopExchange, AugloopStage, BodyToken, Method, Request, SignalrExchange};
 pub use scope::{GRAPH, IC3, NestedApp, OUTLOOK, PRESENCE, SPACES, Scope};
