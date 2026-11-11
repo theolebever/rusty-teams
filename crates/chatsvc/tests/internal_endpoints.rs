@@ -36,6 +36,7 @@ const ALLOWED_PATHS: &[(&str, &str)] = &[
     ("core/src/message_link.rs", "message link parsing"),
     ("core/src/call_event.rs", "recording link host check"),
     ("core/src/external_image.rs", "GIF host check"),
+    ("graph/src/content.rs", "public GIF and sticker CDN allowlist"),
     ("app-call-model/src/agenda.rs", "demo join link"),
     ("app-call-model/src/demo.rs", "demo data"),
     ("app-state/src/demo.rs", "demo data"),

@@ -1,5 +1,5 @@
 //! Contract between the backend bridge (`bridge.rs`) and the Rune view (`ui.rs`).
-//! Plain data only: no Rune, no tokio, no store types.
+//! Data snapshots only: no Rune or runtime handles.
 
 /// One row of the chat list, newest activity first.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +23,7 @@ pub struct TeamRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChannelRow {
+    pub hidden: bool,
     pub id: String,
     pub name: String,
     pub unread: bool,
@@ -31,6 +32,8 @@ pub struct ChannelRow {
 /// One message of the open conversation, oldest first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageRow {
+    pub sender_id: Option<String>,
+    pub system: bool,
     pub id: String,
     pub reply_to_id: Option<String>,
     pub deleted: bool,
@@ -53,6 +56,16 @@ pub struct PinnedRow {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ChatDetails {
+    pub avatar_id: Option<String>,
+    /// Up to two other people of a group chat, drawn as a pair when it has no picture of its own.
+    pub group: Vec<store::MemberRecord>,
+    pub members: Vec<store::MemberRecord>,
+    pub muted: bool,
+    pub presence: Option<teams_core::Presence>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SendTarget {
     pub conversation_id: String,
@@ -60,11 +73,46 @@ pub struct SendTarget {
     pub channel: bool,
 }
 
+/// A directory search hit, for the new-chat and add-people panels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Person {
+    pub user_id: String,
+    pub name: String,
+    pub mail: Option<String>,
+}
+
+/// What the composer hands over at send: the text, its real mentions and chosen GIFs.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Composed {
+    pub text: String,
+    pub mentions: Vec<teams_core::MentionInput>,
+    pub gifs: Vec<chatsvc::Gif>,
+}
+
 /// What the bridge reports to the view. The view applies them in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
+    /// Directory search answer for `query` (`new_chat.rs`).
+    People { query: String, rows: Vec<Person> },
+    /// A chat made by `create_chat`; the view opens it.
+    ChatCreated(String),
+    Audio { url: String, result: Result<Vec<u8>, String> },
+    CallHistory(Result<Vec<chatsvc::CallLogEntry>, String>),
+    AgentSettings(agents::AgentSettings),
+    AgentResult(String),
+    Details(std::collections::HashMap<String, ChatDetails>),
+    Pinned { conversation_id: String, pin: Option<PinnedRow> },
+    /// Ids of the edited messages of the open conversation (`message_menu.rs`).
+    Edited { conversation_id: String, ids: Vec<String> },
+    Typing(chatsvc::TypingEvent),
     /// Human-readable connection line: "Connecting…", "Online", "Sign in in the browser window", …
     Status(String),
+    /// The signed-in user, known once the first sidebar refresh stored it.
+    Me { user_id: String, name: String, email: String },
+    OwnStatus(teams_core::PresenceStatus),
+    Profile { user_id: String, result: Result<teams_core::PersonProfile, String> },
+    /// A 1:1 chat found or created for a person; the view selects it.
+    OpenChat(String),
     /// Full chat list, replaces the previous one.
     Chats(Vec<ChatRow>),
     Teams(Vec<TeamRow>),
@@ -88,6 +136,8 @@ pub enum Update {
         conversation_id: String,
         rows: Vec<MessageRow>,
     },
+    /// Answer to `search_gifs`; empty query means trending.
+    Gifs { query: String, result: Result<Vec<chatsvc::Gif>, String> },
     /// Sending could not be confirmed; retain the text for the originating conversation.
     SendFailed {
         target: SendTarget,
@@ -99,6 +149,23 @@ pub enum Update {
 
 /// What the view asks of the bridge. Calls return at once; results arrive as `Update`s.
 pub trait Actions {
+    fn set_chat_muted(&self, _id: &str, _muted: bool) {}
+    /// `read == false` marks the chat unread.
+    fn set_chat_read(&self, _id: &str, _read: bool) {}
+    fn hide_chat(&self, _id: &str) {}
+    fn leave_chat(&self, _id: &str) {}
+    fn search_people(&self, _query: &str) {}
+    /// One id makes a 1:1, several a group; the answer is `Update::ChatCreated`.
+    fn create_chat(&self, _user_ids: Vec<String>, _topic: Option<String>) {}
+    fn add_members(&self, _id: &str, _people: Vec<store::MemberRecord>) {}
+    fn remove_member(&self, _id: &str, _user_id: &str) {}
+    fn load_audio(&self, _url: &str) {}
+    fn call_back(&self, _entry: &chatsvc::CallLogEntry) {}
+    fn load_call_history(&self) {}
+    fn run_agent(&self, _id: &str, _prompt: &str) {}
+    fn stop_agent(&self) {}
+    fn rename_chat(&self, _id: &str, _title: &str) {}
+    fn meet_now(&self, _conversation_id: &str) {}
     /// Shows the cached messages at once, then fetches newer ones.
     fn open(&self, conversation_id: &str);
     fn send(&self, target: SendTarget, text: String, files: Vec<teams_core::FileReference>);
@@ -110,6 +177,10 @@ pub trait Actions {
     fn react(&self, _conversation_id: &str, _message_id: &str, _reaction: &str, _remove: bool) {}
     fn delete_message(&self, _conversation_id: &str, _message_id: &str) {}
     fn read_only(&self) -> bool { false }
+    fn edit_message(&self, _conversation_id: &str, _message_id: &str, _text: &str) {}
+    fn pin_message(&self, _conversation_id: &str, _message_id: &str, _pin: bool) {}
+    fn forward_message(&self, _source_id: &str, _target_id: &str, _message_id: &str) {}
+    fn mark_unread_from(&self, _conversation_id: &str, _message_id: &str) {}
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}
     fn load_agenda(&self) {}
@@ -125,4 +196,19 @@ pub trait Actions {
     fn download_file(&self, _url: String, _path: std::path::PathBuf) {}
     fn upload_file(&self, _target: SendTarget, _path: std::path::PathBuf) {}
     fn discard_attachment(&self, _uploaded: teams_core::UploadedFile) {}
+    fn set_availability(&self, _forced: Option<teams_core::ForcedAvailability>) {}
+    fn set_status_note(&self, _note: Option<teams_core::StatusNote>) {}
+    fn load_profile(&self, _user_id: &str) {}
+    /// Finds or creates the 1:1 chat with a person; answered with `Update::OpenChat`.
+    fn open_direct(&self, _user_id: &str) {}
+    fn call_person(&self, _user_id: &str, _name: &str) {}
+    /// `send` with mentions and GIFs; fakes that only know `send` still get the text.
+    fn send_composed(&self, target: SendTarget, composed: Composed, files: Vec<teams_core::FileReference>) {
+        self.send(target, composed.text, files);
+    }
+    /// Answered with `Update::Gifs`.
+    fn search_gifs(&self, _query: &str) {}
+    /// Stores the unsent text of a conversation; blank text deletes the draft.
+    fn save_draft(&self, _conversation_id: &str, _text: &str) {}
+    fn load_draft(&self, _conversation_id: &str) -> Option<String> { None }
 }

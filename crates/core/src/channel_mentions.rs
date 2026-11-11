@@ -63,6 +63,7 @@ mod tests {
                 ..ReadHorizon::default()
             },
             notification_settings: None,
+            picture: None,
             history_cleared_ms: None,
             hidden_at_ms: None,
         }

@@ -145,6 +145,23 @@ fn unicode_emoji(text: &str) -> Option<Vec<JumboEmoji>> {
         .collect()
 }
 
+/// Asks for colour emoji (`U+FE0F`) on every emoji grapheme that lacks it. Without it a renderer
+/// may take a monochrome text glyph first (Segoe UI Symbol on Windows draws `👍` `😆` `❤` in ink).
+/// ©, ® and ™ keep their text form. For display only: reaction keys must stay as Teams sent them.
+pub fn emoji_presentation(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for grapheme in text.graphemes(true) {
+        out.push_str(grapheme);
+        if is_emoji_grapheme(grapheme)
+            && !grapheme.contains('\u{fe0f}')
+            && !matches!(grapheme, "\u{a9}" | "\u{ae}" | "\u{2122}")
+        {
+            out.push('\u{fe0f}');
+        }
+    }
+    out
+}
+
 pub(crate) fn is_emoji_grapheme(grapheme: &str) -> bool {
     let mut characters = grapheme.chars();
     characters.next().is_some_and(is_pictographic)
@@ -186,6 +203,14 @@ fn is_pictographic(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_get_colour_presentation_once_and_text_symbols_stay_text() {
+        assert_eq!(emoji_presentation("ok 👍 😆"), "ok 👍\u{fe0f} 😆\u{fe0f}");
+        assert_eq!(emoji_presentation("❤️ ❤"), "❤️ ❤\u{fe0f}");
+        assert_eq!(emoji_presentation("👍🏻"), "👍🏻\u{fe0f}");
+        assert_eq!(emoji_presentation("Teams® © ™ é → 1"), "Teams® © ™ é → 1");
+    }
 
     #[test]
     fn repeated_skin_tones_from_graph_are_dropped() {

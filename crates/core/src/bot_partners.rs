@@ -170,8 +170,9 @@ impl<R: Remote> SyncEngine<R> {
                 Some(url) => match self.remote.external_image(&url).await {
                     Ok(photo) => Some(photo),
                     Err(error) => {
+                        // Stored as "no icon" below so every sync does not retry and re-log it.
                         self.report(format!("cannot load a bot icon: {error}"));
-                        continue;
+                        None
                     }
                 },
                 None => None,

@@ -1143,6 +1143,10 @@ impl Remote for Graph {
     }
 
     async fn external_image(&self, url: &str) -> Result<Photo> {
+        // AMS objects (bot icons, banners) need the Skype token; an anonymous fetch fails CORS.
+        if chatsvc::is_link_image_url(url) {
+            return self.hosted_content(url).await;
+        }
         Ok(Graph::download_external_image(self, url).await?)
     }
 

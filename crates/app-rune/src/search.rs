@@ -5,6 +5,7 @@
 use chrono::Local;
 use rune::tok::Family;
 use rune::*;
+use crate::ui::text;
 
 
 use crate::types::Actions;
@@ -286,8 +287,7 @@ mod tests {
 
     #[test]
     fn stale_answers_are_dropped() {
-        let mut state = SearchState::default();
-        state.edit = TextEdit::new("bu");
+        let mut state = SearchState { edit: TextEdit::new("bu"), ..Default::default() };
         let answer = |query: &str| Results { query: query.into(), chats: vec![], messages: vec![] };
         apply(&mut state, answer("b"));
         assert!(state.results.is_none());

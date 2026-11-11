@@ -4,8 +4,9 @@
 
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
-use crate::avatar::{avatar, rgb};
+use crate::avatar::rgb;
 use crate::icons::sym;
 use crate::types::{Actions, PinnedRow};
 use crate::ui::{c, ts, UiState, HOVER, INK, LINE, MUTED, WHITE};
@@ -45,7 +46,7 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .px(HEADER_PAD)
         .gap(HEADER_GAP)
         .center_y()
-        .child(avatar(title, LEAD, None))
+        .child(crate::profile::link::<A>(crate::avatar::chat(s, title, id, LEAD), "header-avatar".into(), crate::profile::direct_user(s, id), title))
         .child(
             row()
                 .max_w(TITLE_MAX_W)
@@ -53,13 +54,19 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
                 .gap(4.0)
                 .center_y()
                 .child(text(title.to_owned()).font(ts(15.0, 600.0)).color(c(INK)).truncate().min_w(0.0))
-                .child(sym("edit", 14.0).color(rgb(palette.text_muted))),
+                .children((channel.is_none() && !s.read_only).then(|| icon_button("rename-chat", "edit", s.rename_open)
+                    .on_press_tx(|s: &mut UiState<A>, _| {
+                        s.rename_open = !s.rename_open;
+                        let title = s.chats.iter().find(|c| Some(&c.id) == s.selected.as_ref()).map(|c| c.title.as_str()).unwrap_or_default();
+                        s.rename_title = TextEdit::new(title);
+                    }))),
         )
-        .child(tab(if channel.is_some() { "Posts" } else { "Chat" }, true))
-        .child(tab("Shared", false))
+        .child(tab(if channel.is_some() { "Posts" } else { "Chat" }, !s.shared_open).key("tab-chat").on_press(|s: &mut UiState<A>| s.shared_open = false))
+        .child(tab("Shared", s.shared_open).key("tab-shared").on_press(|s: &mut UiState<A>| s.shared_open = true))
         .child(el().grow(1.0));
-    if channel.is_none() {
-        bar = bar.child(meet_now());
+    if channel.is_none() && !s.read_only {
+        let id = id.to_owned();
+        bar = bar.child(meet_now().on_press_tx(move |s: &mut UiState<A>, _| s.actions.meet_now(&id)));
     }
     if let Some(count) = s.member_counts.get(id) {
         bar = bar.child(
@@ -67,6 +74,11 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
                 .key("participants")
                 .gap(4.0)
                 .center_y()
+                .px(6.0)
+                .h(BUTTON)
+                .radius(8.0)
+                .hover(c(HOVER))
+                .on_press(|s: &mut UiState<A>| crate::members::toggle(s))
                 .child(sym("group", GLYPH).color(rgb(palette.text_soft)))
                 .child(text(count.to_string()).font(ts(13.0, 400.0)).color(rgb(palette.text_soft))),
         );
@@ -74,8 +86,7 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
     }
     bar = bar
         .child(icon_button("search-toggle", "search", s.search_open).on_press_tx(|s: &mut UiState<A>, _| toggle_search(s)))
-        .child(icon_button("side-panel", "right_panel_open", false))
-        .child(icon_button("more", "more_horiz", false));
+        .child(icon_button("side-panel", "right_panel_open", s.shared_open).on_press(|s: &mut UiState<A>| s.shared_open = !s.shared_open));
 
     let mut block = col()
         .key("header-block")
@@ -84,6 +95,22 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .child(el().h(1.0).w_full().fill(c(LINE)));
     if s.search_open {
         block = block.child(search_row(s));
+    }
+    if s.rename_open {
+        block = block.child(row().w_full().padding(8.0).gap(8.0)
+            .child(text_input(&s.rename_title, ts(14.0, 400.0)).key("rename-title").label("Chat name").grow(1.0)
+                .on_edit(|s: &mut UiState<A>| &mut s.rename_title))
+            .child(crate::screens::button("Save", "rename-save", |s: &mut UiState<A>, _| {
+                if !s.rename_title.text.trim().is_empty() {
+                    if let Some(id) = &s.selected { s.actions.rename_chat(id, &s.rename_title.text); }
+                    s.rename_open = false;
+                }
+            })));
+    }
+    let names: Vec<_> = s.typing.values().filter(|e| e.conversation_id == id && (chrono::Utc::now() - e.received_at).num_seconds() < 8)
+        .map(|e| e.display_name.as_str()).collect();
+    if !names.is_empty() {
+        block = block.child(text(format!("{} is typing…", names.join(", "))).key("typing-indicator").font(ts(12.0, 400.0)).color(c(MUTED)).px(HEADER_PAD));
     }
     if let Some(pinned) = s.pinned.as_ref().filter(|pinned| pinned.conversation_id == id) {
         block = block.child(col().w_full().padding(PIN_INSET).child(pinned_bar(pinned)));
@@ -219,16 +246,18 @@ mod tests {
     use rune::{Env, Runtime};
 
     #[derive(Default)]
-    struct Quiet;
+    struct Quiet { calls: std::cell::RefCell<Vec<String>> }
 
     impl Actions for Quiet {
+        fn rename_chat(&self, id: &str, title: &str) { self.calls.borrow_mut().push(format!("rename {id} {title}")); }
+        fn meet_now(&self, id: &str) { self.calls.borrow_mut().push(format!("call {id}")); }
         fn open(&self, _conversation_id: &str) {}
         fn send(&self, _target: SendTarget, _text: String, _files: Vec<teams_core::FileReference>) {}
     }
 
     fn runtime(selected: &str) -> Runtime<UiState<Quiet>> {
         let env = Env { system_dark: false, scale: 1.0 };
-        let mut state = UiState::new(Quiet);
+        let mut state = UiState::new(Quiet::default());
         state.chats = vec![ChatRow {
             id: "c0".into(),
             title: "Release planning".into(),
@@ -271,6 +300,38 @@ mod tests {
         assert!(rt.find("search").is_some());
         click(&mut rt, "search-toggle");
         assert!(rt.find("search").is_none());
+    }
+
+    #[test]
+    fn header_actions_use_the_selected_chat_and_shared_can_be_closed() {
+        let mut rt = runtime("c0");
+        click(&mut rt, "tab-shared");
+        assert!(rt.find("shared").is_some());
+        click(&mut rt, "tab-chat");
+        assert!(rt.find("messages").is_some());
+        click(&mut rt, "rename-chat");
+        rt.update(|s, _| s.rename_title = TextEdit::new("New title"));
+        rt.frame(1.0);
+        click(&mut rt, "rename-save");
+        click(&mut rt, "meet-now");
+        assert_eq!(*rt.state.actions.calls.borrow(), ["rename c0 New title", "call c0"]);
+    }
+
+    #[test]
+    fn messages_start_below_the_entire_pinned_header() {
+        let mut rt = runtime("c0");
+        pin_c0(&mut rt);
+        for search_open in [false, true] {
+            rt.update(move |s, _| s.search_open = search_open);
+            rt.frame(1.0 / 60.0);
+            let elements = rt.elements();
+            let rect = |key: &str| {
+                elements.iter().find(|e| e.path.ends_with(&format!("/{key}"))).unwrap().rect
+            };
+            let pin = rect("pinned-bar");
+            let messages = rect("messages");
+            assert!(messages[1] >= pin[1] + pin[3], "messages {messages:?} overlap pin {pin:?}");
+        }
     }
 
     #[test]

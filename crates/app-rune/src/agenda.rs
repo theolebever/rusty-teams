@@ -18,6 +18,7 @@ mod model {
 
 use chrono::{DateTime, Local, Offset, Utc};
 use rune::*;
+use crate::ui::text;
 
 use crate::screens::{Screen, button, color, style};
 use crate::types::Actions;
@@ -242,15 +243,8 @@ mod tests {
     fn the_calendar_opens_the_agenda_which_loads_and_returns_to_the_week() {
         let mut rt = runtime(Fake::default(), vec![]);
         rt.update(|s, _| s.screens.screen = Screen::Calendar);
-        rt.frame(0.0);
-        // ponytail: headless clicks on the calendar header buttons don't land (same for "›");
-        // drive the Agenda button's action directly until that hit-test is understood.
-        assert!(rt.find("calendar-agenda").is_some());
-        rt.update(|s, _| {
-            s.screens.screen = Screen::Agenda;
-            s.actions.load_agenda();
-        });
-        rt.frame(1.0 / 60.0);
+        rt.frame(1.0);
+        click(&mut rt, "calendar-agenda");
         assert_eq!(rt.state.screens.screen, Screen::Agenda);
         assert_eq!(rt.state.actions.loads.get(), 1);
         click(&mut rt, "agenda-week");

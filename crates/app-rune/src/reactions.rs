@@ -7,6 +7,7 @@ use crate::ui::{UiState, ts};
 use crate::view_messages::action_button;
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
 const HEART: &str = "\u{2764}";
 const VARIATION_SELECTOR: char = '\u{FE0F}';
@@ -156,6 +157,8 @@ mod tests {
 
     fn msg(id: &str, reactions: Vec<ReactionSummary>) -> MessageRow {
         MessageRow {
+            sender_id: None,
+            system: false,
             id: id.into(),
             reply_to_id: None,
             deleted: false,

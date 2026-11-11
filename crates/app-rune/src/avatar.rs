@@ -5,6 +5,7 @@
 
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
 use crate::icons::sym;
 use crate::ui::ts;
@@ -27,6 +28,18 @@ pub enum Presence {
     Offline,
 }
 
+pub fn chat_presence(details: Option<&crate::types::ChatDetails>) -> Option<Presence> {
+    use teams_core::Availability as A;
+    Some(match details?.presence?.availability {
+        A::Available => Presence::Available,
+        A::Away => Presence::Away,
+        A::Busy => Presence::Busy,
+        A::DoNotDisturb => Presence::DoNotDisturb,
+        A::Offline => Presence::Offline,
+        A::Unknown => return None,
+    })
+}
+
 /// A circle of `name`'s initials on a colour from its name, with a presence dot at bottom right.
 pub fn avatar(name: &str, size: f32, presence: Option<Presence>) -> El {
     let palette = active_palette();
@@ -44,25 +57,46 @@ pub fn avatar(name: &str, size: f32, presence: Option<Presence>) -> El {
     root
 }
 
+fn photo<'a, A: crate::types::Actions + 'static>(s: &'a crate::ui::UiState<A>, id: Option<&str>) -> Option<&'a Image> {
+    id.and_then(|id| s.media.images.get(&format!("avatar:{id}"))).filter(|image| image.is_ready() && image.error().is_none())
+}
+
+pub fn person<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>, name: &str, id: Option<&str>, size: f32, presence: Option<Presence>) -> El {
+    let Some(image) = photo(s, id) else {
+        return avatar(name, size, presence);
+    };
+    let mut root = el().size(size, size).child(el().size(size, size).radius(size / 2.0).pixels_fit(image.pixels(), SurfaceFit::Fill).label(name));
+    if let Some(presence) = presence { root = root.child(presence_dot(presence, size)); }
+    root
+}
+
+/// A chat's avatar: the other person, the group's own picture, else two of its members as a pair.
+pub fn chat<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>, title: &str, chat_id: &str, size: f32) -> El {
+    let details = s.details.get(chat_id);
+    let avatar_id = details.and_then(|d| d.avatar_id.as_deref());
+    let group = details.map_or(&[][..], |d| d.group.as_slice());
+    match group {
+        [first, second, ..] if photo(s, avatar_id).is_none() => group_avatar(s, [first, second], size),
+        [only] if photo(s, avatar_id).is_none() => person(s, &only.display_name, only.user_id.as_deref(), size, None),
+        _ => person(s, title, avatar_id, size, chat_presence(details)),
+    }
+}
+
 /// Two avatars overlapped on a diagonal, as the GPUI pair: the first at top left, the second
-/// at bottom right inside a ring of the surface colour. Takes the first two names.
-pub fn group_avatar(names: &[&str], size: f32) -> El {
+/// at bottom right inside a ring of the surface colour. Photos when loaded, else initials.
+fn group_avatar<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>, members: [&store::MemberRecord; 2], size: f32) -> El {
     let small = (size * PAIR_RATIO).round();
-    let mut group = el().size(size, size);
-    if let Some(first) = names.first() {
-        group = group.child(avatar(first, small, None).absolute(0.0, 0.0));
-    }
-    if let Some(second) = names.get(1) {
-        let ring = el()
-            .size(small, small)
-            .radius(small / 2.0)
-            .fill(rgb(active_palette().surface))
-            .center()
-            .absolute(size - small, size - small)
-            .child(avatar(second, small - 2.0 * PRESENCE_RING, None));
-        group = group.child(ring);
-    }
-    group
+    let [first, second] = members;
+    let ring = el()
+        .size(small, small)
+        .radius(small / 2.0)
+        .fill(rgb(active_palette().surface))
+        .center()
+        .absolute(size - small, size - small)
+        .child(person(s, &second.display_name, second.user_id.as_deref(), small - 2.0 * PRESENCE_RING, None));
+    el().size(size, size)
+        .child(person(s, &first.display_name, first.user_id.as_deref(), small, None).absolute(0.0, 0.0))
+        .child(ring)
 }
 
 fn presence_dot(presence: Presence, avatar_size: f32) -> El {

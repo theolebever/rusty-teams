@@ -5,17 +5,12 @@
 use crate::types::{Actions, ChatRow, MessageRow, SendTarget, TeamRow, Update};
 use rune::tok::Family;
 use rune::*;
-use std::borrow::Cow;
 use std::collections::HashMap;
 
-pub(crate) const PURPLE: &str = "#5B5FC7";
-pub(crate) const LAVENDER: &str = "#E8EBFA";
-const LIST: &str = "#F5F5F5";
 pub(crate) const HOVER: &str = "#EBEBEB";
 pub(crate) const LINE: &str = "#E0E0E0";
 pub(crate) const INK: &str = "#242424";
 pub(crate) const MUTED: &str = "#616161";
-const RED: &str = "#C4314B";
 pub(crate) const WHITE: &str = "#FFFFFF";
 
 
@@ -27,6 +22,14 @@ pub(crate) fn ts(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
 }
 
+/// `rune::text` with colour emoji. Rune only routes a grapheme to Segoe UI Emoji when it carries
+/// `U+FE0F`; Teams sends `👍` `😆` `❤` bare, which Segoe UI Symbol then draws in monochrome ink.
+/// Every view module imports this one explicitly, which shadows the `rune::*` glob.
+pub(crate) fn text(content: impl Into<String>) -> El {
+    let content = content.into();
+    if content.is_ascii() { rune::text(content) } else { rune::text(teams_core::emoji_presentation(&content)) }
+}
+
 /// Everything the window shows. `apply` folds bridge updates in; `view` reads the rest.
 pub struct UiState<A: Actions> {
     pub actions: A,
@@ -36,6 +39,10 @@ pub struct UiState<A: Actions> {
     pub media: crate::media::MediaState,
     pub appearance: app_backend::appearance::AppearanceSettings,
     pub status: String,
+    /// Own presence, status menu and status dialog (`status_menu.rs`).
+    pub own: crate::status_menu::State,
+    pub profile: crate::profile::State,
+    pub toast: crate::toast::State,
     pub chats: Vec<ChatRow>,
     pub selected: Option<String>,
     pub teams: Vec<TeamRow>,
@@ -53,12 +60,26 @@ pub struct UiState<A: Actions> {
     pub pinned: Option<crate::types::PinnedRow>,
     /// Member counts by conversation id; the header shows the count when one is known.
     pub member_counts: HashMap<String, usize>,
+    pub details: HashMap<String, crate::types::ChatDetails>,
+    pub typing: HashMap<(String, String), chatsvc::TypingEvent>,
+    pub shared_open: bool,
+    pub rename_open: bool,
+    pub rename_title: TextEdit,
+    pub format_open: bool,
+    pub emoji_open: bool,
+    /// Mentions, pickers and GIFs of the composer (`view_composer.rs`).
+    pub(crate) compose: crate::view_composer::Compose,
+    pub agent: crate::agent_panel::State,
+    /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
+    pub nav: crate::shortcuts::NavState,
     pub global_search: crate::search::SearchState,
     pub thread_root_id: Option<String>,
+    pub expanded_posts: std::collections::HashSet<String>,
     pub picker: crate::reactions::Picker,
     pub(crate) confirm_delete: Option<String>,
     /// The message whose "more" actions are showing, if any.
     pub(crate) more_open: Option<String>,
+    pub(crate) menu: crate::message_menu::MenuState,
     drafts: HashMap<SendTarget, String>,
     send_errors: HashMap<SendTarget, String>,
 }
@@ -68,12 +89,25 @@ impl<A: Actions> UiState<A> {
         let read_only = actions.read_only();
         UiState {
             actions,
+            agent: Default::default(),
+            nav: Default::default(),
+            details: HashMap::new(),
+            typing: HashMap::new(),
+            shared_open: false,
+            rename_open: false,
+            rename_title: TextEdit::default(),
+            format_open: false,
+            emoji_open: false,
+            compose: Default::default(),
             read_only,
             screens: crate::screens::ScreenState::default(),
             calls: crate::calls::CallView::default(),
             media: crate::media::MediaState::default(),
             appearance: Default::default(),
             status: String::new(),
+            own: Default::default(),
+            profile: Default::default(),
+            toast: Default::default(),
             chats: Vec::new(),
             selected: None,
             teams: Vec::new(),
@@ -89,9 +123,11 @@ impl<A: Actions> UiState<A> {
             member_counts: HashMap::new(),
             global_search: Default::default(),
             thread_root_id: None,
+            expanded_posts: Default::default(),
             picker: Default::default(),
             confirm_delete: None,
             more_open: None,
+            menu: Default::default(),
             drafts: HashMap::new(),
             send_errors: HashMap::new(),
         }
@@ -100,7 +136,37 @@ impl<A: Actions> UiState<A> {
     /// Applies one bridge update. Messages for a conversation other than `selected` are dropped.
     pub fn apply(&mut self, update: Update) {
         match update {
-            Update::Status(s) => self.status = s,
+            Update::Audio { url, result } => self.media.voice.loaded(url, result),
+            Update::CallHistory(result) => {
+                self.calls.history_loading = false;
+                match result {
+                    Ok(history) => { self.calls.history = history; self.calls.history_error = None; }
+                    Err(error) => self.calls.history_error = Some(error),
+                }
+            }
+            Update::AgentSettings(settings) => self.agent.settings = settings,
+            Update::AgentResult(result) => { self.agent.output = result; self.agent.running = false; }
+            Update::Details(details) => {
+                for (id, chat) in &details { self.member_counts.insert(id.clone(), chat.members.len()); }
+                self.details = details;
+            }
+            Update::Pinned { conversation_id, pin } => {
+                if self.selected.as_deref() == Some(&conversation_id) { self.pinned = pin; }
+            }
+            Update::Edited { conversation_id, ids } => {
+                if self.selected.as_deref() == Some(&conversation_id) { self.menu.edited = ids.into_iter().collect(); }
+            }
+            Update::Typing(event) => {
+                let key = (event.conversation_id.clone(), event.user_id.clone());
+                if event.active { self.typing.insert(key, event); } else { self.typing.remove(&key); }
+            }
+            Update::People { query, rows } => crate::new_chat::apply_people(self, &query, rows),
+            Update::ChatCreated(id) => self.chatlist.manage.pending_open = Some(id),
+            Update::Status(s) => { self.toast.observe(&s); self.status = s; }
+            Update::Me { user_id, name, email } => self.own.me = Some(crate::status_menu::Me { user_id, name, email }),
+            Update::OwnStatus(status) => self.own.status = status,
+            Update::Profile { user_id, result } => self.profile.loaded(user_id, result),
+            Update::OpenChat(id) => self.profile.chat_request = Some(id),
             Update::Chats(rows) => self.chats = rows,
             Update::Teams(rows) => self.teams = rows,
             Update::Appearance(settings) => self.appearance = settings,
@@ -135,7 +201,7 @@ impl<A: Actions> UiState<A> {
                 rows,
             } => {
                 if self.selected.as_deref() == Some(conversation_id.as_str()) {
-                    for image in rows.iter().flat_map(|row| &row.media.images) {
+                    for image in rows.iter().flat_map(|row| row.media.images.iter().cloned().chain(row.media.rich.images())) {
                         if !self.media.images.contains_key(image.key()) && !self.media.errors.contains_key(image.key()) {
                             self.actions.load_image(image.clone());
                         }
@@ -143,6 +209,7 @@ impl<A: Actions> UiState<A> {
                     self.messages = crate::teams::group_replies(rows);
                 }
             }
+            Update::Gifs { query, result } => self.compose.gif.loaded(query, result),
             Update::SendFailed {
                 target,
                 text,
@@ -153,7 +220,7 @@ impl<A: Actions> UiState<A> {
                 let error = format!("Send could not be confirmed: {error}");
                 if active_target(self).as_ref() == Some(&target) {
                     let current = &self.composer.text;
-                    self.composer = TextEdit::new(&join_draft(&text, current));
+                    self.composer = TextEdit::new(join_draft(&text, current));
                     self.send_error = Some(error);
                 } else {
                     let current = self.drafts.remove(&target).unwrap_or_default();
@@ -169,14 +236,23 @@ impl<A: Actions> UiState<A> {
 pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     save_draft(s);
     s.selected = Some(id.to_owned());
+    s.shared_open = false;
+    s.rename_open = false;
+    s.pinned = None;
     s.thread_root_id = None;
+    s.expanded_posts.clear();
     s.picker.close();
     s.confirm_delete = None;
     s.more_open = None;
+    s.menu = Default::default();
     s.messages.clear();
+    s.media.voice.pause();
     s.search.clear();
     s.search_open = false;
     s.search_results = None;
+    s.nav.touch(id);
+    s.nav.find = Default::default();
+    s.nav.scrolled_up = false;
     restore_draft(s);
     s.actions.open(id);
     tx.scroll_to_bottom_instant("messages");
@@ -188,7 +264,7 @@ pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
     Some(SendTarget { conversation_id, thread_root_id: s.thread_root_id.clone(), channel })
 }
 
-fn save_draft<A: Actions>(s: &mut UiState<A>) {
+pub(crate) fn save_draft<A: Actions>(s: &mut UiState<A>) {
     if let Some(target) = active_target(s) {
         s.drafts.insert(target.clone(), s.composer.text.clone());
         if let Some(error) = s.send_error.take() { s.send_errors.insert(target, error); }
@@ -197,7 +273,8 @@ fn save_draft<A: Actions>(s: &mut UiState<A>) {
 
 fn restore_draft<A: Actions>(s: &mut UiState<A>) {
     if let Some(target) = active_target(s) {
-        s.composer = TextEdit::new(&s.drafts.remove(&target).unwrap_or_default());
+        let stored = if target.thread_root_id.is_none() { s.actions.load_draft(&target.conversation_id) } else { None };
+        s.composer = TextEdit::new(s.drafts.remove(&target).or(stored).unwrap_or_default());
         s.send_error = s.send_errors.remove(&target);
     }
 }
@@ -206,6 +283,7 @@ pub(crate) fn select_thread<A: Actions>(s: &mut UiState<A>, root: Option<String>
     save_draft(s);
     s.thread_root_id = root;
     if let (Some(conversation), Some(root)) = (&s.selected, &s.thread_root_id) {
+        s.expanded_posts.insert(root.clone());
         s.actions.open_thread(conversation, root);
     }
     restore_draft(s);
@@ -223,12 +301,13 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     let Some(target) = active_target(s) else { return };
     let text = s.composer.text.trim().to_owned();
     let files = s.media.files(&target);
-    if s.media.is_uploading(&target) || (text.is_empty() && files.is_empty()) {
+    if s.media.is_uploading(&target) || (text.is_empty() && files.is_empty() && s.compose.gifs.is_empty()) {
         return;
     }
     s.send_error = None;
     s.media.clear(&target);
-    s.actions.send(target, text, files);
+    let composed = s.compose.take(text);
+    s.actions.send_composed(target, composed, files);
     s.composer.clear();
 }
 
@@ -238,19 +317,45 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .key("root")
         .w_full()
         .h_full()
+        // Snappy UI: no mount/unmount fades, layout tweens or colour springs anywhere below.
+        .instant_changes()
+        .motion(Spring::NONE)
         .fill(c(WHITE))
         .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
+        .children(crate::toast::banner(s))
         .child(
             row()
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
                 .child(crate::view_chrome::rail(s))
-                .child(if s.screens.screen == crate::screens::Screen::Chat { row().grow(1.0).h_full().child(crate::view_chatlist::pane(s)).child(conversation(s)) } else { crate::screens::view(s) }),
+                .child(if matches!(s.screens.screen, crate::screens::Screen::Chat | crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
+                    let sidebar = if matches!(s.screens.screen, crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
+                        crate::screens::view(s)
+                    } else {
+                        crate::view_chatlist::pane(s)
+                    };
+                    row().grow(1.0).h_full().child(sidebar).child(conversation(s))
+                } else { crate::screens::view(s) }),
         )
+        .children(crate::toast::layer(s))
+        .children(crate::profile::layer(s))
+        .children(crate::status_menu::layer(s))
+        .children(crate::image_viewer::overlay(s))
+        .child(crate::chat_menu::overlay(s))
+        .children(crate::shortcuts::overlays(s))
 }
 
 fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
+    if s.screens.screen == crate::screens::Screen::Activity && s.screens.selected_activity.is_none() {
+        return col().key("activity-preview").grow(1.0).min_w(0.0).h_full().center().gap(12.0)
+            .child(crate::icons::sym("notifications", 40.0).color(c(MUTED)))
+            .child(text("Select a notification").font(ts(18.0, 600.0)).color(c(INK)))
+            .child(text("See the conversation and its context here.").font(ts(14.0, 400.0)).color(c(MUTED)));
+    }
+    if s.selected.is_none() && s.screens.screen == crate::screens::Screen::Teams {
+        return crate::teams::overview(s);
+    }
     let Some(id) = s.selected.as_deref() else {
         return col()
             .key("conversation")
@@ -272,8 +377,11 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
         .h_full()
         .min_h(0.0)
         .fill(c(WHITE))
+        .instant_changes()
         .child(crate::view_header::header(s, id))
-        .child(crate::view_messages::message_list(s))
+        .child(crate::find::bar(s))
+        .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s) })
+        .child(crate::find::jump_bar(s))
         .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s) })
 }
 
@@ -318,6 +426,8 @@ mod tests {
 
     fn msg(id: &str, sender: &str, text: &str, mine: bool) -> MessageRow {
         MessageRow {
+            sender_id: None,
+            system: false,
             id: id.into(),
             reply_to_id: None,
             deleted: false,
@@ -379,6 +489,58 @@ mod tests {
     }
 
     #[test]
+    fn switching_screens_shows_the_new_pane_at_once_without_a_fade() {
+        let mut rt = rt();
+        click(&mut rt, "nav-Teams");
+        let pane = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("teams-overview")).unwrap();
+        assert_eq!(pane.opacity, 1.0, "pane must not fade in");
+        assert!(rt.elements().iter().all(|e| !e.exiting), "old pane must not fade out");
+    }
+
+    #[test]
+    fn teams_navigation_keeps_a_chat_draft_and_team_cards_open_channels() {
+        let mut rt = rt();
+        apply(&mut rt, Update::Chats(vec![chat("a", "Ada")]));
+        apply(&mut rt, Update::Teams(vec![TeamRow { id: "team".into(), name: "Team".into(), channels: vec![ChannelRow { hidden: false, id: "general".into(), name: "General".into(), unread: false }] }]));
+        click(&mut rt, "chat-a");
+        rt.update(|s, _| s.composer = TextEdit::new("Keep this draft"));
+        rt.frame(1.0);
+        click(&mut rt, "nav-Teams");
+        rt.frame(2.0);
+        assert!(rt.find("teams-overview").is_some());
+        assert!(rt.state.selected.is_none());
+        click(&mut rt, "team-card-team");
+        assert_eq!(rt.state.selected.as_deref(), Some("general"));
+        click(&mut rt, "nav-Chat");
+        rt.frame(3.0);
+        click(&mut rt, "chat-a");
+        assert_eq!(rt.state.composer.text, "Keep this draft");
+    }
+
+    #[test]
+    fn conversation_metadata_ignores_late_pins_and_tracks_typing_stop() {
+        let mut state = UiState::new(Fake::default());
+        state.selected = Some("b".into());
+        state.apply(Update::Pinned { conversation_id: "a".into(), pin: Some(crate::types::PinnedRow {
+            conversation_id: "a".into(), sender: "Ada".into(), text: "Private".into(),
+        }) });
+        assert!(state.pinned.is_none());
+        state.apply(Update::Details(HashMap::from([("b".into(), crate::types::ChatDetails {
+            avatar_id: None, group: vec![],
+            members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
+            muted: true, presence: None,
+        })])));
+        assert_eq!(state.member_counts["b"], 1);
+        assert!(state.details["b"].muted);
+        let mut event = chatsvc::TypingEvent { conversation_id: "b".into(), user_id: "ada".into(), display_name: "Ada".into(), active: true, received_at: chrono::Utc::now() };
+        state.apply(Update::Typing(event.clone()));
+        assert_eq!(state.typing.len(), 1);
+        event.active = false;
+        state.apply(Update::Typing(event));
+        assert!(state.typing.is_empty());
+    }
+
+    #[test]
     fn chats_update_shows_rows() {
         let mut rt = rt();
         apply(
@@ -399,6 +561,7 @@ mod tests {
                 id: "team".into(),
                 name: "Team".into(),
                 channels: vec![ChannelRow {
+                    hidden: false,
                     id: "channel".into(),
                     name: "General".into(),
                     unread: true,
@@ -613,7 +776,7 @@ mod tests {
     #[test]
     fn failed_thread_reply_does_not_replace_channel_post_draft() {
         let mut rt = rt();
-        apply(&mut rt, Update::Teams(vec![TeamRow { id: "team".into(), name: "Team".into(), channels: vec![ChannelRow { id: "channel".into(), name: "General".into(), unread: false }] }]));
+        apply(&mut rt, Update::Teams(vec![TeamRow { id: "team".into(), name: "Team".into(), channels: vec![ChannelRow { hidden: false, id: "channel".into(), name: "General".into(), unread: false }] }]));
         click(&mut rt, "team-team");
         click(&mut rt, "channel-channel");
         apply(&mut rt, Update::Messages { conversation_id: "channel".into(), rows: vec![msg("root", "Ada", "post", false)] });

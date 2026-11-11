@@ -2,20 +2,41 @@
 //! Run with `--help` for account, browser and demo options.
 
 mod agenda;
+mod agent_panel;
 mod arguments;
 mod avatar;
 mod bridge;
+mod composed;
+mod emoji_picker;
+mod gif_picker;
+mod mentions;
 mod calls;
 mod calls_backend;
+mod calendar_grid;
 mod icons;
+mod cards;
+mod image_viewer;
+mod link_preview;
 mod media;
+mod rich_text;
+mod message_menu;
+mod find;
+mod shortcuts;
+mod switcher;
+mod chat_menu;
+mod members;
+mod new_chat;
+mod voice;
 mod notifications;
+mod profile;
 mod reactions;
 mod screens;
 mod search;
 mod settings;
+mod status_menu;
 mod teams;
 mod theme;
+mod toast;
 mod types;
 mod view_chatlist;
 mod ui;
@@ -54,7 +75,7 @@ fn setup(_: &mut UiState<Bridge>, wake: Waker) {
     // Updates may have been queued before the waker existed.
     wake();
     app_backend::runtime::handle().spawn(async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             interval.tick().await;
             if let Some(wake) = WAKER.get() { wake(); }
@@ -62,19 +83,32 @@ fn setup(_: &mut UiState<Bridge>, wake: Waker) {
     });
 }
 
-fn poll(s: &mut UiState<Bridge>, _now: f64, _: &mut Tx) -> bool {
+fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
+    if s.media.voice.is_playing() { tx.wake_after(std::time::Duration::from_millis(100)); }
     let now = std::time::Instant::now();
     let input = app_backend::user_activity::latest_input(rune::last_input(), app_backend::user_activity::system_idle(), now);
     s.actions.set_activity(app_backend::user_activity::is_active(input, now, app_backend::user_activity::IDLE_AFTER));
-    let chat = (rune_notify::app_focused() && s.screens.screen == screens::Screen::Chat)
+    let chat = (rune_notify::app_focused() && matches!(s.screens.screen, screens::Screen::Chat | screens::Screen::Teams))
         .then_some(s.selected.as_deref()).flatten();
     s.actions.set_foreground(chat, s.calls.state.as_ref().is_some_and(calling::CallState::is_active));
+    view_composer::persist_draft(s);
     let updates = s.actions.poll();
-    let changed = !updates.is_empty();
+    let before = s.typing.len();
+    s.typing.retain(|_, event| (chrono::Utc::now() - event.received_at).num_seconds() < 8);
+    let changed = !updates.is_empty() || s.typing.len() != before || s.media.voice.is_playing();
     for update in updates {
         s.apply(update);
     }
-    changed
+    chat_menu::drain(s, tx);
+    // Direct writes to `status` (media errors) do not pass through `apply`.
+    let status = s.status.clone();
+    let noticed = s.toast.observe(&status);
+    let ticked = s.toast.tick(now);
+    let opened = s.profile.chat_request.take().map(|id| {
+        screens::navigate(s, screens::Screen::Chat);
+        ui::open_chat(s, &id, tx);
+    });
+    changed || noticed || ticked || opened.is_some()
 }
 
 fn main() {
@@ -125,6 +159,7 @@ fn main() {
                 ("calls", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Calls),
                 ("settings", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Settings),
             ],
+            on_key: Some(shortcuts::on_key::<DemoActions>),
             ..AppSpec::new(TITLE, SIZE, demo_init, ui::view::<DemoActions>)
         })
         .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
@@ -134,6 +169,7 @@ fn main() {
     App::new(AppSpec {
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(shortcuts::on_key::<Bridge>),
         ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
     })
     .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
@@ -197,6 +233,7 @@ fn demo_init() -> UiState<DemoActions> {
         id: "demo-team".into(),
         name: "Example team".into(),
         channels: vec![ChannelRow {
+            hidden: false,
             id: "demo-channel".into(),
             name: "General".into(),
             unread: false,
@@ -211,6 +248,8 @@ fn demo_init() -> UiState<DemoActions> {
     });
     let rows = (0..60)
         .map(|i| MessageRow {
+            sender_id: None,
+            system: false,
             id: format!("m{i}"),
             reply_to_id: None,
             sender: if i % 3 == 0 { "Me".into() } else { "Ada Example".into() },

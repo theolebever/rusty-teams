@@ -26,6 +26,8 @@ pub struct ConversationState {
     pub history_cleared_ms: Option<i64>,
     pub hidden_at_ms: Option<i64>,
     pub notification_settings: Option<String>,
+    /// A group chat's own picture (`threadProperties.picture`), as an AMS object URL.
+    pub picture: Option<String>,
 }
 
 impl ConversationState {
@@ -246,6 +248,26 @@ fn backward_link(body: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+const AMS_PROXY: &str = "https://de-prod.asyncgw.teams.microsoft.com";
+
+/// `URL@https://api.asm.skype.com/v1/objects/{id}/views/avatar_fullsize` → the same object on
+/// the Teams AMS proxy, which takes the Skype token. Anything else is not a picture we fetch.
+fn picture_url(raw: &str) -> Option<String> {
+    let url = raw.strip_prefix("URL@").unwrap_or(raw);
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    if !path.starts_with("v1/objects/") {
+        return None;
+    }
+    if host.ends_with(crate::links::LINK_PROXY_HOST_SUFFIX) {
+        Some(url.to_owned())
+    } else if host == "asm.skype.com" || host.ends_with(".asm.skype.com") {
+        Some(format!("{AMS_PROXY}/{path}"))
+    } else {
+        None
+    }
+}
+
 fn hidden_flag(conversation: &Value) -> Option<bool> {
     let flags: Vec<bool> = [
         &conversation["properties"]["hidden"],
@@ -286,9 +308,29 @@ fn states_in_page(body: &Value) -> Result<Vec<ConversationState>> {
                     .map(str::to_owned),
                 history_cleared_ms: history_cleared_ms(conversation),
                 hidden_at_ms: hidden_at_ms(conversation),
+                picture: conversation["threadProperties"]["picture"].as_str().and_then(picture_url),
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod picture_tests {
+    use super::picture_url;
+
+    #[test]
+    fn group_pictures_go_through_the_ams_proxy_only() {
+        assert_eq!(
+            picture_url("URL@https://api.asm.skype.com/v1/objects/0-weu-d1-abc/views/avatar_fullsize").as_deref(),
+            Some("https://de-prod.asyncgw.teams.microsoft.com/v1/objects/0-weu-d1-abc/views/avatar_fullsize")
+        );
+        let proxied = "https://eu-prod.asyncgw.teams.microsoft.com/v1/objects/0-neu/views/imgpsh_fullsize";
+        assert_eq!(picture_url(proxied).as_deref(), Some(proxied));
+        assert_eq!(picture_url("URL@https://evil.example/v1/objects/x"), None);
+        assert_eq!(picture_url("URL@https://evil.example/?a.asm.skype.com/v1/objects/x"), None);
+        assert_eq!(picture_url("http://api.asm.skype.com/v1/objects/x"), None);
+        assert_eq!(picture_url(""), None);
+    }
 }
 
 #[cfg(test)]

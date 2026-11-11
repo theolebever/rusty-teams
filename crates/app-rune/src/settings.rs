@@ -3,6 +3,7 @@
 use app_backend::appearance::ThemeChoice;
 use rune::tok::Family;
 use rune::*;
+use crate::ui::text;
 
 use crate::types::Actions;
 use crate::ui::UiState;

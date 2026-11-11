@@ -13,9 +13,11 @@ pub fn apply<S>(cx: &mut Cx<S>, settings: &AppearanceSettings) {
         dark: cx.system_dark(),
         high_contrast: app_backend::appearance::system_high_contrast(),
     };
-    schemes::set_thread_scheme(Some(settings.color_scheme.id));
+    schemes::set_thread_scheme(Some(schemes::TEAMS.id));
     schemes::set_thread_shade(Some(settings.theme.shade(system)));
     cx.foreground(crate::settings::color("#242424"));
+    cx.caption_color(crate::settings::color("#242424"));
+    cx.focus_ring(2.0, 2.0, crate::settings::color("#5B5FC7"));
 }
 
 /// Identifies the resolved theme, for keys that cache built rows (`virtual_rows_version`).
@@ -55,6 +57,13 @@ mod tests {
             s.apply(Update::Appearance(AppearanceSettings { theme, ..Default::default() }));
         });
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn rune_uses_the_official_teams_palette() {
+        let _ = rt(false);
+        assert_eq!(schemes::active_scheme().id, "teams");
+        assert_eq!(schemes::active_palette().accent, 0x5b5fc7);
     }
 
     #[test]

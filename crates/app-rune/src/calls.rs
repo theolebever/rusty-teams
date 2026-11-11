@@ -6,13 +6,271 @@ use calling::{
 use rune::native_surface::{ByteFrame, ColorInfo, Format};
 use rune::tok::Family;
 use rune::*;
+use crate::ui::text;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::types::Actions;
 use crate::ui::UiState;
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryFilter {
+    #[default]
+    All,
+    Missed,
+    Incoming,
+    Outgoing,
+}
+
+impl HistoryFilter {
+    fn includes(self, entry: &chatsvc::CallLogEntry) -> bool {
+        match self {
+            Self::All => true,
+            Self::Missed => entry.missed(),
+            Self::Incoming => entry.direction == chatsvc::CallDirection::Incoming,
+            Self::Outgoing => entry.direction == chatsvc::CallDirection::Outgoing,
+        }
+    }
+}
+
+fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let call = &s.calls;
+    let mut contacts = col()
+        .key("call-contacts")
+        .w(260.0)
+        .h_full()
+        .padding(20.0)
+        .gap(12.0)
+        .fill(color("#FFFFFF"))
+        .child(
+            text("Make a call")
+                .font(style(18.0, 600.0))
+                .color(color("#242424")),
+        )
+        .child(
+            text_input(&call.contact_search, style(14.0, 400.0))
+                .key("call-contact-search")
+                .label("Find a contact")
+                .placeholder("Type a name", color("#616161"))
+                .min_h(36.0)
+                .w_full()
+                .on_edit(|s: &mut UiState<A>| &mut s.calls.contact_search),
+        )
+        .child(button(
+            "Join a meeting",
+            "open-prejoin",
+            |s: &mut UiState<A>, _| s.calls.prejoin_open = true,
+        ))
+        .child(
+            text("Contacts")
+                .font(style(14.0, 600.0))
+                .color(color("#242424")),
+        );
+    let query = call.contact_search.text.trim().to_lowercase();
+    let mut people = col().w_full().gap(4.0);
+    for chat in s
+        .chats
+        .iter()
+        .filter(|chat| {
+            s.details
+                .get(&chat.id)
+                .is_some_and(|d| d.members.len() == 2)
+                && chat.title.to_lowercase().contains(&query)
+        })
+        .take(30)
+    {
+        let id = chat.id.clone();
+        let mut person = row()
+            .key(format!("call-contact-{}", chat.id))
+            .w_full()
+            .min_h(44.0)
+            .gap(8.0)
+            .center_y()
+            .child(crate::avatar::chat(s, &chat.title, &chat.id, 32.0))
+            .child(
+                text(chat.title.clone())
+                    .font(style(13.0, 400.0))
+                    .color(color("#242424"))
+                    .truncate()
+                    .grow(1.0)
+                    .min_w(0.0),
+            );
+        if !s.read_only {
+            person = person.child(crate::view_messages::action_button(
+                format!("contact-call-{}", chat.id),
+                "call",
+                move |s: &mut UiState<A>, _| s.actions.meet_now(&id),
+            ));
+        }
+        people = people.child(person);
+    }
+    contacts = contacts.child(
+        col()
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .child(people),
+    );
+    let mut filters = row().w_full().gap(8.0).center_y();
+    for (label, filter) in [
+        ("All", HistoryFilter::All),
+        ("Missed", HistoryFilter::Missed),
+        ("Incoming", HistoryFilter::Incoming),
+        ("Outgoing", HistoryFilter::Outgoing),
+    ] {
+        filters = filters.child(
+            button(
+                label,
+                &format!("history-{label}"),
+                move |s: &mut UiState<A>, _| s.calls.history_filter = filter,
+            )
+            .fill(color(if call.history_filter == filter {
+                "#E8EBFA"
+            } else {
+                "#FFFFFF"
+            })),
+        );
+    }
+    let mut list = col().w_full().gap(2.0);
+    if call.history_loading {
+        list = list.child(
+            text("Loading call history…")
+                .key("history-loading")
+                .font(style(13.0, 400.0))
+                .color(color("#616161")),
+        );
+    } else if let Some(error) = &call.history_error {
+        list = list
+            .child(
+                text(error.clone())
+                    .font(style(13.0, 400.0))
+                    .color(color("#C4314B"))
+                    .wrap(),
+            )
+            .child(button("Retry", "history-retry", |s: &mut UiState<A>, _| {
+                s.calls.history_loading = true;
+                s.actions.load_call_history();
+            }));
+    } else if !call
+        .history
+        .iter()
+        .any(|entry| call.history_filter.includes(entry))
+    {
+        list = list.child(
+            text("No calls to show")
+                .key("history-empty")
+                .font(style(14.0, 400.0))
+                .color(color("#616161")),
+        );
+    }
+    for entry in call
+        .history
+        .iter()
+        .filter(|entry| call.history_filter.includes(entry))
+    {
+        let name = entry
+            .peer_name
+            .as_deref()
+            .or(entry.peer_id.as_deref())
+            .unwrap_or("Meeting");
+        let label = if entry.missed() {
+            "Missed call"
+        } else if entry.direction == chatsvc::CallDirection::Outgoing {
+            "Outgoing call"
+        } else {
+            "Incoming call"
+        };
+        let mut item = row()
+            .key(format!("history-call-{}", entry.call_id))
+            .w_full()
+            .min_h(64.0)
+            .px(12.0)
+            .gap(12.0)
+            .center_y()
+            .hover(color("#EBEBEB"))
+            .child(crate::avatar::person(s, name, entry.peer_id.as_deref(), 36.0, None))
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(
+                        text(name.to_owned())
+                            .font(style(14.0, 600.0))
+                            .color(color(if entry.missed() { "#C4314B" } else { "#242424" }))
+                            .truncate(),
+                    )
+                    .child(text(label).font(style(12.0, 400.0)).color(color("#616161"))),
+            )
+            .child(
+                text(
+                    entry
+                        .started_at
+                        .with_timezone(&chrono::Local)
+                        .format("%d/%m %H:%M")
+                        .to_string(),
+                )
+                .font(style(12.0, 400.0))
+                .color(color("#616161")),
+            );
+        if !s.read_only && !entry.is_meeting && entry.peer_id.is_some() {
+            let entry = entry.clone();
+            item = item.child(crate::view_messages::action_button(
+                format!("history-call-back-{}", entry.call_id),
+                "call",
+                move |s: &mut UiState<A>, _| s.actions.call_back(&entry),
+            ));
+        }
+        list = list.child(item);
+    }
+    let history = col()
+        .key("call-history")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .padding(24.0)
+        .gap(16.0)
+        .fill(color("#FFFFFF"))
+        .child(
+            text("Calls")
+                .font(style(20.0, 600.0))
+                .color(color("#242424")),
+        )
+        .child(
+            text("History")
+                .font(style(16.0, 600.0))
+                .color(color("#242424")),
+        )
+        .child(filters)
+        .child(
+            col()
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(list),
+        );
+    row()
+        .key("calls")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .child(contacts)
+        .child(el().w(1.0).h_full().fill(color("#E0E0E0")))
+        .child(history)
+}
+
 pub struct CallView {
+    pub prejoin_open: bool,
+    pub history: Vec<chatsvc::CallLogEntry>,
+    pub history_loading: bool,
+    pub history_error: Option<String>,
+    pub history_filter: HistoryFilter,
+    pub contact_search: TextEdit,
     pub link: TextEdit,
     pub video: bool,
     pub pending: bool,
@@ -40,6 +298,12 @@ pub struct CallView {
 impl Default for CallView {
     fn default() -> Self {
         Self {
+            prejoin_open: false,
+            history: Vec::new(),
+            history_loading: false,
+            history_error: None,
+            history_filter: HistoryFilter::All,
+            contact_search: TextEdit::default(),
             link: TextEdit::new(""),
             video: false,
             pending: false,
@@ -85,7 +349,7 @@ impl CallView {
 
     pub fn apply_video(&mut self, frames: Vec<(VideoKey, Arc<VideoPicture>)>) {
         for (key, picture) in frames {
-            let surface = self.surfaces.entry(key).or_insert_with(NativeSurface::new);
+            let surface = self.surfaces.entry(key).or_default();
             self.frame_id = self.frame_id.wrapping_add(1);
             let _ = surface.push_bytes(
                 ByteFrame {
@@ -193,6 +457,9 @@ fn button<A: Actions + 'static>(
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let call = &s.calls;
     let active = call.state.as_ref().is_some_and(CallState::is_active);
+    if !active && call.ring.is_none() && call.link.text.is_empty() && !call.prejoin_open {
+        return history_view(s);
+    }
     let mut body = col()
         .key("calls")
         .w_full()
@@ -605,6 +872,14 @@ mod tests {
     }
 
     impl Actions for Fake {
+        fn load_call_history(&self) {
+            self.actions.borrow_mut().push("history".into());
+        }
+        fn call_back(&self, entry: &chatsvc::CallLogEntry) {
+            self.actions
+                .borrow_mut()
+                .push(format!("call back {}", entry.call_id));
+        }
         fn open(&self, _: &str) {}
         fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn join_call(&self, url: &str, video: bool) {
@@ -619,8 +894,7 @@ mod tests {
 
     #[test]
     fn updates_track_controls_and_reset_for_next_call() {
-        let mut view = CallView::default();
-        view.pending = true;
+        let mut view = CallView { pending: true, ..Default::default() };
         view.apply(CallUpdate::State(CallState::Connecting));
         assert!(!view.pending);
         view.apply(CallUpdate::Muted(false));
@@ -630,6 +904,62 @@ mod tests {
         assert_eq!(view.notice.as_deref(), Some("offline"));
         view.apply(CallUpdate::State(CallState::Connecting));
         assert!(view.muted && view.notice.is_none());
+    }
+
+    #[test]
+    fn history_loads_and_filters_missed_calls_without_hiding_outgoing_calls_from_all() {
+        let mut state = UiState::new(Fake::default());
+        crate::screens::navigate(&mut state, crate::screens::Screen::Calls);
+        assert_eq!(*state.actions.actions.borrow(), ["history"]);
+        assert!(state.calls.history_loading);
+        let entry = |id: &str, direction, outcome| chatsvc::CallLogEntry {
+            call_id: id.into(),
+            started_at: chrono::Utc::now(),
+            duration_seconds: None,
+            direction,
+            outcome,
+            is_meeting: false,
+            peer_id: Some("ada".into()),
+            peer_name: Some("Ada".into()),
+            thread_id: Some("chat".into()),
+        };
+        state.apply(crate::types::Update::CallHistory(Ok(vec![
+            entry(
+                "missed",
+                chatsvc::CallDirection::Incoming,
+                chatsvc::CallOutcome::Missed,
+            ),
+            entry(
+                "outgoing",
+                chatsvc::CallDirection::Outgoing,
+                chatsvc::CallOutcome::Accepted,
+            ),
+        ])));
+        let mut rt = Runtime::new(
+            state,
+            crate::ui::view::<Fake>,
+            (1280.0, 800.0),
+            Env {
+                system_dark: false,
+                scale: 1.0,
+            },
+        );
+        rt.frame(1.0);
+        assert!(rt.find("history-call-outgoing").is_some());
+        let (x, y) = rt.find("history-Missed").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(2.0);
+        assert!(rt.find("history-call-missed").is_some());
+        assert!(rt.find("history-call-outgoing").is_none());
+        let (x, y) = rt.find("history-call-back-missed").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(3.0);
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().unwrap(),
+            "call back missed"
+        );
     }
 
     #[test]

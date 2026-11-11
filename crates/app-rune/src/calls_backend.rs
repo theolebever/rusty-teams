@@ -51,6 +51,22 @@ impl Calls {
         self.state.lock().expect("call state lock").launcher = Some(launcher);
     }
 
+    pub fn start(&self, spec: CallSpec) {
+        if self.read_only { return; }
+        let handle = {
+            let mut state = self.state.lock().expect("call state lock");
+            if state.joining || state.commands.is_some() { return; }
+            let Some(launcher) = state.launcher.clone() else {
+                (self.publish)(CallUpdate::Notice("Calling is not connected yet".into()));
+                return;
+            };
+            let handle = launcher.start_call(spec);
+            state.commands = Some(handle.commands.clone());
+            handle
+        };
+        app_backend::runtime::handle().spawn(forward(handle, self.state.clone(), self.publish.clone(), self.video.clone()));
+    }
+
     pub fn join(&self, url: &str, video: bool) {
         if self.read_only {
             return;
@@ -179,10 +195,8 @@ impl Calls {
             return;
         }
         let state = self.state.lock().expect("call state lock");
-        if let Some(commands) = &state.commands {
-            if commands.send(command).is_err() {
-                (self.publish)(CallUpdate::Notice("Call controls are unavailable".into()));
-            }
+        if let Some(commands) = &state.commands && commands.send(command).is_err() {
+            (self.publish)(CallUpdate::Notice("Call controls are unavailable".into()));
         }
     }
 
@@ -349,10 +363,11 @@ mod tests {
             received.try_recv().is_err(),
             "a stalled UI gets only one wake"
         );
-        let state = state.lock().expect("call state lock");
-        assert_eq!(state.frames.len(), 1);
-        assert_eq!(state.frames[&key].bgra[0], 2);
-        drop(state);
+        {
+            let state = state.lock().expect("call state lock");
+            assert_eq!(state.frames.len(), 1);
+            assert_eq!(state.frames[&key].bgra[0], 2);
+        }
         control.send(CallUpdate::State(CallState::Ended {
             reason: calling::EndReason::LocalHangup,
         }));

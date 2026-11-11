@@ -5,6 +5,43 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::MessageRow;
 
+/// One card per post; an unloaded root leaves one card for its cached replies.
+pub fn post_indices(rows: &[MessageRow]) -> Vec<usize> {
+    let roots: HashSet<_> = rows.iter().filter(|m| m.reply_to_id.is_none()).map(|m| m.id.as_str()).collect();
+    let mut orphans = HashSet::new();
+    rows.iter().enumerate().filter_map(|(i, row)| match row.reply_to_id.as_deref() {
+        None => Some(i),
+        Some(root) if !roots.contains(root) && orphans.insert(root) => Some(i),
+        _ => None,
+    }).collect()
+}
+
+pub fn overview<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>) -> rune::El {
+    use rune::*;
+    use crate::ui::{c, text, ts, UiState};
+    let mut tiles = col().w_full().equal_columns(2).gap(16.0);
+    for team in &s.teams {
+        let team_id = team.id.clone();
+        let channel = team.channels.first().map(|c| c.id.clone());
+        let mut tile = col().key(format!("team-card-{}", team.id)).w_full().min_w(0.0).h(156.0).padding(20.0).gap(12.0)
+            .radius(8.0).border(1.0, c("#E0E0E0")).fill(crate::avatar::rgb(app_backend::schemes::active_palette().surface_raised))
+            .child(crate::avatar::avatar(&team.name, 40.0, None))
+            .child(text(team.name.clone()).font(ts(16.0, 600.0)).color(c("#242424")).wrap())
+            .child(text(format!("{} channels", team.channels.len())).font(ts(12.0, 400.0)).color(c("#616161")));
+        if let Some(channel) = channel {
+            tile = tile.hover(c("#EBEBEB")).on_press_tx(move |s: &mut UiState<A>, tx| {
+                if !s.expanded_teams.contains(&team_id) { s.expanded_teams.push(team_id.clone()); }
+                crate::ui::open_chat(s, &channel, tx);
+            });
+        }
+        tiles = tiles.child(tile);
+    }
+    col().key("teams-overview").grow(1.0).min_w(0.0).h_full().min_h(0.0).padding(24.0).gap(20.0).fill(c("#FFFFFF"))
+        .child(text("Your teams").font(ts(20.0, 600.0)).color(c("#242424")))
+        .children(s.teams.is_empty().then(|| text("Your teams will appear here when connected.").font(ts(14.0, 400.0)).color(c("#616161"))))
+        .child(col().grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(tiles))
+}
+
 /// Moves each reply directly under its root post. Posts keep their order, replies keep theirs.
 /// A reply whose root is not in `rows` (older than the loaded window) stays where it is.
 pub fn group_replies(rows: Vec<MessageRow>) -> Vec<MessageRow> {
@@ -37,6 +74,8 @@ mod tests {
 
     fn row(id: &str, reply_to: Option<&str>) -> MessageRow {
         MessageRow {
+            sender_id: None,
+            system: false,
             id: id.into(),
             reply_to_id: reply_to.map(str::to_owned),
             deleted: false,
@@ -52,6 +91,12 @@ mod tests {
 
     fn ids(rows: &[MessageRow]) -> Vec<&str> {
         rows.iter().map(|row| row.id.as_str()).collect()
+    }
+
+    #[test]
+    fn feed_has_one_card_per_post_even_with_unloaded_roots() {
+        let rows = vec![row("old1", Some("gone")), row("old2", Some("gone")), row("a", None), row("a1", Some("a")), row("a2", Some("a"))];
+        assert_eq!(post_indices(&rows), [0, 2]);
     }
 
     #[test]

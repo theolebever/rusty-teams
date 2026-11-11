@@ -10,11 +10,16 @@ name = "rusty-teams-rune"
 path = "src/main.rs"
 
 [dependencies]
+agents.workspace = true
 app-backend.workspace = true
 calling.workspace = true
 chatsvc.workspace = true
 chrono.workspace = true
 directories.workspace = true
+# Rune enables PNG by default; Microsoft profile photos are JPEG.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "mp4", "wav", "vorbis"] }
+serde_json.workspace = true
 rune = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
 rune-notify = { git = "https://github.com/anomalyco/rune", rev = "7ed827a2b969ec737323c3e80d2bfc1b8032b609" }
 scraper.workspace = true

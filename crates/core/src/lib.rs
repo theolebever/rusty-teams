@@ -87,7 +87,7 @@ pub use adaptive_card::{
     InvokePayload, SubmitAction, TextColor, TextSize, ToggleTarget, VerticalAlignment,
     card_content_text, split_overflow, task_value,
 };
-pub use avatars::{Avatar, team_avatar_key};
+pub use avatars::{Avatar, chat_picture_key, team_avatar_key};
 pub use call_event::{
     CallEvent, CallPhase, CallType, Recording, call_event, format_duration, parse_duration_seconds,
 };
@@ -161,7 +161,7 @@ pub use graph::{
     MessageExtras, SharedFile, UploadedFile,
 };
 pub use images::StoredImage;
-pub use jumbo::{JumboEmoji, MAX_JUMBO_EMOJI, jumbo_emoji};
+pub use jumbo::{JumboEmoji, MAX_JUMBO_EMOJI, emoji_presentation, jumbo_emoji};
 pub use links::{LinkPreview, first_public_link, is_public_link, link_preview, public_links};
 pub use youtube::fallback_poster_url;
 pub use mapping::{chat_record, message_record};

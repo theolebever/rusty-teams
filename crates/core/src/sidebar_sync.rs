@@ -86,6 +86,7 @@ impl<R: Remote> SyncEngine<R> {
             let any_changed = self.any_chat_changed(&records)?;
             self.store.upsert_chats(&records)?;
             self.fill_kept_previews(&records)?;
+            let _ = self.events.send(CoreEvent::SidebarChanged);
             kept_ids.extend(records.iter().map(|record| record.id.clone()));
             hidden_ids.extend(hidden);
             let wants_more = full || any_changed;
@@ -410,6 +411,7 @@ impl<R: Remote> SyncEngine<R> {
         let teams = self.remote.joined_teams().await?;
         let records: Vec<_> = teams.iter().map(team_record).collect();
         self.store.upsert_teams(&records)?;
+        let _ = self.events.send(CoreEvent::SidebarChanged);
         let team_ids: Vec<String> = records.iter().map(|team| team.id.clone()).collect();
         self.store.remove_teams_except(&team_ids)?;
         refresh.teams = records.len();
@@ -424,6 +426,7 @@ impl<R: Remote> SyncEngine<R> {
                         .map(|channel| channel_record(team_id, channel))
                         .collect();
                     self.store.upsert_channels(&channel_records)?;
+                    let _ = self.events.send(CoreEvent::SidebarChanged);
                     let kept: Vec<String> = channel_records
                         .iter()
                         .map(|channel| channel.id.clone())

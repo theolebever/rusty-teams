@@ -6,6 +6,7 @@ use std::borrow::Cow;
 
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
 use crate::avatar::avatar;
 use crate::icons::sym;
@@ -34,9 +35,12 @@ const QUICK: [(&str, &str); 3] = [
 /// The chip toggles and the collapsed sections. Lives on `UiState` between frames.
 #[derive(Default)]
 pub struct ChatListState {
+    pub show_hidden_channels: Vec<String>,
     pub filters: Vec<Pill>,
     /// Section ids (`CHATS`, `TEAMS`, `QUICK_VIEWS`) folded shut.
     pub collapsed: Vec<String>,
+    /// Context menu, new-chat and members panels (`chat_menu.rs`).
+    pub manage: crate::chat_menu::Manage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,14 +138,14 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
         .h_full()
         .min_h(0.0)
         .fill(tone(active_palette().surface))
-        .child(header())
+        .child(header::<A>())
         .child(status(s))
         .child(crate::search::search_box(s))
         .child(filter_chips(s))
         .child(list)
 }
 
-fn header() -> El {
+fn header<A: Actions + 'static>() -> El {
     let p = active_palette();
     let mut bar = row()
         .key("chat-header")
@@ -163,15 +167,17 @@ fn header() -> El {
         ("chat-filter", "filter_alt"),
         ("chat-new", "edit"),
     ] {
-        bar = bar.child(
-            row()
-                .key(key)
-                .size(ICON_BUTTON, ICON_BUTTON)
-                .center()
-                .radius(8.0)
-                .hover(tone(p.popup_hover))
-                .child(sym(glyph, 16.0).color(tone(p.text_soft))),
-        );
+        let mut button = row()
+            .key(key)
+            .size(ICON_BUTTON, ICON_BUTTON)
+            .center()
+            .radius(8.0)
+            .hover(tone(p.popup_hover))
+            .child(sym(glyph, 16.0).color(tone(p.text_soft)));
+        if key == "chat-new" {
+            button = button.on_press(|s: &mut UiState<A>| crate::new_chat::open(s));
+        }
+        bar = bar.child(button);
     }
     bar
 }
@@ -294,17 +300,17 @@ fn quick_views<A: Actions + 'static>(s: &UiState<A>) -> El {
     list
 }
 
-fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
+pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
     if s.teams.is_empty() {
         return el();
     }
     let p = active_palette();
     let mut list = col()
-        .key("teams")
+        .key("team-list")
         .w_full()
-        .px(6.0)
-        .child(section_header(s, TEAMS, "Teams", 0));
-    if collapsed(s, TEAMS) {
+        .px(6.0);
+    if s.screens.screen != crate::screens::Screen::Teams { list = list.child(section_header(s, TEAMS, "Teams", 0)); }
+    if s.screens.screen != crate::screens::Screen::Teams && collapsed(s, TEAMS) {
         return list;
     }
     for team in &s.teams {
@@ -336,8 +342,17 @@ fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
                 ),
         );
         if expanded {
-            for channel in &team.channels {
+            let show_hidden = s.chatlist.show_hidden_channels.contains(&team.id);
+            for channel in team.channels.iter().filter(|channel| !channel.hidden || show_hidden) {
                 list = list.child(channel_row(s, channel));
+            }
+            let hidden = team.channels.iter().filter(|channel| channel.hidden).count();
+            if hidden > 0 {
+                let id = team.id.clone();
+                list = list.child(row().key(format!("team-hidden-{}", team.id)).w_full().h(32.0).pl(56.0).center_y()
+                    .hover(tone(p.row_hover)).on_press(move |s: &mut UiState<A>| flip(&mut s.chatlist.show_hidden_channels, &id))
+                    .child(text(if show_hidden { "Hide hidden channels".into() } else { format!("See all channels ({hidden} hidden)") })
+                        .font(ts(12.0, 400.0)).color(tone(p.accent))));
             }
         }
     }
@@ -398,7 +413,7 @@ fn visible_index<A: Actions>(s: &UiState<A>, i: usize) -> usize {
 fn row_state<A: Actions>(s: &UiState<A>, index: usize) -> String {
     let chat = &s.chats[index];
     let selected = s.selected.as_deref() == Some(chat.id.as_str());
-    format!("{}|{}|{}|{}|{}|{selected}", chat.id, chat.title, chat.preview, chat.unread, chat.when)
+    format!("{}|{}|{}|{}|{}|{selected}|{:?}", chat.id, chat.title, chat.preview, chat.unread, chat.when, s.details.get(&chat.id))
 }
 
 /// One chat: avatar, title and time, the preview, and an unread dot. Keyed by the caller.
@@ -448,13 +463,42 @@ pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
         .center_y()
         .radius(8.0)
         .hover(tone(p.row_hover))
+        .hover_group()
         .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| open_chat(s, &id, tx))
-        .child(avatar(&ch.title, AVATAR, None))
-        .child(lines);
+        .on_secondary_press({
+            let id = ch.id.clone();
+            move |s: &mut UiState<A>, at, _| crate::chat_menu::open_menu(s, &id, at.x, at.y)
+        })
+        .child(crate::avatar::chat(s, &ch.title, &ch.id, AVATAR))
+        .children(s.details.get(&ch.id).filter(|d| d.muted).map(|_| sym("notifications_off", 14.0).color(tone(p.text_muted))))
+        .child(lines)
+        .child(more_button::<A>(&ch.id));
     if selected {
         card = card.fill(tone(p.surface_raised));
     }
     card
+}
+
+/// The "..." that shows while the row is hovered and opens its context menu. The pointer point
+/// is tracked over the button because a press carries none.
+fn more_button<A: Actions + 'static>(id: &str) -> El {
+    let p = active_palette();
+    let id = id.to_owned();
+    row()
+        .key(format!("chat-more-{id}"))
+        .pin(None, Some(24.0), Some(6.0), None)
+        .size(24.0, 24.0)
+        .center()
+        .radius(6.0)
+        .fill(tone(p.surface_raised))
+        .hover(tone(p.popup_hover))
+        .group_opacity(0.0, 1.0)
+        .on_pointer_move(|s: &mut UiState<A>, at| s.chatlist.manage.anchor = (at.x, at.y))
+        .on_press(move |s: &mut UiState<A>| {
+            let (x, y) = s.chatlist.manage.anchor;
+            crate::chat_menu::open_menu(s, &id, x, y);
+        })
+        .child(sym("more_horiz", 14.0).color(tone(p.text_soft)))
 }
 
 #[cfg(test)]
@@ -490,6 +534,25 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn hidden_channels_remain_discoverable_without_changing_account_settings() {
+        let mut rt = rt();
+        rt.update(|s, _| {
+            s.screens.screen = crate::screens::Screen::Teams;
+            s.teams = vec![crate::types::TeamRow { id: "t".into(), name: "Team".into(), channels: vec![
+                crate::types::ChannelRow { id: "public".into(), name: "General".into(), hidden: false, unread: false },
+                crate::types::ChannelRow { id: "hidden".into(), name: "Hidden".into(), hidden: true, unread: false },
+            ] }];
+            s.expanded_teams.push("t".into());
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("channel-public").is_some());
+        assert!(rt.find("channel-hidden").is_none());
+        click(&mut rt, "team-hidden-t");
+        assert!(rt.find("channel-hidden").is_some());
+        assert!(rt.state.teams[0].channels[1].hidden);
     }
 
     #[test]

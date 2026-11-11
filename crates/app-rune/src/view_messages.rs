@@ -8,22 +8,33 @@ use std::borrow::Cow;
 
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
-use crate::avatar::{avatar, rgb};
+use crate::avatar::rgb;
 use crate::icons::sym;
 use crate::types::{Actions, MessageRow};
 use crate::ui::{UiState, active_target, select_thread, ts};
 
 pub(crate) const MESSAGE_ROW_H: f32 = 64.0;
+
+pub(crate) fn shared<A: Actions + 'static>(s: &UiState<A>) -> El {
+    // shortcut: uses the loaded history, add server pagination when browsing all shared files.
+    let mut list = col().w_full().padding(20.0).gap(12.0)
+        .child(text("Files and images in loaded messages").font(ts(14.0, 600.0)).color(rgb(active_palette().foreground)));
+    for message in s.messages.iter().filter(|m| !m.deleted && (!m.media.images.is_empty() || !m.media.files.is_empty())) {
+        list = list.child(crate::media::view(s, &message.media, &message.id));
+    }
+    col().key("shared").grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(list)
+}
 const AVATAR: f32 = 28.0;
 const AVATAR_GAP: f32 = 8.0;
 const START_GAP: f32 = 8.0;
 const SERIES_GAP: f32 = 2.0;
 const REPLY_INDENT: f32 = 32.0;
 const BUBBLE_MAX_W: f32 = 560.0;
-const CORNER: f32 = 14.0;
+const CORNER: f32 = 8.0;
 const CORNER_JOINED: f32 = 4.0;
-const BODY: f32 = 13.5;
+const BODY: f32 = 14.0;
 const JUMBO: f32 = 40.0;
 const META: f32 = 11.0;
 const CHECK: f32 = 15.0;
@@ -32,7 +43,7 @@ const ACTION_ICON: f32 = 16.0;
 
 /// Whether row `i` continues the run of the same sender above it, and whether the next row does.
 pub(crate) fn series(rows: &[MessageRow], i: usize) -> (bool, bool) {
-    let same = |a: &MessageRow, b: &MessageRow| a.sender == b.sender && a.mine == b.mine;
+    let same = |a: &MessageRow, b: &MessageRow| !a.system && !b.system && a.sender == b.sender && a.mine == b.mine;
     let has_prev = i > 0 && same(&rows[i - 1], &rows[i]);
     let has_next = rows.get(i + 1).is_some_and(|next| same(&rows[i], next));
     (has_prev, has_next)
@@ -67,6 +78,23 @@ fn corner_radii(own: bool, has_prev: bool, has_next: bool) -> [f32; 4] {
 pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
     // The version is the id sequence: a reload with the same count but other messages must re-key.
     let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
+    if active_target(s).is_some_and(|target| target.channel) && !displayed.is_empty() {
+        let mut posts = col().key("channel-posts").w_full().gap(16.0).padding(24.0);
+        for index in crate::teams::post_indices(displayed) {
+            posts = posts.child(col().key(format!("msg-{}", displayed[index].id)).w_full().child(channel_post(s, &displayed[index])));
+        }
+        let id = s.selected.clone().unwrap_or_default();
+        return col().key("messages").grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: true })
+            .child(crate::screens::button("Load older posts", "load-older", move |s: &mut UiState<A>, _| s.actions.load_older(&id)))
+            .child(row().w_full().justify_center().child(posts.max_w(920.0).grow(1.0)));
+    }
+    if displayed.is_empty() && active_target(s).is_some_and(|target| target.channel) {
+        let id = s.selected.clone().unwrap_or_default();
+        return col().key("messages").grow(1.0).min_h(0.0).w_full().center().gap(12.0)
+            .child(sym("chat_bubble", 36.0).color(rgb(active_palette().text_muted)))
+            .child(text("No posts to show").font(ts(18.0, 600.0)).color(rgb(active_palette().foreground)))
+            .child(crate::screens::button("Load older posts", "load-older", move |s: &mut UiState<A>, _| s.actions.load_older(&id)));
+    }
     let ids: Vec<&str> = displayed.iter().map(|m| m.id.as_str()).collect();
     let rows = col()
         .key("message-rows")
@@ -81,7 +109,8 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
             |s: &UiState<A>, i| Cow::Owned(format!("msg-{}", s.search_results.as_ref().unwrap_or(&s.messages)[i].id)),
             |s: &UiState<A>, i| message_row(s, i),
         )
-        .virtual_rows_version((ids, crate::theme::version()));
+        .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
+        .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s)));
     let id = s.selected.clone().unwrap_or_default();
     col()
         .key("messages")
@@ -99,6 +128,13 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
 pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
     let rows = s.search_results.as_ref().unwrap_or(&s.messages);
     let m = &rows[i];
+    if m.system {
+        return col().w_full().child(row().key(format!("event-{}", m.id)).w_full().py(12.0).gap(8.0).center()
+            .child(sym("videocam", 18.0).color(rgb(active_palette().text_muted)))
+            .child(text(m.text.clone()).font(ts(12.0, 400.0)).color(rgb(active_palette().text_muted)).wrap())
+            .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(active_palette().text_muted))));
+    }
+    if active_target(s).is_some_and(|target| target.channel) { return channel_post(s, m); }
     let (has_prev, has_next) = series(rows, i);
     let own = m.mine;
     let palette = active_palette();
@@ -112,7 +148,7 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     let mut stack = if own { col().gap(2.0).items_end() } else { col().gap(2.0).items_start() };
     if !own && !has_prev {
         stack = stack.child(row().key(format!("head-{}", m.id)).gap(8.0).center_y()
-            .child(text(m.sender.clone()).font(ts(12.0, 600.0)).color(rgb(palette.text_soft)))
+            .child(crate::profile::link::<A>(text(m.sender.clone()).font(ts(12.0, 600.0)).color(rgb(palette.text_soft)), format!("name-{}", m.id), m.sender_id.as_deref(), &m.sender))
             .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(palette.text_muted))));
     }
     stack = stack.child(bubble_row);
@@ -127,16 +163,82 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
         row().w_full().justify_end().child(stack.child(meta))
     } else {
         // Only the first post of a run carries the avatar; the rest keep the spacer so text stays aligned.
-        let lead = if has_prev { el().size(AVATAR, AVATAR) } else { avatar(&m.sender, AVATAR, None) };
+        let lead = if has_prev { el().size(AVATAR, AVATAR) } else { crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), AVATAR, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender) };
         row().w_full().gap(AVATAR_GAP).items_start().child(lead).child(stack)
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
-    col().w_full().pt(gap).pl(indent).hover_group().child(content)
+    crate::find::mark(s, &m.id, col().w_full().pt(gap).pl(indent).hover_group().child(content))
+}
+
+fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
+    let palette = active_palette();
+    let root = m.reply_to_id.as_deref().unwrap_or(&m.id);
+    let rows = s.search_results.as_ref().unwrap_or(&s.messages);
+    let replies: Vec<_> = rows.iter().filter(|row| row.reply_to_id.as_deref() == Some(root) && row.id != m.id).collect();
+    let expanded = s.expanded_posts.contains(root);
+    let count = replies.len();
+    let mut discussion = col().w_full().gap(8.0);
+    for reply in replies.into_iter().skip(if expanded { 0 } else { count.saturating_sub(2) }) {
+        discussion = discussion.child(compact_reply(s, reply, expanded));
+    }
+    let id = root.to_owned();
+    let label = if expanded { "Hide replies".to_owned() } else if count > 2 { format!("View all {count} replies") }
+        else if count == 1 { "1 reply".into() } else if count > 0 { format!("{count} replies") } else { "Reply".into() };
+    let footer = row().key(format!("post-replies-{root}")).w_full().h(32.0).gap(8.0).center_y()
+        .label(label.clone()).hover(rgb(palette.row_hover)).on_press_tx(move |s: &mut UiState<A>, tx| {
+            if expanded {
+                s.expanded_posts.remove(&id);
+                if s.thread_root_id.as_deref() == Some(&id) { select_thread(s, None); }
+            } else {
+                s.expanded_posts.insert(id.clone());
+                select_thread(s, Some(id.clone()));
+                if !s.read_only { tx.focus("composer", false); }
+            }
+        }).child(sym("reply", 16.0).color(rgb(palette.accent)))
+        .child(text(label).font(ts(12.0, 600.0)).color(rgb(palette.accent)));
+    col().w_full().child(
+        col().key(format!("post-{}", m.id)).w_full().padding(16.0).gap(10.0).radius(6.0)
+            .border(1.0, rgb(palette.border)).fill(rgb(palette.surface_raised)).hover_group()
+            .child(row().w_full().gap(10.0).center_y()
+                .child(crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), 32.0, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender))
+                .child(col().grow(1.0).min_w(0.0)
+                    .child(crate::profile::link::<A>(text(m.sender.clone()).font(ts(14.0, 600.0)).color(rgb(palette.foreground)), format!("name-{}", m.id), m.sender_id.as_deref(), &m.sender))
+                    .child(text(m.when.clone()).font(ts(12.0, 400.0)).color(rgb(palette.text_muted))))
+                .children(toolbar(s, m)))
+            .children((!m.text.is_empty() && s.menu.edit_id.as_deref() != Some(m.id.as_str())).then(|| crate::rich_text::body::<A>(m, 14.0, rgb(palette.foreground))))
+            .children(crate::message_menu::edit_field(s, m))
+            .children(crate::message_menu::edited_mark(s, m))
+            .child(crate::media::view(s, &m.media, &m.id))
+            .children((!m.deleted).then(|| crate::reactions::controls(s, m)))
+            .children(delete_row(s, m))
+            .child(col().w_full().pt(8.0).gap(8.0).child(el().w_full().h(1.0).fill(rgb(palette.border))).child(discussion).child(footer)))
+}
+
+fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded: bool) -> El {
+    let palette = active_palette();
+    let body = text(m.text.clone()).font(ts(13.0, 400.0)).color(rgb(palette.foreground));
+    let mut content = col().grow(1.0).min_w(0.0).gap(2.0)
+        .child(row().gap(8.0).center_y()
+            .child(crate::profile::link::<A>(text(m.sender.clone()).font(ts(12.0, 600.0)).color(rgb(palette.foreground)), format!("name-{}", m.id), m.sender_id.as_deref(), &m.sender))
+            .child(text(m.when.clone()).font(ts(11.0, 400.0)).color(rgb(palette.text_muted))))
+        .child(if expanded {
+            crate::message_menu::edit_field(s, m)
+                .unwrap_or_else(|| crate::rich_text::body::<A>(m, 13.0, rgb(palette.foreground)))
+        } else { body.truncate() })
+        .children(crate::message_menu::edited_mark(s, m));
+    if expanded {
+        content = content.child(crate::media::view(s, &m.media, &m.id))
+            .child(crate::reactions::controls(s, m)).children(delete_row(s, m));
+    }
+    row().key(format!("post-reply-{}", m.id)).w_full().gap(8.0).py(4.0).hover_group()
+        .child(crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), 24.0, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender))
+        .child(content).children(expanded.then(|| toolbar(s, m)).flatten())
 }
 
 fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_prev: bool, has_next: bool, jumbo: bool) -> El {
     let palette = active_palette();
+    if let Some(field) = crate::message_menu::edit_field(s, m) { return field; }
     if jumbo {
         return text(m.text.trim().to_owned()).key(format!("jumbo-{}", m.id)).font(ts(JUMBO, 400.0)).color(rgb(palette.foreground));
     }
@@ -154,8 +256,9 @@ fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_p
         body = body.fill(rgb(if own { palette.bubble_own } else { palette.bubble_other }));
         palette.foreground
     };
-    body.child(text(m.text.clone()).font(ts(BODY, 400.0)).color(rgb(ink)).wrap())
+    body.child(crate::rich_text::body::<A>(m, BODY, rgb(ink)))
         .child(crate::media::view(s, &m.media, &m.id))
+        .children(crate::message_menu::edited_mark(s, m))
 }
 
 /// One icon button of the hover toolbar. Its press goes to `on_press`.
@@ -194,34 +297,16 @@ fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
             tx.focus("composer", false);
         }));
     }
-    if m.can_delete {
-        let id = m.id.clone();
-        bar = bar.child(action_button(format!("more-{}", m.id), "more_horiz", move |s: &mut UiState<A>, _| {
-            s.more_open = (s.more_open.as_deref() != Some(id.as_str())).then(|| id.clone());
-        }));
-    }
+    let id = m.id.clone();
+    bar = bar.child(action_button(format!("more-{}", m.id), "more_horiz", move |s: &mut UiState<A>, _| {
+        s.more_open = (s.more_open.as_deref() != Some(id.as_str())).then(|| id.clone());
+    }));
     Some(bar)
 }
 
-/// Under the message while its "more" is open: delete, then confirm the delete.
+/// Under the message while its "more" is open (`message_menu.rs`).
 fn delete_row<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
-    if s.read_only || m.deleted || !m.can_delete || s.more_open.as_deref() != Some(m.id.as_str()) {
-        return None;
-    }
-    let id = m.id.clone();
-    let conversation_id = s.selected.clone().unwrap_or_default();
-    let confirming = s.confirm_delete.as_deref() == Some(&id);
-    Some(row().key(format!("delete-{id}")).h(28.0).px(8.0).radius(6.0).hover(rgb(active_palette().popup_hover))
-        .on_press_tx(move |s: &mut UiState<A>, _| {
-            if confirming {
-                s.actions.delete_message(&conversation_id, &id);
-                s.confirm_delete = None;
-                s.more_open = None;
-            } else {
-                s.confirm_delete = Some(id.clone());
-            }
-        })
-        .child(text(if confirming { "Confirm delete" } else { "Delete" }).font(ts(12.0, 400.0)).color(rgb(active_palette().red))))
+    crate::message_menu::menu(s, m)
 }
 
 #[cfg(test)]
@@ -239,6 +324,8 @@ mod tests {
 
     fn msg(id: &str, sender: &str, mine: bool, text: &str) -> MessageRow {
         MessageRow {
+            sender_id: None,
+            system: false,
             id: id.into(),
             reply_to_id: None,
             deleted: false,
@@ -272,11 +359,59 @@ mod tests {
     }
 
     #[test]
+    fn meeting_events_have_no_author_bubble_or_actions_and_break_sender_runs() {
+        let event = MessageRow { system: true, ..msg("meeting", "Unknown", false, "Meeting started") };
+        let rows = vec![msg("before", "Unknown", false, "hello"), event, msg("after", "Unknown", false, "hello")];
+        assert_eq!(series(&rows, 1), (false, false));
+        assert_eq!(series(&rows, 2), (false, false));
+        let rt = show(rows);
+        assert!(rt.find("event-meeting").is_some());
+        assert!(rt.find("head-meeting").is_none());
+        assert!(rt.find("bubble-meeting").is_none());
+        assert!(rt.find("toolbar-meeting").is_none());
+    }
+
+    #[test]
+    fn channel_replies_preview_only_two_and_expand_inside_the_post() {
+        let mut rows = vec![msg("post", "Ada", false, "Release")];
+        for id in ["r1", "r2", "r3"] {
+            rows.push(MessageRow { reply_to_id: Some("post".into()), ..msg(id, "Bo", false, "Thanks") });
+        }
+        let mut rt = show(rows);
+        rt.update(|s, _| {
+            s.teams = vec![crate::types::TeamRow { id: "team".into(), name: "Team".into(), channels: vec![crate::types::ChannelRow { id: "a".into(), name: "General".into(), hidden: false, unread: false }] }];
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("post-post").is_some());
+        assert!(rt.find("post-r3").is_none());
+        assert!(rt.find("post-reply-r1").is_none());
+        assert!(rt.find("post-reply-r3").is_some());
+        click(&mut rt, "post-replies-post");
+        assert!(rt.find("post-reply-r1").is_some());
+        assert_eq!(rt.state.thread_root_id.as_deref(), Some("post"));
+        click(&mut rt, "post-replies-post");
+        assert!(rt.find("post-reply-r1").is_none());
+        assert!(rt.state.thread_root_id.is_none());
+    }
+
+    #[test]
     fn series_marks_runs_of_one_sender() {
         let rows = vec![msg("1", "Ada", false, ""), msg("2", "Ada", false, ""), msg("3", "Bo", false, "")];
         assert_eq!(series(&rows, 0), (false, true));
         assert_eq!(series(&rows, 1), (true, false));
         assert_eq!(series(&rows, 2), (false, false));
+    }
+
+    #[test]
+    fn expanded_reply_renders_its_edit_field() {
+        let mut s = UiState::new(Fake);
+        s.menu.edit_id = Some("reply".into());
+        let reply = MessageRow { reply_to_id: Some("post".into()), ..msg("reply", "Me", true, "Thanks") };
+        s.messages.push(reply);
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(s, |s, _| compact_reply(s, &s.messages[0], true), (1000.0, 700.0), env);
+        rt.frame(0.0);
+        assert!(rt.find("edit-field-reply").is_some());
     }
 
     #[test]

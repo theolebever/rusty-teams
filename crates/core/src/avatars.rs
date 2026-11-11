@@ -7,9 +7,10 @@ use crate::events::CoreEvent;
 use crate::remote::Remote;
 
 const AVATAR_MAX_AGE_DAYS: i64 = 7;
-const AVATAR_BATCH: usize = 60;
+const AVATAR_BATCH: usize = 20;
 const PHOTO_RENDITION_SINCE: &str = "2026-10-17T17:00:00Z";
 const TEAM_AVATAR_PREFIX: &str = "team:";
+const CHAT_PICTURE_PREFIX: &str = "chat:";
 
 /// Team pictures share the avatar cache under this key; Teams serves a lettered tile for teams without one.
 pub fn team_avatar_key(team_id: &str) -> String {
@@ -21,6 +22,11 @@ fn avatar_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
         .map(|since| since.with_timezone(&Utc))
         .unwrap_or(DateTime::UNIX_EPOCH);
     (now - Duration::days(AVATAR_MAX_AGE_DAYS)).max(since)
+}
+
+/// A group chat's own picture shares the avatar cache under this key.
+pub fn chat_picture_key(chat_id: &str) -> String {
+    format!("{CHAT_PICTURE_PREFIX}{chat_id}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +47,17 @@ impl<R: Remote> SyncEngine<R> {
     pub async fn fetch_avatars(&self, user_ids: &[String]) -> Result<()> {
         let cutoff = avatar_cutoff(Utc::now());
         let mut unique = user_ids.to_vec();
-        unique.sort();
-        unique.dedup();
-        let wanted = self.store.avatar_ids_needing_fetch(&unique, cutoff)?;
+        let mut seen = std::collections::HashSet::new();
+        unique.retain(|id| seen.insert(id.clone()));
+        let mut wanted = self.store.avatar_ids_needing_fetch(&unique, cutoff)?;
+        // A missing photo may have just been added; do not cache its absence for a week.
+        let missing_cutoff = Utc::now() - Duration::hours(1);
+        for id in &unique {
+            if !wanted.contains(id) && let Some(record) = self.store.avatar(id)?
+                && record.bytes.is_none() && record.fetched_at < missing_cutoff {
+                wanted.push(id.clone());
+            }
+        }
         let claimed = self.claim_avatar_ids(wanted);
         let outcome = self.fetch_claimed_avatars(&claimed).await;
         self.release_avatar_ids(&claimed);
@@ -57,19 +71,41 @@ impl<R: Remote> SyncEngine<R> {
             .partition(|user_id| is_bot_id(user_id));
         let mut first_error = None;
         let mut fetched_any = false;
-        if !bots.is_empty() {
-            match self.fetch_bot_icons(&bots).await {
-                Ok(changed) => {
-                    fetched_any = true;
-                    if !changed.is_empty() {
-                        let _ = self
-                            .events
-                            .send(CoreEvent::AvatarsChanged { user_ids: changed });
+        let (chats, people): (Vec<String>, Vec<String>) = people
+            .into_iter()
+            .partition(|key| key.starts_with(CHAT_PICTURE_PREFIX));
+        for key in chats {
+            let chat_id = &key[CHAT_PICTURE_PREFIX.len()..];
+            // Unknown until the conversation states load; a later sidebar refresh asks again.
+            let Some(picture) = self
+                .chat_states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(chat_id)
+                .map(|state| state.picture.clone())
+            else {
+                continue;
+            };
+            let photo = match picture {
+                Some(url) => match self.remote.external_image(&url).await {
+                    Ok(photo) => Some(photo),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        None
                     }
-                }
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
+                },
+                None => None,
+            };
+            fetched_any = true;
+            let changed = photo.is_some();
+            self.store.upsert_avatar(&AvatarRecord {
+                user_id: key.clone(),
+                content_type: photo.as_ref().map(|photo| photo.content_type.clone()).unwrap_or_default(),
+                bytes: photo.map(|photo| photo.bytes),
+                fetched_at: Utc::now(),
+            })?;
+            if changed {
+                let _ = self.events.send(CoreEvent::AvatarsChanged { user_ids: vec![key] });
             }
         }
         let (teams, people): (Vec<String>, Vec<String>) = people
@@ -118,6 +154,18 @@ impl<R: Remote> SyncEngine<R> {
                 let _ = self
                     .events
                     .send(CoreEvent::AvatarsChanged { user_ids: changed });
+            }
+        }
+        // Bot icon hosts can be slow; people must appear before those requests start.
+        if !bots.is_empty() {
+            match self.fetch_bot_icons(&bots).await {
+                Ok(changed) => {
+                    fetched_any = true;
+                    if !changed.is_empty() {
+                        let _ = self.events.send(CoreEvent::AvatarsChanged { user_ids: changed });
+                    }
+                }
+                Err(error) => { first_error.get_or_insert(error); }
             }
         }
         match first_error {

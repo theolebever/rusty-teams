@@ -123,6 +123,7 @@ struct Fake {
     muted_states: Mutex<Vec<(String, bool)>>,
     hidden_states: Mutex<Vec<(String, bool)>>,
     read_states: Mutex<Vec<(String, chatsvc::ReadHorizon)>>,
+    chat_pictures: Mutex<Vec<(String, String)>>,
     notes_placeholder: Mutex<bool>,
     chats_fail: Mutex<bool>,
     muted_fails: Mutex<bool>,
@@ -638,6 +639,7 @@ impl Remote for Handle {
                 notification_settings: None,
                 history_cleared_ms: None,
                 hidden_at_ms: None,
+                picture: None,
             })
             .collect();
         states.extend(
@@ -651,8 +653,15 @@ impl Remote for Handle {
                     notification_settings: None,
                     history_cleared_ms: None,
                     hidden_at_ms: None,
+                    picture: None,
                 }),
         );
+        let pictures = self.chat_pictures.lock().unwrap().clone();
+        states.extend(pictures.into_iter().map(|(id, url)| chatsvc::ConversationState {
+            id,
+            picture: Some(url),
+            ..chatsvc::ConversationState::default()
+        }));
         let read = self.read_states.lock().unwrap().clone();
         states.extend(
             read.into_iter()
@@ -664,6 +673,7 @@ impl Remote for Handle {
                     notification_settings: None,
                     history_cleared_ms: None,
                     hidden_at_ms: None,
+                    picture: None,
                 }),
         );
         if !*self.notes_placeholder.lock().unwrap()
@@ -1208,6 +1218,22 @@ async fn chat_engine(fake: &Arc<Fake>, config: SyncConfig) -> SyncEngine<Handle>
     let engine = engine_with(fake, config);
     engine.refresh_sidebar().await.unwrap();
     engine
+}
+
+#[tokio::test]
+async fn first_chat_page_is_announced_even_when_the_next_page_fails() {
+    let fake = Arc::new(Fake::default());
+    *fake.chats.lock().unwrap() = vec![
+        chat("19:first@thread.v2", Some("First"), 10, 10, "user-ada", false),
+        chat("19:second@thread.v2", Some("Second"), 20, 10, "user-ada", false),
+    ];
+    *fake.chats_fail.lock().unwrap() = true;
+    let engine = engine_with(&fake, SyncConfig { chat_page_size: 1, ..SyncConfig::default() });
+    let mut events = engine.subscribe();
+    assert!(engine.refresh_sidebar().await.is_err());
+    assert_eq!(engine.sidebar().unwrap().chats.len(), 1);
+    let sent: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    assert!(sent.contains(&CoreEvent::SidebarChanged), "the saved first page must reach the UI: {sent:?}");
 }
 
 #[tokio::test]
@@ -3118,6 +3144,50 @@ async fn avatars_are_fetched_cached_and_not_refetched_inside_seven_days() {
         .unwrap();
     assert_eq!(fake.photo_requests.lock().unwrap().len(), 1);
     assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_group_chat_picture_is_fetched_through_its_conversation_state() {
+    let fake = Arc::new(Fake::default());
+    let url = "https://de-prod.asyncgw.teams.microsoft.com/v1/objects/0-g/views/avatar_fullsize";
+    fake.chat_pictures.lock().unwrap().push(("19:g@thread.v2".into(), url.into()));
+    let engine = engine_with(&fake, SyncConfig::default());
+    let key = teams_core::chat_picture_key("19:g@thread.v2");
+    engine.fetch_avatars(std::slice::from_ref(&key)).await.unwrap();
+    assert!(engine.avatar(&key).is_none(), "states not loaded yet: nothing fetched or cached");
+    engine.refresh_sidebar().await.unwrap();
+    let mut events = engine.subscribe();
+    engine.fetch_avatars(std::slice::from_ref(&key)).await.unwrap();
+    assert!(engine.avatar(&key).is_some());
+    assert_eq!(fake.external_requests.lock().unwrap().as_slice(), [url]);
+    assert_eq!(events.try_recv().unwrap(), CoreEvent::AvatarsChanged { user_ids: vec![key] });
+}
+
+#[tokio::test]
+async fn avatar_batches_keep_visible_people_first_and_publish_progressively() {
+    let fake = Arc::new(Fake::default());
+    let people: Vec<_> = (0..24).rev().map(|i| format!("person-{i:02}")).collect();
+    for id in &people { fake.photos.lock().unwrap().insert(id.clone(), vec![1]); }
+    let engine = engine_with(&fake, SyncConfig::default());
+    let mut events = engine.subscribe();
+    engine.fetch_avatars(&people).await.unwrap();
+    assert_eq!(fake.photo_requests.lock().unwrap()[0], people[..20]);
+    assert_eq!(fake.photo_requests.lock().unwrap()[1], people[20..]);
+    assert_eq!(events.try_recv().unwrap(), CoreEvent::AvatarsChanged { user_ids: people[..20].to_vec() });
+    assert_eq!(events.try_recv().unwrap(), CoreEvent::AvatarsChanged { user_ids: people[20..].to_vec() });
+}
+
+#[tokio::test]
+async fn a_missing_photo_is_retried_before_the_positive_cache_expires() {
+    let fake = Arc::new(Fake::default());
+    fake.photos.lock().unwrap().insert("ada".into(), vec![9]);
+    let engine = engine_with(&fake, SyncConfig::default());
+    engine.store().upsert_avatar(&store::AvatarRecord {
+        user_id: "ada".into(), bytes: None, content_type: String::new(),
+        fetched_at: Utc::now() - Duration::hours(2),
+    }).unwrap();
+    engine.fetch_avatars(&ids(&["ada"])).await.unwrap();
+    assert_eq!(engine.avatar("ada").unwrap().bytes, [9]);
 }
 
 #[tokio::test]

@@ -4,23 +4,22 @@
 
 use app_backend::schemes::active_palette;
 use rune::*;
+use crate::ui::text;
 
-use crate::avatar::avatar;
 use crate::icons::sym;
 use crate::screens::{self, Screen};
 use crate::types::Actions;
 use crate::ui::{UiState, c, ts, INK, MUTED};
 
 /// Height of the title bar the window draws over its caption buttons (`main.rs`).
-pub const TITLE_BAR_HEIGHT: f32 = 40.0;
-const RAIL_WIDTH: f32 = 60.0;
-const RAIL_ITEM_WIDTH: f32 = 48.0;
-const RAIL_ITEM_HEIGHT: f32 = 52.0;
-const RAIL_ICON: f32 = 20.0;
+pub const TITLE_BAR_HEIGHT: f32 = 48.0;
+const RAIL_WIDTH: f32 = 68.0;
+const RAIL_ITEM_WIDTH: f32 = 56.0;
+const RAIL_ITEM_HEIGHT: f32 = 64.0;
+const RAIL_ICON: f32 = 24.0;
 const SEARCH_WIDTH: f32 = 380.0;
 const SEARCH_HEIGHT: f32 = 28.0;
 const BADGE_CAP: usize = 99;
-const LIST: &str = "#F5F5F5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RailItem {
@@ -35,6 +34,8 @@ fn rail_items(unread_chats: usize) -> Vec<RailItem> {
     vec![
         RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: 0 },
         RailItem { label: "Chat", outline: "chat_bubble", filled: "chat_bubble_fill", screen: Screen::Chat, badge: unread_chats },
+        RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: 0 },
+        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: 0 },
         RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0 },
         RailItem { label: "Calls", outline: "call", filled: "call", screen: Screen::Calls, badge: 0 },
         RailItem { label: "Settings", outline: "settings", filled: "settings", screen: Screen::Settings, badge: 0 },
@@ -62,7 +63,7 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
         .key("title-bar")
         .w_full()
         .h(TITLE_BAR_HEIGHT)
-        .fill(c(LIST))
+        .fill(tone(palette.surface))
         .center_y()
         .window_drag()
         .child(
@@ -99,16 +100,7 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
                         .on_press_tx(|s: &mut UiState<A>, _| screens::navigate(s, Screen::Settings))
                         .child(sym("more_horiz", 18.0).color(c(INK))),
                 )
-                // Placeholder until the bridge exposes the signed-in user and presence.
-                .child(
-                    row()
-                        .key("title-account")
-                        .no_window_drag()
-                        .size(36.0, 36.0)
-                        .radius(18.0)
-                        .center()
-                        .child(avatar("You", 28.0, None)),
-                ),
+                .child(crate::status_menu::account_button(s)),
         )
 }
 
@@ -151,7 +143,7 @@ fn search_box<A: Actions + 'static>() -> El {
 /// The navigation rail down the left: icon over label, the selected screen on a raised pill.
 pub fn rail<A: Actions + 'static>(s: &UiState<A>) -> El {
     let unread = s.chats.iter().filter(|chat| chat.unread).count();
-    let mut rail = col().key("rail").w(RAIL_WIDTH).h_full().fill(c(LIST)).items_center().gap(2.0);
+    let mut rail = col().key("rail").w(RAIL_WIDTH).h_full().fill(tone(active_palette().surface)).items_center().gap(2.0);
     for item in rail_items(unread) {
         rail = rail.child(rail_item::<A>(item, s.screens.screen == item.screen));
     }
@@ -167,13 +159,17 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         .key(format!("nav-{}", item.label))
         .w(RAIL_ITEM_WIDTH)
         .h(RAIL_ITEM_HEIGHT)
-        .radius(10.0)
+        .radius(4.0)
         .pt(2.0)
         .gap(4.0)
         .items_center()
-        .on_press_tx(move |s: &mut UiState<A>, _| screens::navigate(s, screen))
+        .on_press_tx(move |s: &mut UiState<A>, tx| {
+            screens::navigate(s, screen);
+            if screen == Screen::Calendar { tx.scroll_to_instant("calendar-hours", 0.0, 7.0 * 48.0); }
+        })
         .child(sym(glyph, RAIL_ICON).color(ink))
-        .child(text(item.label).font(ts(9.0, 600.0)).color(ink).truncate());
+        .label(item.label)
+        .child(text(item.label).font(ts(11.0, if active { 600.0 } else { 400.0 })).color(ink).truncate());
     button = if active { button.fill(tone(palette.surface_raised)) } else { button.hover(tone(palette.row_hover)) };
     if let Some(count) = badge_text(item.badge) {
         let badge = row()
@@ -208,7 +204,7 @@ mod tests {
     fn rail_lists_the_screens_in_order_and_counts_unread_chats_on_chat() {
         let items = rail_items(3);
         let labels: Vec<_> = items.iter().map(|item| item.label).collect();
-        assert_eq!(labels, ["Activity", "Chat", "Calendar", "Calls", "Settings"]);
+        assert_eq!(labels, ["Activity", "Chat", "Teams", "Agents", "Calendar", "Calls", "Settings"]);
         assert_eq!(items[1].badge, 3);
         assert!(items.iter().enumerate().all(|(index, item)| index == 1 || item.badge == 0));
     }
@@ -231,5 +227,13 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.screens.screen, Screen::Settings);
+        for (label, screen, content) in [("Teams", Screen::Teams, "teams"), ("Agents", Screen::Agents, "agent-prompt")] {
+            let (x, y) = rt.find(&format!("nav-{label}")).expect("rail item");
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0);
+            assert_eq!(rt.state.screens.screen, screen);
+            assert!(rt.find(content).is_some());
+        }
     }
 }

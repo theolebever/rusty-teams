@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rune::*;
+use crate::ui::text;
 use teams_core::{FileCard, FileReference, ImageRef, UploadedFile};
 
 use crate::types::{Actions, SendTarget};
@@ -100,8 +101,10 @@ struct Attachment {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Content {
+    pub rich: crate::rich_text::Rich,
+    pub audio: Vec<crate::voice::Clip>,
     pub images: Vec<ImageRef>,
     pub files: Vec<FileCard>,
 }
@@ -111,16 +114,19 @@ impl Content {
         if record.deleted {
             return Self::default();
         }
-        Self { images: teams_core::images(record), files: teams_core::files(record) }
+        Self { rich: crate::rich_text::Rich::from_record(record), audio: crate::voice::clips(record), images: teams_core::images(record), files: teams_core::files(record) }
     }
 }
 
 pub struct MediaState {
+    pub voice: crate::voice::State,
     cache: ImageCache,
     /// The app icon the title bar draws.
     logo: Image,
     pub images: HashMap<String, Image>,
     pub errors: HashMap<String, String>,
+    /// Cache key and alt text of the image open in the full-window viewer.
+    pub viewer: Option<(String, String)>,
     attachments: HashMap<SendTarget, Vec<Attachment>>,
 }
 
@@ -130,10 +136,12 @@ impl Default for MediaState {
             if let Some(wake) = crate::WAKER.get() { wake(); }
         }));
         Self {
-            logo: cache.load(app_backend::appearance::AppIcon::default().png()),
+            voice: Default::default(),
+            logo: cache.load(app_backend::appearance::AppIcon::MicrosoftTeams.png()),
             cache,
             images: HashMap::new(),
             errors: HashMap::new(),
+            viewer: None,
             attachments: HashMap::new(),
         }
     }
@@ -221,10 +229,9 @@ pub fn attachments<A: Actions + 'static>(s: &UiState<A>, target: &SendTarget) ->
         body = body.child(row().key(format!("attachment-{index}")).w_full().gap(8.0)
             .child(text(label).wrap().grow(1.0).min_w(0.0))
             .child(row().key(format!("attachment-remove-{index}")).padding(6.0).on_press(move |s: &mut UiState<A>| {
-                if let Some(files) = s.media.attachments.get_mut(&target) {
-                    if index < files.len() {
-                        if let Some(uploaded) = files.remove(index).uploaded { s.actions.discard_attachment(uploaded); }
-                    }
+                if let Some(files) = s.media.attachments.get_mut(&target) && index < files.len()
+                    && let Some(uploaded) = files.remove(index).uploaded {
+                    s.actions.discard_attachment(uploaded);
                 }
             }).child(text("Remove"))));
     }
@@ -233,12 +240,24 @@ pub fn attachments<A: Actions + 'static>(s: &UiState<A>, target: &SendTarget) ->
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id: &str) -> El {
     let mut body = col().key(format!("media-{message_id}")).w_full().gap(6.0);
+    for (index, clip) in content.audio.iter().enumerate() {
+        body = body.child(crate::voice::view(s, clip, &format!("audio-{message_id}-{index}")));
+    }
     for (index, image) in content.images.iter().enumerate() {
         let key = image.key().to_owned();
-        let mut picture = col().key(format!("image-{message_id}-{index}")).w_full().h(220.0);
+        let width = image.width.filter(|&width| width > 0).unwrap_or(320).min(400) as f32;
+        let height = match (image.width, image.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (width * h as f32 / w as f32).min(250.0),
+            _ => 220.0,
+        };
+        let mut picture = col().key(format!("image-{message_id}-{index}")).w(width).max_w(400.0).h(height)
+            .label(image.alt.clone().unwrap_or_else(|| "Message image".into()));
+        let alt = image.alt.clone().unwrap_or_else(|| "Message image".into());
         match s.media.images.get(&key) {
             Some(image) if image.error().is_none() => {
-                picture = picture.pixels_fit(image.pixels(), SurfaceFit::Fit);
+                let viewed = (key.clone(), alt.clone());
+                picture = picture.pixels_fit(image.pixels(), SurfaceFit::Fit)
+                    .on_press(move |s: &mut UiState<A>| s.media.viewer = Some(viewed.clone()));
             }
             _ => {
                 let label = s.media.errors.get(&key).cloned().unwrap_or_else(|| "Load image".into());
@@ -280,6 +299,16 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         }
         body = body.child(card);
     }
+    let rich = &content.rich;
+    if let Some(banner) = &rich.banner {
+        body = body.child(crate::cards::banner(s, banner, &format!("banner-{message_id}")));
+    }
+    for (index, card) in rich.cards.iter().enumerate() {
+        body = body.child(crate::cards::view(s, card, &format!("card-{message_id}-{index}")));
+    }
+    if let Some(preview) = &rich.preview {
+        body = body.child(crate::link_preview::view(s, preview, message_id));
+    }
     body
 }
 
@@ -290,6 +319,18 @@ fn is_web_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_only_messages_reserve_a_visible_image_box() {
+        let mut rt = rt();
+        let image = ImageRef { id: "gif".into(), url: "https://media0.giphy.com/media/test/giphy.gif".into(), width: Some(320), height: Some(200), alt: Some("Animated GIF".into()) };
+        let mut row = message("gif", Content { images: vec![image], files: vec![], ..Default::default() });
+        row.text.clear();
+        show(&mut rt, row);
+        let picture = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("image-gif-0")).unwrap();
+        assert!(picture.rect[2] >= 300.0, "image-only bubbles must not collapse: {:?}", picture.rect);
+        assert_eq!(picture.rect[3], 200.0);
+    }
 
     #[test]
     fn deleted_messages_do_not_keep_media_and_files_cannot_launch_local_programs() {
@@ -348,6 +389,8 @@ mod tests {
 
     fn message(id: &str, media: Content) -> crate::types::MessageRow {
         crate::types::MessageRow {
+            sender_id: None,
+            system: false,
             id: id.into(),
             reply_to_id: None,
             deleted: false,
@@ -373,7 +416,7 @@ mod tests {
     fn images_load_when_their_chat_opens_and_a_failed_one_retries_on_click() {
         let mut rt = rt();
         let image = ImageRef { id: "i".into(), url: "https://example.com/a.png".into(), width: None, height: None, alt: None };
-        show(&mut rt, message("m", Content { images: vec![image.clone()], files: vec![] }));
+        show(&mut rt, message("m", Content { images: vec![image.clone()], files: vec![], ..Default::default() }));
         assert_eq!(rt.state.actions.calls.borrow().as_slice(), ["load https://example.com/a.png"]);
         rt.update(|s, _| s.apply(Update::ImageFailed { key: image.key().into(), error: "offline".into() }));
         rt.frame(1.0 / 60.0);
@@ -397,11 +440,37 @@ mod tests {
             card("Loop page", teams_core::FileKind::Loop, "https://loop.microsoft.com/page"),
             card("tool.exe", teams_core::FileKind::Other, "file:///C:/Windows/notepad.exe"),
         ];
-        show(&mut rt, message("m", Content { images: vec![], files }));
+        show(&mut rt, message("m", Content { images: vec![], files, ..Default::default() }));
         assert!(rt.find("file-open-m-0").is_some() && rt.find("file-save-m-0").is_some());
         assert!(rt.find("file-open-m-1").is_some(), "loop components open in the web app");
         assert!(rt.find("file-save-m-1").is_none(), "loop components are not downloadable");
         assert!(rt.find("file-open-m-2").is_none(), "local paths never get an open action");
         assert!(rt.find("file-save-m-2").is_none());
+    }
+
+    #[test]
+    fn clicking_a_loaded_image_opens_the_viewer_and_escape_closes_it() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::new(1, 1).write_to(&mut png, ::image::ImageFormat::Png).expect("encode test image");
+        let mut rt = rt();
+        let image = ImageRef { id: "i".into(), url: "https://example.com/a.png".into(), width: Some(100), height: Some(100), alt: None };
+        show(&mut rt, message("m", Content { images: vec![image.clone()], ..Default::default() }));
+        rt.update(|s, _| s.apply(Update::Image { key: image.key().into(), bytes: png.into_inner() }));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "image-m-0");
+        assert!(rt.state.media.viewer.is_some() && rt.find("image-viewer").is_some());
+        rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.media.viewer.is_none() && rt.find("image-viewer").is_none());
+    }
+
+    #[test]
+    fn link_previews_and_banners_render_under_the_message() {
+        let mut rt = rt();
+        let preview = teams_core::LinkPreview { url: "https://example.com/post".into(), title: Some("A post".into()), description: None, image_url: None, image_width: None, image_height: None };
+        let banner = teams_core::AnnouncementBanner { title: "Big news".into(), background: teams_core::BannerBackground::Color("rose".into()) };
+        let rich = crate::rich_text::Rich { preview: Some(preview), banner: Some(banner), ..Default::default() };
+        show(&mut rt, message("m", Content { rich, ..Default::default() }));
+        assert!(rt.find("link-preview-m").is_some() && rt.find("banner-m").is_some());
     }
 }
