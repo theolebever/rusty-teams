@@ -74,14 +74,35 @@ jobs:
       - uses: ./.github/actions/setup-windows
 
       # fxc.exe comes from the Windows SDK, gpui-pre-windows finds it through the registry.
+      # TEAMS_NO_SSO makes the shipped exe default to --no-sso (see parse_arguments in crates/app).
       - name: Build
+        env:
+          TEAMS_NO_SSO: '1'
         run: cargo build -p app --release --config "patch.crates-io.gpui-pre-windows.path=\"$GPUI_PRE_WINDOWS_PATCHED\""
+
+      # Same exe wrapped in a per-user Inno Setup installer. choco is a no-op when the
+      # runner image already has Inno Setup.
+      - name: Installer
+        run: |
+          choco install innosetup -y --no-progress
+          version="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="0.0.0-${GITHUB_SHA::7}"
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+            "/DAppVersion=$version" \
+            "/DSourceExe=$(cygpath -w "$GITHUB_WORKSPACE/target/release/teams.exe")" \
+            "/O$(cygpath -w "$GITHUB_WORKSPACE/target/installer")" \
+            scripts/windows-installer.iss
 
       # The runner is x86_64; the artifact name carries the architecture.
       - uses: actions/upload-artifact@v7
         with:
           name: teams-windows-amd64
           path: target/release/teams.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: teams-windows-amd64-setup
+          path: target/installer/rusty-teams-setup.exe
 
   macos:
     name: macOS
@@ -127,7 +148,8 @@ jobs:
           mkdir release
           chmod +x dist/teams-linux-amd64/teams
           tar -czf "release/rusty-teams-$TAG-linux-amd64.tar.gz" -C dist/teams-linux-amd64 teams
-          cp dist/teams-windows-amd64/teams.exe "release/rusty-teams-$TAG-windows-amd64.exe"
+          cp dist/teams-windows-amd64/teams.exe "release/rusty-teams-$TAG-windows-amd64-portable.exe"
+          cp dist/teams-windows-amd64-setup/rusty-teams-setup.exe "release/rusty-teams-$TAG-windows-amd64-setup.exe"
           cp dist/teams-macos/teams-macos.zip "release/rusty-teams-$TAG-macos-universal.zip"
 
       - uses: softprops/action-gh-release@v3

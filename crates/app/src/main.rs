@@ -64,6 +64,11 @@ struct Arguments {
 fn parse_arguments() -> Arguments {
     let mut arguments = Arguments::default();
     let mut input = std::env::args().skip(1);
+    // CI release builds set TEAMS_NO_SSO, so the shipped exe behaves as if run with --no-sso.
+    #[cfg(windows)]
+    if option_env!("TEAMS_NO_SSO").is_some() {
+        webview::disable_single_sign_on();
+    }
     while let Some(flag) = input.next() {
         match flag.as_str() {
             "--demo" => arguments.demo = true,
