@@ -36,6 +36,8 @@ pub(crate) struct Shared {
     open_threads: Mutex<std::collections::HashSet<String>>,
     /// Ids whose photo was looked up and fetched this session. `AvatarsChanged` publishes later ones.
     avatars_requested: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Chats whose latest page was fetched ahead of opening them, once per session.
+    warmed: Mutex<std::collections::HashSet<String>>,
     pub(crate) read_only: bool,
     calls: Mutex<Option<Arc<app_backend::launcher::CallLauncher>>>,
     call_control: crate::calls_backend::Calls,
@@ -81,6 +83,7 @@ impl Shared {
                 let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
                 let pictures = sidebar.chats.iter().filter(|chat| chat.kind != "oneOnOne").map(|chat| teams_core::chat_picture_key(&chat.id));
                 self.publish_avatars(engine, sidebar.chats.iter().flat_map(|chat| &chat.members).filter_map(|member| member.user_id.clone()).chain(pictures).collect());
+                self.warm_recent(&sidebar.chats);
                 let details = sidebar.chats.iter().map(|chat| {
                     let one_on_one = chat.kind == "oneOnOne";
                     let presence = one_on_one.then(|| chat.members.iter()
@@ -136,6 +139,23 @@ impl Shared {
             }
             Err(error) => self.publish(Update::Status(format!("Messages unavailable: {error}"))),
         }
+    }
+
+    /// Fetches the latest page of the newest chats with nothing cached, one after another, so
+    /// they open with their messages instead of an empty list.
+    fn warm_recent(&self, chats: &[ChatRecord]) {
+        let ids = {
+            let mut warmed = self.warmed.lock().unwrap_or_else(PoisonError::into_inner);
+            recent_chat_ids(chats, WARM_CHATS).into_iter().filter(|id| warmed.insert(id.clone())).collect::<Vec<_>>()
+        };
+        let Some(engine) = self.engine().filter(|_| !ids.is_empty()) else { return };
+        app_backend::runtime::handle().spawn(async move {
+            for id in ids {
+                if engine.store().messages(&id, None, 1).is_ok_and(|cached| cached.is_empty()) {
+                    let _ = engine.fetch_newer(&id).await;
+                }
+            }
+        });
     }
 
     /// Each id once per session: the sidebar reloads on every presence change, and reading and
@@ -197,6 +217,7 @@ impl Bridge {
             Shared {
             open_threads: Mutex::new(std::collections::HashSet::new()),
             avatars_requested: Arc::default(),
+            warmed: Mutex::default(),
             read_only,
             agent_stop: Mutex::new(None),
             calls: Mutex::new(None),
@@ -839,6 +860,14 @@ fn refresh_me(shared: &Arc<Shared>, engine: &Arc<Engine>) {
 }
 
 /// The existing 1:1 chat with `user_id`, else a new one.
+const WARM_CHATS: usize = 15;
+
+fn recent_chat_ids(chats: &[ChatRecord], count: usize) -> Vec<String> {
+    let mut recent: Vec<_> = chats.iter().collect();
+    recent.sort_by(|left, right| right.last_message_at.cmp(&left.last_message_at));
+    recent.into_iter().take(count).map(|chat| chat.id.clone()).collect()
+}
+
 async fn one_on_one(engine: &Engine, user_id: &str) -> Result<String, String> {
     if let Ok(sidebar) = engine.sidebar()
         && let Some(chat) = sidebar.chats.iter().find(|chat| chat.kind == "oneOnOne" && chat.members.iter().any(|m| m.user_id.as_deref() == Some(user_id)))
@@ -1163,6 +1192,13 @@ mod tests {
             last_message_at: at,
             ..ChatRecord::default()
         }
+    }
+
+    #[test]
+    fn the_newest_chats_are_warmed_first() {
+        let at = |hour| Some(Utc.with_ymd_and_hms(2026, 11, 11, hour, 0, 0).unwrap());
+        let chats = [chat("old", at(8)), chat("never", None), chat("new", at(12)), chat("mid", at(10))];
+        assert_eq!(recent_chat_ids(&chats, 2), ["new", "mid"]);
     }
 
     #[test]
