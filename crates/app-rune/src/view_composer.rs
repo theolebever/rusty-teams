@@ -336,6 +336,21 @@ mod tests {
     }
 
     #[test]
+    fn mention_suggestions_stay_inside_a_short_window() {
+        let mut rt = rt();
+        rt.set_viewport((900.0, 360.0), 1.0);
+        let members = (0..8).map(|i| member(&format!("u{i}"), &format!("Ada {i}"))).collect();
+        let details = crate::types::ChatDetails { members, ..Default::default() };
+        rt.update(|s, _| s.apply(Update::Details([("b".to_owned(), details)].into())));
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("@a".into()));
+        let (list, _) = rt.presented("mention-list").expect("list opens");
+        let (field, _) = rt.presented("composer").unwrap();
+        assert!(list[1] >= 0.0 && list[1] + list[3] <= field[1], "list {list:?} inside the window above the field {field:?}");
+        assert!(rt.find("mention-5").is_some(), "all six suggestions show");
+    }
+
+    #[test]
     fn arrows_move_the_mention_highlight_and_escape_closes_the_list() {
         let mut rt = rt();
         let details = crate::types::ChatDetails { members: vec![member("u1", "Ada"), member("u2", "Alan")], ..Default::default() };
