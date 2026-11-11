@@ -23,22 +23,14 @@ impl<R: Remote> SyncEngine<R> {
         let Ok(conversation) = self.resolve_stored(conversation_id) else {
             return;
         };
-        let groups = emotion_groups(conversation_id, &conversation, records);
-        for (target, members) in groups.into_iter().take(MAX_GROUPS) {
-            let Some(newest) = members
-                .iter()
-                .map(|index| &records[*index])
-                .max_by_key(|record| record.created_at)
-                .map(|record| record.message_id.clone())
-            else {
-                continue;
-            };
+        let groups = emotion_requests(conversation_id, &conversation, records);
+        let answers = futures_util::future::join_all(groups.iter().map(|(target, members, newest)| {
             let page_size = (members.len() + PAGE_MARGIN).min(MAX_PAGE_SIZE);
-            let Ok(found) = self
-                .remote
-                .message_emotions(&target, &newest, page_size)
-                .await
-            else {
+            self.remote.message_emotions(target, newest, page_size)
+        }))
+        .await;
+        for ((_, members, _), answer) in groups.iter().zip(answers) {
+            let Ok(found) = answer else {
                 continue;
             };
             for MessageEmotions {
@@ -56,6 +48,29 @@ impl<R: Remote> SyncEngine<R> {
             }
         }
     }
+}
+
+/// One request per thread, anchored on its newest message. Graph already lists every
+/// reaction, only without its skin tone: a thread without any costs no request.
+fn emotion_requests(
+    conversation_id: &str,
+    conversation: &Conversation,
+    records: &[MessageRecord],
+) -> Vec<(ConversationRef, Vec<usize>, String)> {
+    emotion_groups(conversation_id, conversation, records)
+        .into_iter()
+        .filter(|(_, members)| members.iter().any(|index| !reactions(&records[*index]).is_empty()))
+        .take(MAX_GROUPS)
+        .filter_map(|(target, members)| {
+            let newest = members
+                .iter()
+                .map(|index| &records[*index])
+                .max_by_key(|record| record.created_at)?
+                .message_id
+                .clone();
+            Some((target, members, newest))
+        })
+        .collect()
 }
 
 fn emotion_groups(
@@ -155,5 +170,20 @@ mod tests {
         assert_eq!(groups[0].0, ConversationRef::channel_root("19:c"));
         assert_eq!(groups[1].0, ConversationRef::channel_reply("19:c", "r1"));
         assert_eq!(groups[1].1, vec![1, 2]);
+    }
+
+    #[test]
+    fn threads_without_reactions_need_no_request() {
+        let bare = |id: &str, reply_to: Option<&str>| MessageRecord {
+            reactions_json: "[]".into(),
+            ..record(id, reply_to)
+        };
+        let channel = Conversation::Channel { team_id: "t".into() };
+        let records = [bare("r1", None), bare("a", Some("r1")), record("b", Some("r1"))];
+        let requests = emotion_requests("19:c", &channel, &records);
+        assert_eq!(requests.len(), 1, "only the r1 thread has a reaction");
+        assert_eq!(requests[0].0, ConversationRef::channel_reply("19:c", "r1"));
+        assert_eq!(requests[0].1, vec![1, 2]);
+        assert!(emotion_requests("19:c", &channel, &[bare("r1", None)]).is_empty());
     }
 }
