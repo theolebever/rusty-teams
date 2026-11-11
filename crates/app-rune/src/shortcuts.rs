@@ -360,6 +360,18 @@ mod tests {
     }
 
     #[test]
+    fn find_matches_unicode_and_ignores_deleted_and_system_messages() {
+        let rows = vec![
+            msg(0, "ÉCOLE"),
+            MessageRow { deleted: true, ..msg(1, "école") },
+            MessageRow { system: true, ..msg(2, "école") },
+            msg(3, "une école"),
+        ];
+        assert_eq!(crate::find::matches(&rows, " École "), vec![0, 3]);
+        assert!(crate::find::matches(&rows, "  ").is_empty());
+    }
+
+    #[test]
     fn every_chord_parses() {
         for shortcut in SHORTCUTS {
             assert!(Chord::parse(shortcut.chord).is_ok(), "{}", shortcut.chord);

@@ -67,7 +67,9 @@ fn init() -> UiState<Bridge> {
             wake();
         }
     });
-    UiState::new(bridge)
+    let mut state = UiState::new(bridge);
+    state.apply(Update::Status("Connecting…".into()));
+    state
 }
 
 fn setup(_: &mut UiState<Bridge>, wake: Waker) {
@@ -166,18 +168,38 @@ fn main() {
         .run();
         return;
     }
-    App::new(AppSpec {
+    let app = App::new(AppSpec {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(shortcuts::on_key::<Bridge>),
         ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
     })
     .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
+    .on_close(|state, _| view_composer::persist_draft(state))
     .on_quit(|state, _| {
         state.actions.shutdown();
         app_backend::presence_link::unregister_on_exit(std::time::Duration::from_millis(800));
-    })
-    .run();
+    });
+    let handle = app.handle();
+    let icon = ::image::load_from_memory(app_backend::appearance::AppIcon::MicrosoftTeams.png())
+        .expect("embedded application icon").into_rgba8();
+    let tray = Tray::new(
+        TraySpec::new("rusty-teams-rune", TITLE, TrayIcon::rgba(icon.width(), icon.height(), icon.into_raw()))
+            .tooltip(TITLE).menu(vec![TrayItem::action("open", "Ouvrir"), TrayItem::Separator, TrayItem::action("quit", "Quitter")]),
+        move |event| match event {
+            TrayEvent::Activate { .. } => handle.open(),
+            TrayEvent::Menu(id) if id == "open" => handle.open(),
+            TrayEvent::Menu(id) if id == "quit" => handle.quit(),
+            _ => {}
+        },
+    );
+    match tray {
+        Ok(_tray) => app.keep_running().run(),
+        Err(error) => {
+            app_backend::diagnostics::record(format!("System tray unavailable: {error}"));
+            app.run();
+        }
+    }
 }
 
 /// Demo only: fake actions and sample data, so the view can be looked at without a backend.

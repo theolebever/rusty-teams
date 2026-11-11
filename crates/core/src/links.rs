@@ -108,11 +108,15 @@ pub fn has_stored_links(links_json: &str) -> bool {
 }
 
 pub fn link_preview(record: &MessageRecord) -> Option<LinkPreview> {
-    if record.deleted || has_link_unfurl_card(record) {
+    if record.deleted || !has_stored_links(&record.links_json) {
+        return None;
+    }
+    let preview = select_preview(&record.links_json)?;
+    if has_link_unfurl_card(record) {
         return None;
     }
     let first_link = first_link(&record.body_html)?;
-    select_preview(&record.links_json).filter(|preview| same_link(&preview.url, &first_link))
+    same_link(&preview.url, &first_link).then_some(preview)
 }
 
 pub fn select_preview(links_json: &str) -> Option<LinkPreview> {

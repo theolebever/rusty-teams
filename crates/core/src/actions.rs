@@ -463,10 +463,12 @@ impl<R: Remote> SyncEngine<R> {
     }
 
     async fn mark_channel_read(&self, channel_id: &str) -> Result<()> {
+        let channel = self.store.channel(channel_id)?;
+        if channel.as_ref().is_some_and(|channel| !channel.unread) {
+            return Ok(());
+        }
         let now = Utc::now();
-        let last_message_at = self
-            .store
-            .channel(channel_id)?
+        let last_message_at = channel
             .and_then(|channel| channel.last_message_at)
             .unwrap_or(now);
         self.remote

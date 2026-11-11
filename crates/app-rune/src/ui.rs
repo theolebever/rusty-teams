@@ -313,6 +313,12 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
     crate::theme::apply(cx, &s.appearance);
+    let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
+    if s.toast.reconnecting {
+        return col().key("root").w_full().h_full().fill(c(WHITE))
+            .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
+            .child(crate::toast::reconnect(s, cx.is_reduced_motion()));
+    }
     col()
         .key("root")
         .w_full()
@@ -333,9 +339,9 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
                     let sidebar = if matches!(s.screens.screen, crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
                         crate::screens::view(s)
                     } else {
-                        crate::view_chatlist::pane(s)
+                        crate::view_chatlist::pane(s, (width * 0.28).clamp(220.0, 320.0))
                     };
-                    row().grow(1.0).h_full().child(sidebar).child(conversation(s))
+                    row().grow(1.0).min_w(0.0).h_full().child(sidebar).child(conversation(s, width < 1200.0))
                 } else { crate::screens::view(s) }),
         )
         .children(crate::toast::layer(s))
@@ -346,7 +352,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::shortcuts::overlays(s))
 }
 
-fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
+fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool) -> El {
     if s.screens.screen == crate::screens::Screen::Activity && s.screens.selected_activity.is_none() {
         return col().key("activity-preview").grow(1.0).min_w(0.0).h_full().center().gap(12.0)
             .child(crate::icons::sym("notifications", 40.0).color(c(MUTED)))
@@ -378,7 +384,7 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>) -> El {
         .min_h(0.0)
         .fill(c(WHITE))
         .instant_changes()
-        .child(crate::view_header::header(s, id))
+        .child(crate::view_header::header(s, id, compact))
         .child(crate::find::bar(s))
         .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s) })
         .child(crate::find::jump_bar(s))

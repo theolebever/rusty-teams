@@ -461,7 +461,7 @@ mod runtime_tests {
     }
 
     #[test]
-    fn status_notices_show_a_toast_and_a_lasting_failure_shows_the_banner() {
+    fn status_notices_show_a_toast_and_failure_shows_reconnection() {
         let mut rt = rt();
         apply(&mut rt, Update::Status("Online".into()));
         assert!(rt.find("toast").is_none());
@@ -473,6 +473,7 @@ mod runtime_tests {
         assert!(rt.find("connection-banner").is_none(), "not before it lasted");
         rt.update(|s, _| { s.toast.tick(std::time::Instant::now() + std::time::Duration::from_secs(5)); });
         rt.frame(1.0 / 60.0);
-        assert!(rt.find("connection-banner").is_some());
+        assert!(rt.find("reconnecting").is_some());
+        assert!(rt.find("messages").is_none());
     }
 }

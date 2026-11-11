@@ -157,9 +157,14 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<MessageRecord>> {
         let connection = self.lock()?;
+        let before_filter = if before.is_some() {
+            "AND created_at < ?2"
+        } else {
+            ""
+        };
         let mut statement = connection.prepare_cached(&format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages
-             WHERE conversation_id = ?1 AND (?2 IS NULL OR created_at < ?2)
+             WHERE conversation_id = ?1 {before_filter}
              ORDER BY created_at DESC, message_id DESC LIMIT ?3"
         ))?;
         let mut messages = statement

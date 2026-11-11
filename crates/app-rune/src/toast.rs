@@ -18,6 +18,8 @@ const NOTICE_FOR: Duration = Duration::from_secs(6);
 
 #[derive(Default)]
 pub struct State {
+    pub reconnecting: bool,
+    connection_status: String,
     notice: Option<(String, Instant)>,
     seen: String,
     bad_since: Option<Instant>,
@@ -53,8 +55,11 @@ impl State {
         }
         self.seen = status.to_owned();
         if banner_text(status).is_some() {
+            self.reconnecting = true;
+            self.connection_status = status.to_owned();
             self.bad_since.get_or_insert_with(Instant::now);
         } else if status.starts_with("Online") {
+            self.reconnecting = false;
             self.bad_since = None;
             self.banner = false;
         }
@@ -78,6 +83,16 @@ impl State {
         }
         changed
     }
+}
+
+pub fn reconnect<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bool) -> El {
+    let palette = active_palette();
+    let indicator = sym("smart_toy", 42.0).color(rgb(palette.accent));
+    let indicator = if reduced_motion { indicator } else { indicator.looping(LoopSpec::rotation(2.0)) };
+    col().key("reconnecting").w_full().grow(1.0).min_h(0.0).center().gap(18.0).padding(24.0)
+        .child(indicator)
+        .child(text("Connecting to Teams").font(ts(20.0, 600.0)).color(rgb(palette.foreground)))
+        .child(text(s.toast.connection_status.clone()).font(ts(14.0, 400.0)).color(rgb(palette.text_muted)).wrap())
 }
 
 /// The amber strip for a bad connection, in the flow under the title bar.
@@ -134,6 +149,19 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_do_not_dismiss_reconnection_and_online_restores_content() {
+        let mut state = State::default();
+        state.observe("Connecting…");
+        assert!(state.reconnecting);
+        state.observe("Presence unavailable: offline");
+        assert!(state.reconnecting);
+        state.observe("Sign in in the browser window");
+        assert!(state.reconnecting);
+        state.observe("Online");
+        assert!(!state.reconnecting);
+    }
 
     #[test]
     fn notices_expire_and_a_lasting_bad_connection_raises_the_banner() {

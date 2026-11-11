@@ -28,7 +28,7 @@ const PIN_INSET: f32 = 8.0;
 /// The header of conversation `id`: avatar, title with its edit pencil, the Chat/Shared tabs,
 /// Meet now, the participant count and the icon buttons; then the search field when open, and
 /// the pinned-message bar when this conversation has a pinned message.
-pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
+pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bool) -> El {
     let channel = s.teams.iter().flat_map(|team| &team.channels).find(|channel| channel.id == id);
     let title = s
         .chats
@@ -44,11 +44,13 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .w_full()
         .h(HEADER_H)
         .px(HEADER_PAD)
-        .gap(HEADER_GAP)
+        .gap(if compact { 4.0 } else { HEADER_GAP })
         .center_y()
         .child(crate::profile::link::<A>(crate::avatar::chat(s, title, id, LEAD), "header-avatar".into(), crate::profile::direct_user(s, id), title))
         .child(
             row()
+                .grow(1.0)
+                .shrink()
                 .max_w(TITLE_MAX_W)
                 .min_w(0.0)
                 .gap(4.0)
@@ -66,7 +68,8 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .child(el().grow(1.0));
     if channel.is_none() && !s.read_only {
         let id = id.to_owned();
-        bar = bar.child(meet_now().on_press_tx(move |s: &mut UiState<A>, _| s.actions.meet_now(&id)));
+        let call = if compact { icon_button("meet-now", "videocam", false).label("Meet now") } else { meet_now() };
+        bar = bar.child(call.on_press_tx(move |s: &mut UiState<A>, _| s.actions.meet_now(&id)));
     }
     if let Some(count) = s.member_counts.get(id) {
         bar = bar.child(
@@ -290,6 +293,38 @@ mod tests {
             s.pinned = Some(PinnedRow { conversation_id: "c0".into(), sender: "Mara".into(), text: "Rollout".into() });
         });
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn reconnect_hides_content_until_online_even_after_a_notice() {
+        let mut rt = runtime("c0");
+        rt.update(|s, _| s.apply(crate::types::Update::Status("Connecting…".into())));
+        rt.frame(0.1);
+        assert!(rt.find("reconnecting").is_some());
+        assert!(rt.find("messages").is_none());
+        rt.update(|s, _| s.apply(crate::types::Update::Status("Presence unavailable".into())));
+        rt.frame(0.2);
+        assert!(rt.find("reconnecting").is_some());
+        rt.update(|s, _| s.apply(crate::types::Update::Status("Online".into())));
+        rt.frame(0.3);
+        assert!(rt.find("reconnecting").is_none());
+        assert!(rt.find("messages").is_some());
+    }
+
+    #[test]
+    fn windowed_header_actions_fit_inside_the_conversation() {
+        let mut rt = runtime("c0");
+        for width in [900.0, 1100.0, 1440.0] {
+            rt.viewport = (width, 700.0);
+            rt.update(|_, _| {});
+            rt.frame(0.1);
+            rt.frame(0.2);
+            let elements = rt.elements();
+            for key in ["meet-now", "search-toggle", "side-panel"] {
+                let rect = elements.iter().find(|e| e.path.ends_with(&format!("/{key}"))).unwrap().rect;
+                assert!(rect[0] >= 0.0 && rect[0] + rect[2] <= width + 1.0, "{key} exceeds window {width}: {rect:?}");
+            }
+        }
     }
 
     #[test]

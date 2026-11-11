@@ -145,12 +145,20 @@ fn palette_index(key: &str, len: usize) -> usize {
 }
 
 pub(crate) fn rgb(value: u32) -> Color {
-    rune::color::hex(&format!("#{value:06X}")).expect("palette colour")
+    let channel = |shift: u32| rune::color::srgb_decode(((value >> shift) & 0xFF) as f32 / 255.0);
+    Color { r: channel(16), g: channel(8), b: channel(0), a: 1.0 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_colours_match_hex_decoding() {
+        for value in [0, 0xFFFFFF, 0x123456, 0x5B5FC7, 0xFF0000] {
+            assert_eq!(rgb(value), rune::color::hex(&format!("#{value:06X}")).unwrap());
+        }
+    }
 
     #[test]
     fn initials_use_first_and_last_word() {

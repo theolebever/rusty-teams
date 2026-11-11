@@ -3,6 +3,7 @@
 //! and `sidebar/chat_filter_bar.rs`), read from the same palette the rest of the theme uses.
 
 use std::borrow::Cow;
+use std::rc::Rc;
 
 use app_backend::schemes::active_palette;
 use rune::*;
@@ -13,7 +14,6 @@ use crate::icons::sym;
 use crate::types::{Actions, ChannelRow, ChatRow};
 use crate::ui::{UiState, open_chat, ts};
 
-const PANE_WIDTH: f32 = 320.0;
 const HEADER_H: f32 = 52.0;
 const CHAT_ROW_H: f32 = 54.0;
 const SECTION_H: f32 = 30.0;
@@ -97,7 +97,7 @@ fn is_meeting(id: &str) -> bool {
 
 /// Colour from the active palette, as an rune colour.
 pub(crate) fn tone(value: u32) -> Color {
-    rune::color::hex(&format!("#{value:06X}")).expect("palette colour")
+    crate::avatar::rgb(value)
 }
 
 fn flip<T: PartialEq + Clone>(items: &mut Vec<T>, item: &T) {
@@ -113,7 +113,7 @@ fn collapsed<A: Actions>(s: &UiState<A>, id: &str) -> bool {
     s.chatlist.collapsed.iter().any(|item| item == id)
 }
 
-pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
+pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
     let searching = s.global_search.results.is_some();
     let mut list = col()
         .key("chat-list")
@@ -134,7 +134,7 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
     col()
         .key("chats")
-        .w(PANE_WIDTH)
+        .w(width)
         .h_full()
         .min_h(0.0)
         .fill(tone(active_palette().surface))
@@ -388,9 +388,10 @@ fn channel_row<A: Actions + 'static>(s: &UiState<A>, channel: &ChannelRow) -> El
 }
 
 fn chat_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let visible = visible_chats(&s.chatlist, &s.chats);
+    let visible = Rc::new(visible_chats(&s.chatlist, &s.chats));
     let count = if collapsed(s, CHATS) { 0 } else { visible.len() };
     let fingerprint: Vec<String> = visible.iter().map(|&index| row_state(s, index)).collect();
+    let keys = Rc::clone(&visible);
     col()
         .key("chat-rows")
         .w_full()
@@ -399,14 +400,10 @@ fn chat_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
         .virtual_rows(
             count,
             CHAT_ROW_H,
-            |s: &UiState<A>, i| Cow::Owned(format!("chat-{}", s.chats[visible_index(s, i)].id)),
-            |s: &UiState<A>, i| chat_row(s, visible_index(s, i)),
+            move |s: &UiState<A>, i| Cow::Owned(format!("chat-{}", s.chats[keys[i]].id)),
+            move |s: &UiState<A>, i| chat_row(s, visible[i]),
         )
         .virtual_rows_version((fingerprint, crate::theme::version()))
-}
-
-fn visible_index<A: Actions>(s: &UiState<A>, i: usize) -> usize {
-    visible_chats(&s.chatlist, &s.chats)[i]
 }
 
 /// What a row paints, so a changed row re-keys the cached virtual list.
@@ -574,6 +571,20 @@ mod tests {
         click(&mut rt, "filter-unread");
         assert!(rt.find("chat-a").is_some());
         assert!(rt.find("chat-b").is_none());
+    }
+
+    #[test]
+    fn filtered_rows_follow_unread_changes_and_reordering() {
+        let mut rt = rt();
+        click(&mut rt, "filter-unread");
+        rt.update(|s, _| {
+            s.apply(Update::Chats(vec![chat("b", true), chat("a", false), chat("19:meeting_m@thread.v2", true)]));
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("chat-b").is_some());
+        assert!(rt.find("chat-a").is_none());
+        click(&mut rt, "chat-b");
+        assert_eq!(rt.state.selected.as_deref(), Some("b"));
     }
 
     #[test]

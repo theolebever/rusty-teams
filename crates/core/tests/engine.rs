@@ -1315,6 +1315,9 @@ async fn channel_unread_comes_from_the_read_horizon_and_opening_marks_it_read() 
         "{call}"
     );
     assert!(call.ends_with(";0"), "{call}");
+    let before = fake.calls().len();
+    engine.mark_read(CHANNEL).await.unwrap();
+    assert_eq!(fake.calls().len(), before, "reopening a read channel must not write its horizon again");
 }
 
 #[tokio::test]

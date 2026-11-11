@@ -113,6 +113,8 @@ fn search_box<A: Actions + 'static>() -> El {
         .key("title-search")
         .no_window_drag()
         .w(SEARCH_WIDTH)
+        .shrink()
+        .min_w(80.0)
         .h(SEARCH_HEIGHT)
         .px(10.0)
         .gap(8.0)

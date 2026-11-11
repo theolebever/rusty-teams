@@ -14,8 +14,10 @@ pub const HIGHLIGHT_END: char = '\u{2}';
 
 pub(crate) fn index_message(connection: &Connection, message: &MessageRecord) -> Result<()> {
     let existing: Option<i64> = connection
-        .query_row(
+        .prepare_cached(
             "SELECT id FROM search_keys WHERE conversation_id = ?1 AND message_id = ?2",
+        )?
+        .query_row(
             params![message.conversation_id, message.message_id],
             |row| row.get(0),
         )
@@ -27,28 +29,38 @@ pub(crate) fn index_message(connection: &Connection, message: &MessageRecord) ->
     };
     if body.is_empty() {
         if let Some(id) = existing {
-            connection.execute("DELETE FROM message_search WHERE rowid = ?1", [id])?;
-            connection.execute("DELETE FROM search_keys WHERE id = ?1", [id])?;
+            connection
+                .prepare_cached("DELETE FROM message_search WHERE rowid = ?1")?
+                .execute([id])?;
+            connection
+                .prepare_cached("DELETE FROM search_keys WHERE id = ?1")?
+                .execute([id])?;
         }
         return Ok(());
     }
     let id = match existing {
         Some(id) => {
-            connection.execute("DELETE FROM message_search WHERE rowid = ?1", [id])?;
+            connection
+                .prepare_cached("DELETE FROM message_search WHERE rowid = ?1")?
+                .execute([id])?;
             id
         }
         None => {
-            connection.execute(
-                "INSERT INTO search_keys (conversation_id, message_id) VALUES (?1, ?2)",
-                params![message.conversation_id, message.message_id],
-            )?;
+            connection
+                .prepare_cached(
+                    "INSERT INTO search_keys (conversation_id, message_id) VALUES (?1, ?2)",
+                )?
+                .execute(params![message.conversation_id, message.message_id])?;
             connection.last_insert_rowid()
         }
     };
-    connection.execute(
-        "INSERT INTO message_search (rowid, body, sender) VALUES (?1, ?2, ?3)",
-        params![id, body, message.sender_name.as_deref().unwrap_or_default()],
-    )?;
+    connection
+        .prepare_cached("INSERT INTO message_search (rowid, body, sender) VALUES (?1, ?2, ?3)")?
+        .execute(params![
+            id,
+            body,
+            message.sender_name.as_deref().unwrap_or_default()
+        ])?;
     Ok(())
 }
 

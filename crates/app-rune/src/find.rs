@@ -21,16 +21,16 @@ pub struct Find {
 
 /// Indices of the messages whose text contains `query`, case-insensitively, oldest first.
 pub fn matches(messages: &[MessageRow], query: &str) -> Vec<usize> {
+    matching_indices(messages, query).collect()
+}
+
+fn matching_indices<'a>(messages: &'a [MessageRow], query: &str) -> impl Iterator<Item = usize> + 'a {
     let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Vec::new();
-    }
     messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| !message.deleted && !message.system && message.text.to_lowercase().contains(&query))
+        .filter(move |(_, message)| !query.is_empty() && !message.deleted && !message.system && message.text.to_lowercase().contains(&query))
         .map(|(i, _)| i)
-        .collect()
 }
 
 pub fn open<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
@@ -73,8 +73,9 @@ pub fn marked<A: Actions>(s: &UiState<A>) -> Option<&str> {
     if !find.open || find.searched != find.edit.text {
         return None;
     }
-    let found = matches(&s.messages, &find.edit.text);
-    found.get(find.current).map(|&i| s.messages[i].id.as_str())
+    matching_indices(&s.messages, &find.edit.text)
+        .nth(find.current)
+        .map(|i| s.messages[i].id.as_str())
 }
 
 /// Tints the row of the match the list is on.
@@ -87,7 +88,7 @@ pub fn bar<A: Actions + 'static>(s: &UiState<A>) -> El {
     if !find.open {
         return el();
     }
-    let found = matches(&s.messages, &find.edit.text).len();
+    let found = matching_indices(&s.messages, &find.edit.text).count();
     let status = if find.edit.text.trim().is_empty() {
         String::new()
     } else if found == 0 {

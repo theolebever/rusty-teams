@@ -102,6 +102,25 @@ fn text_format_accumulates() {
 }
 
 #[test]
+fn claude_web_fetch_labels_show_host_without_credentials() {
+    for (url, host) in [
+        ("https://alice:secret@example.com:8443/a", "example.com"),
+        ("https://example.com/a@other.test", "example.com"),
+        ("https://[::1]:8443/a", "[::1]"),
+    ] {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "WebFetch", "input": {"url": url}}]}
+        });
+        assert_eq!(
+            parse_line(OutputFormat::ClaudeStreamJson, &line.to_string()),
+            vec![RunEvent::Step(format!("Reading {host}"))],
+            "URL {url}"
+        );
+    }
+}
+
+#[test]
 fn claude_api_error_becomes_an_api_retry() {
     let line = r#"{"type":"system","subtype":"api_error","error":{"message":"Connection error.","formatted":"No response from API","connection":{"code":"StreamNoResponse"},"noResponse":{"waitedMs":190000,"retryWaitMs":599000}},"session_id":"abc"}"#;
     let events = parse_line(OutputFormat::ClaudeStreamJson, line);

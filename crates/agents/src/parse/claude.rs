@@ -108,11 +108,17 @@ fn file_name(path: &str) -> String {
 
 fn host_of(url: &str) -> String {
     let without_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    without_scheme
-        .split(['/', ':', '?', '#'])
+    let authority = without_scheme
+        .split(['/', '?', '#'])
         .next()
-        .unwrap_or(without_scheme)
-        .to_string()
+        .unwrap_or(without_scheme);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.starts_with('[')
+        && let Some(end) = host.find(']')
+    {
+        return host[..=end].to_string();
+    }
+    host.split(':').next().unwrap_or(host).to_string()
 }
 
 fn tool_label(block: &Value) -> String {

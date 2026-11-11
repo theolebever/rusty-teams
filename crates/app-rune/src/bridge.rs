@@ -706,7 +706,7 @@ impl Actions for Bridge {
             let engine = engine.clone();
             app_backend::runtime::handle().spawn(async move {
                 if !shared.read_only && let Err(error) = engine.mark_read(&conversation_id).await {
-                    shared.publish(Update::Status(format!("Could not mark conversation read: {error}")));
+                    shared.publish(Update::Status(format!("Could not mark conversation {conversation_id} read: {error}")));
                 }
                 refresh_pins(&shared, &engine, &conversation_id).await;
                 if let Ok(Some(chat)) = engine.store().chat(&conversation_id) {
