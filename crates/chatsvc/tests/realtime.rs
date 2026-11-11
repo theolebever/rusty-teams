@@ -126,8 +126,9 @@ async fn forwards_decoded_events_and_drops_foreign_or_garbage_payloads() {
         .filter(|method| method != "Runtime.evaluate")
         .collect();
     assert_eq!(
-        &methods[..4],
+        &methods[..5],
         [
+            "Network.setUserAgentOverride",
             "Runtime.enable",
             "Page.enable",
             "Runtime.addBinding",
