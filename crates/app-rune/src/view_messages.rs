@@ -395,6 +395,24 @@ mod tests {
     }
 
     #[test]
+    fn older_messages_go_in_above_the_message_on_screen() {
+        let page = |from: usize| (from..from + 40).map(|i| msg(&format!("m{i:03}"), &format!("P{}", i % 2), false, "hello")).collect::<Vec<_>>();
+        let mut rt = show(page(40));
+        rt.update(|_, tx| tx.scroll_to_y("messages", 0.0));
+        for t in 2..5 { rt.frame(t as f64 / 60.0); }
+        let before = rt.find("msg-m040").expect("first message on screen at the top");
+        rt.update(|s, _| {
+            let mut rows = page(0);
+            rows.extend(page(40));
+            s.apply(Update::Messages { conversation_id: "a".into(), rows });
+        });
+        for t in 5..8 { rt.frame(t as f64 / 60.0); }
+        let after = rt.find("msg-m040").expect("the message read before stays on screen");
+        assert!((after.1 - before.1).abs() < 1.0, "it moved from {before:?} to {after:?}");
+        assert!(rt.find("msg-m000").is_none(), "the older page stays above, off screen");
+    }
+
+    #[test]
     fn series_marks_runs_of_one_sender() {
         let rows = vec![msg("1", "Ada", false, ""), msg("2", "Ada", false, ""), msg("3", "Bo", false, "")];
         assert_eq!(series(&rows, 0), (false, true));
