@@ -36,7 +36,10 @@ mod platform {
         let request = unsafe { PowerCreateRequest(&context) }.ok()?;
         for kind in REQUESTS {
             // SAFETY: request is a live handle returned by PowerCreateRequest.
-            let _ = unsafe { PowerSetRequest(request, kind) };
+            if unsafe { PowerSetRequest(request, kind) }.is_err() {
+                release(request);
+                return None;
+            }
         }
         Some(request)
     }
