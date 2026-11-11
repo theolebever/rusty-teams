@@ -11,17 +11,31 @@ const REASON: &str = "Teams call in progress";
 #[cfg(windows)]
 mod platform {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Power::{POWER_REQUEST_TYPE, PowerClearRequest, PowerCreateRequest, PowerRequestDisplayRequired, PowerRequestSystemRequired, PowerSetRequest};
-    use windows::Win32::System::Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0};
+    use windows::Win32::System::Power::{
+        POWER_REQUEST_TYPE, PowerClearRequest, PowerCreateRequest, PowerRequestDisplayRequired,
+        PowerRequestSystemRequired, PowerSetRequest,
+    };
+    use windows::Win32::System::Threading::{
+        POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
+    };
     use windows_core::PWSTR;
 
-    pub const REQUESTS: [POWER_REQUEST_TYPE; 2] = [PowerRequestSystemRequired, PowerRequestDisplayRequired];
+    pub const REQUESTS: [POWER_REQUEST_TYPE; 2] =
+        [PowerRequestSystemRequired, PowerRequestDisplayRequired];
 
     pub fn acquire(reason: &str) -> Option<HANDLE> {
         let mut wide: Vec<u16> = reason.encode_utf16().chain(Some(0)).collect();
-        let context = REASON_CONTEXT { Version: 0, Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING, Reason: REASON_CONTEXT_0 { SimpleReasonString: PWSTR(wide.as_mut_ptr()) } };
+        let context = REASON_CONTEXT {
+            Version: 0,
+            Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+            Reason: REASON_CONTEXT_0 {
+                SimpleReasonString: PWSTR(wide.as_mut_ptr()),
+            },
+        };
+        // SAFETY: context and its null-terminated reason string remain valid during the call.
         let request = unsafe { PowerCreateRequest(&context) }.ok()?;
         for kind in REQUESTS {
+            // SAFETY: request is a live handle returned by PowerCreateRequest.
             let _ = unsafe { PowerSetRequest(request, kind) };
         }
         Some(request)
@@ -29,8 +43,10 @@ mod platform {
 
     pub fn release(request: HANDLE) {
         for kind in REQUESTS {
+            // SAFETY: the owning guard releases this live request exactly once.
             let _ = unsafe { PowerClearRequest(request, kind) };
         }
+        // SAFETY: the request is no longer used after its owning guard closes it.
         let _ = unsafe { CloseHandle(request) };
     }
 }
@@ -38,13 +54,22 @@ mod platform {
 impl StayAwake {
     #[cfg(windows)]
     pub fn new() -> Self {
-        StayAwake { request: platform::acquire(REASON) }
+        StayAwake {
+            request: platform::acquire(REASON),
+        }
     }
 
     #[cfg(not(windows))]
     pub fn new() -> Self {
         let inhibitor = std::process::Command::new("systemd-inhibit")
-            .args(["--what=idle:sleep", "--who=Rusty Teams", &format!("--why={REASON}"), "--mode=block", "sleep", "infinity"])
+            .args([
+                "--what=idle:sleep",
+                "--who=Rusty Teams",
+                &format!("--why={REASON}"),
+                "--mode=block",
+                "sleep",
+                "infinity",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -78,5 +103,6 @@ impl Drop for StayAwake {
 // SAFETY: a power request handle is a process-wide kernel object, usable and closable from any thread.
 #[cfg(windows)]
 unsafe impl Send for StayAwake {}
+// SAFETY: shared access only inspects the handle; releasing it requires exclusive ownership.
 #[cfg(windows)]
 unsafe impl Sync for StayAwake {}
