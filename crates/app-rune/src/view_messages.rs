@@ -548,6 +548,21 @@ mod tests {
     }
 
     #[test]
+    fn reactions_under_a_big_emoji_sit_on_its_side() {
+        let like = || vec![teams_core::ReactionSummary { emoji: "\u{1F44D}".into(), count: 1, mine: false }];
+        let rows = vec![
+            MessageRow { reactions: like(), ..msg("theirs", "Ada", false, "\u{1F389}") },
+            MessageRow { reactions: like(), ..msg("own", "Me", true, "\u{1F389}") },
+        ];
+        let rt = show(rows);
+        let edge = |key: &str| rt.presented(key).unwrap_or_else(|| panic!("no {key}")).0;
+        let (emoji, pill) = (edge("jumbo-theirs"), edge("reaction-theirs-\u{1F44D}"));
+        assert!((pill[0] - emoji[0]).abs() < 1.0, "incoming: pill {pill:?} starts under the emoji {emoji:?}");
+        let (emoji, pill) = (edge("jumbo-own"), edge("reaction-own-\u{1F44D}"));
+        assert!((pill[0] + pill[2] - emoji[0] - emoji[2]).abs() < 1.0, "own: pill {pill:?} ends under the emoji {emoji:?}");
+    }
+
+    #[test]
     fn more_reveals_delete_for_a_deletable_post() {
         let mut rt = show(vec![MessageRow { can_delete: true, ..msg("m1", "Me", true, "hi") }]);
         assert!(rt.find("delete-m1").is_none());
