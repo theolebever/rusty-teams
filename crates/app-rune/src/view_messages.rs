@@ -40,6 +40,7 @@ const META: f32 = 11.0;
 const CHECK: f32 = 15.0;
 const ACTION: f32 = 30.0;
 const ACTION_ICON: f32 = 16.0;
+const COMPOSER_GAP: f32 = 16.0;
 
 /// Whether row `i` continues the run of the same sender above it, and whether the next row does.
 pub(crate) fn series(rows: &[MessageRow], i: usize) -> (bool, bool) {
@@ -114,6 +115,8 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
         .w_full()
         .px(20.0)
         .pt(12.0)
+        // The gap above the composer is inside the scroll, so history runs down to the input's edge.
+        .pb(COMPOSER_GAP)
         .growth(GrowthSpec::default());
     let rows = snappy(rows, arriving)
         .virtual_rows(
@@ -150,7 +153,7 @@ fn typing<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let names: Vec<&str> = typers.iter().map(|e| e.display_name.as_str()).collect();
     let palette = active_palette();
     let dot = || el().size(6.0, 6.0).radius(3.0).fill(rgb(palette.text_muted));
-    Some(row().key("typing-indicator").w_full().px(20.0).pt(16.0).pb(8.0).gap(AVATAR_GAP).center_y()
+    Some(row().key("typing-indicator").w_full().px(20.0).pb(8.0).gap(AVATAR_GAP).center_y()
         .label(format!("{} is typing", names.join(", ")))
         .child(crate::avatar::person(s, &first.display_name, Some(&first.user_id), AVATAR, None))
         .child(row().h(AVATAR).px(12.0).gap(4.0).center_y().radius(AVATAR / 2.0).fill(rgb(palette.bubble_other))
