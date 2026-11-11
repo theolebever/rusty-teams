@@ -80,6 +80,9 @@ pub struct UiState<A: Actions> {
     /// The message whose "more" actions are showing, if any.
     pub(crate) more_open: Option<String>,
     pub(crate) menu: crate::message_menu::MenuState,
+    /// Ids of messages that just arrived live in the open chat; they slide in once (`view_messages.rs`).
+    /// `poll` empties it, so only the commit that adds them animates.
+    pub(crate) appearing: Vec<String>,
     drafts: HashMap<SendTarget, String>,
     send_errors: HashMap<SendTarget, String>,
 }
@@ -130,6 +133,7 @@ impl<A: Actions> UiState<A> {
             menu: Default::default(),
             drafts: HashMap::new(),
             send_errors: HashMap::new(),
+            appearing: Vec::new(),
         }
     }
 
@@ -207,7 +211,9 @@ impl<A: Actions> UiState<A> {
                             self.actions.load_image(image.clone());
                         }
                     }
-                    self.messages = crate::teams::group_replies(rows);
+                    let rows = crate::teams::group_replies(rows);
+                    self.appearing = arrived(&self.messages, &rows);
+                    self.messages = rows;
                 }
             }
             Update::Gifs { query, result } => self.compose.gif.loaded(query, result),
@@ -232,6 +238,16 @@ impl<A: Actions> UiState<A> {
             }
         }
     }
+}
+
+/// Messages of `new` that arrived live since `old`: never the first load, a chat switch, an
+/// older page (it goes in above the first known message) or a catch-up of many.
+fn arrived(old: &[MessageRow], new: &[MessageRow]) -> Vec<String> {
+    if old.is_empty() || old.first().map(|m| &m.id) != new.first().map(|m| &m.id) { return Vec::new() }
+    let known: std::collections::HashSet<&str> = old.iter().map(|m| m.id.as_str()).collect();
+    let fresh: Vec<String> = new.iter().filter(|m| !known.contains(m.id.as_str())).map(|m| m.id.clone()).collect();
+    // ponytail: more than three at once is a reconnect catch-up; they land without motion.
+    if fresh.len() > 3 { Vec::new() } else { fresh }
 }
 
 pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
@@ -316,17 +332,16 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
     s.media.begin_render();
     crate::theme::apply(cx, &s.appearance);
     let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
+    let arriving = !s.appearing.is_empty() && !cx.is_reduced_motion();
     if s.toast.reconnecting {
         return col().key("root").w_full().h_full().fill(c(WHITE))
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
             .child(crate::toast::reconnect(s, cx.is_reduced_motion()));
     }
-    col()
-        .key("root")
-        .w_full()
-        .h_full()
-        // Snappy UI: no mount/unmount fades, layout tweens or colour springs anywhere below.
-        .instant_changes()
+    let root = col().key("root").w_full().h_full();
+    crate::view_messages::snappy(root, arriving)
+        // Snappy UI: no mount/unmount fades, layout tweens or colour springs anywhere below,
+        // except the commit where messages arrive live (`view_messages::snappy`).
         .motion(Spring::NONE)
         .fill(c(WHITE))
         .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
@@ -343,7 +358,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
                     } else {
                         crate::view_chatlist::pane(s, (width * 0.28).clamp(220.0, 320.0))
                     };
-                    row().grow(1.0).min_w(0.0).h_full().child(sidebar).child(conversation(s, width < 1200.0))
+                    row().grow(1.0).min_w(0.0).h_full().child(sidebar).child(conversation(s, width < 1200.0, arriving))
                 } else { crate::screens::view(s) }),
         )
         .children(crate::toast::layer(s))
@@ -354,7 +369,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::shortcuts::overlays(s))
 }
 
-fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool) -> El {
+fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool, arriving: bool) -> El {
     if s.screens.screen == crate::screens::Screen::Activity && s.screens.selected_activity.is_none() {
         return col().key("activity-preview").grow(1.0).min_w(0.0).h_full().center().gap(12.0)
             .child(crate::icons::sym("notifications", 40.0).color(c(MUTED)))
@@ -378,17 +393,11 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool) -> El {
                     .color(c(MUTED)),
             );
     };
-    col()
-        .key("conversation")
-        .grow(1.0)
-        .min_w(0.0)
-        .h_full()
-        .min_h(0.0)
-        .fill(c(WHITE))
-        .instant_changes()
+    let conversation = col().key("conversation").grow(1.0).min_w(0.0).h_full().min_h(0.0).fill(c(WHITE));
+    crate::view_messages::snappy(conversation, arriving)
         .child(crate::view_header::header(s, id, compact))
         .child(crate::find::bar(s))
-        .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s) })
+        .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s, arriving) })
         .child(crate::find::jump_bar(s))
         .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s, compact) })
 }

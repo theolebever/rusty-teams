@@ -75,7 +75,20 @@ fn corner_radii(own: bool, has_prev: bool, has_next: bool) -> [f32; 4] {
     }
 }
 
-pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
+/// `el` with its changes landing at once, unless messages arrive live in this commit: then the
+/// new rows slide in on their `transition` (an instant parent mounts its children at once).
+// ponytail: other mounts in that one commit fade too; give the arrival its own commit if that shows.
+pub(crate) fn snappy(el: El, arriving: bool) -> El {
+    if arriving { el } else { el.instant_changes() }
+}
+
+/// How a message that arrives live comes in: own ones rise from the right, others slide from the left.
+fn arrival(own: bool) -> Transition {
+    let (x, y) = if own { (8.0, 16.0) } else { (-18.0, 4.0) };
+    Transition::offset(x, y).combined(Transition::opacity())
+}
+
+pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool) -> El {
     // The version is the id sequence: a reload with the same count but other messages must re-key.
     let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
     if active_target(s).is_some_and(|target| target.channel) && !displayed.is_empty() {
@@ -101,8 +114,8 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .w_full()
         .px(20.0)
         .pt(12.0)
-        .growth(GrowthSpec::default())
-        .instant_changes()
+        .growth(GrowthSpec::default());
+    let rows = snappy(rows, arriving)
         .virtual_rows(
             displayed.len(),
             MESSAGE_ROW_H,
@@ -168,7 +181,9 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
-    crate::find::mark(s, &m.id, col().w_full().pt(gap).pl(indent).hover_group().child(content))
+    let mut row = col().w_full().pt(gap).pl(indent).hover_group().child(content);
+    if s.appearing.contains(&m.id) { row = row.transition(arrival(own)); }
+    crate::find::mark(s, &m.id, row)
 }
 
 fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
@@ -410,6 +425,41 @@ mod tests {
         let after = rt.find("msg-m040").expect("the message read before stays on screen");
         assert!((after.1 - before.1).abs() < 1.0, "it moved from {before:?} to {after:?}");
         assert!(rt.find("msg-m000").is_none(), "the older page stays above, off screen");
+    }
+
+    fn arrive(rt: &mut Runtime<UiState<Fake>>, rows: Vec<MessageRow>) {
+        // As `main::poll`: the last commit's arrivals are done before the next batch applies.
+        rt.update(move |s, _| {
+            s.appearing.clear();
+            s.apply(Update::Messages { conversation_id: "a".into(), rows });
+        });
+    }
+
+    #[test]
+    fn a_message_that_arrives_live_slides_in_once_and_loads_do_not() {
+        let mut rt = show(vec![msg("m1", "Ada", false, "hi")]);
+        for _ in 0..30 { rt.frame(1.0 / 60.0); }
+        assert_eq!(rt.presented("msg-m1").unwrap().1, 1.0, "the first load shows at once");
+        let rest = rt.presented("msg-m1").unwrap().0;
+
+        arrive(&mut rt, vec![msg("m1", "Ada", false, "hi"), msg("m2", "Bo", false, "hey")]);
+        rt.frame(1.0 / 60.0);
+        let (rect, opacity) = rt.presented("msg-m2").expect("new row");
+        assert!(opacity < 1.0, "it fades in, opacity {opacity}");
+        // A later commit (a typing event, a hover) puts the list back to instant mid-entrance.
+        rt.update(|s, _| s.appearing.clear());
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let (settled, opacity) = rt.presented("msg-m2").unwrap();
+        assert_eq!(opacity, 1.0);
+        assert!(settled[0] > rect[0], "it slid in from the left: {rect:?} to {settled:?}");
+        assert_eq!(rt.presented("msg-m1").unwrap().0[0], rest[0], "the message already there stays put");
+
+        let older = vec![msg("m0", "Bo", false, "earlier"), msg("m1", "Ada", false, "hi"), msg("m2", "Bo", false, "hey")];
+        arrive(&mut rt, older);
+        assert!(rt.state.appearing.is_empty(), "an older page is no arrival");
+        rt.update(|s, tx| crate::ui::open_chat(s, "a", tx));
+        arrive(&mut rt, vec![msg("m1", "Ada", false, "hi"), msg("m3", "Bo", false, "new")]);
+        assert!(rt.state.appearing.is_empty(), "reopening a chat is no arrival");
     }
 
     #[test]
