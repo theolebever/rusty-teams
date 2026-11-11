@@ -187,7 +187,6 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     if !m.deleted {
         stack = stack.child(crate::reactions::controls(s, m));
     }
-    stack = stack.children(delete_row(s, m));
     let content = if own {
         let meta = row().gap(4.0).center_y()
             .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(palette.own_meta)))
@@ -201,6 +200,10 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
     let mut row = col().w_full().pt(gap).pl(indent).hover_group().child(content);
+    if !s.read_only && !m.deleted {
+        let id = m.id.clone();
+        row = row.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
+    }
     if s.appearing.contains(&m.id) { row = row.transition(arrival(own)); }
     crate::find::mark(s, &m.id, row)
 }
@@ -245,7 +248,6 @@ fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
             .children(crate::message_menu::edited_mark(s, m))
             .child(crate::media::view(s, &m.media, &m.id))
             .children((!m.deleted).then(|| crate::reactions::controls(s, m)))
-            .children(delete_row(s, m))
             .child(col().w_full().pt(8.0).gap(8.0).child(el().w_full().h(1.0).fill(rgb(palette.border))).child(discussion).child(footer)))
 }
 
@@ -263,7 +265,7 @@ fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded:
         .children(crate::message_menu::edited_mark(s, m));
     if expanded {
         content = content.child(crate::media::view(s, &m.media, &m.id))
-            .child(crate::reactions::controls(s, m)).children(delete_row(s, m));
+            .child(crate::reactions::controls(s, m));
     }
     row().key(format!("post-reply-{}", m.id)).w_full().gap(8.0).py(4.0).hover_group()
         .child(crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), 24.0, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender))
@@ -333,15 +335,13 @@ fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
     }
     let id = m.id.clone();
     bar = bar.child(action_button(format!("more-{}", m.id), "more_horiz", move |s: &mut UiState<A>, _| {
-        s.more_open = (s.more_open.as_deref() != Some(id.as_str())).then(|| id.clone());
+        let open = s.more_open.as_deref() != Some(id.as_str());
+        crate::message_menu::close(s);
+        if open { s.more_open = Some(id.clone()); }
     }));
     Some(bar)
 }
 
-/// Under the message while its "more" is open (`message_menu.rs`).
-fn delete_row<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
-    crate::message_menu::menu(s, m)
-}
 
 #[cfg(test)]
 mod tests {

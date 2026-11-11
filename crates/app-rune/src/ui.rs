@@ -366,6 +366,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::status_menu::layer(s))
         .children(crate::image_viewer::overlay(s))
         .child(crate::chat_menu::overlay(s))
+        .children(crate::message_menu::overlay(s))
         .children(crate::shortcuts::overlays(s))
 }
 

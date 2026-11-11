@@ -69,6 +69,30 @@ pub fn trigger<A: Actions + 'static>(message: &MessageRow) -> El {
     action_button::<A>(format!("react-{}", message.id), "mood", move |s: &mut UiState<A>, _| s.picker.toggle(&message_id))
 }
 
+/// The quick set heading the message menu: picking one reacts (or takes the own one back) and
+/// closes the menu.
+pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> El {
+    let palette = active_palette();
+    let conversation_id = s.selected.clone().unwrap_or_default();
+    let mut bar = row().key(format!("menu-react-{}", message.id)).h(36.0).px(3.0).gap(1.0).center_y().radius(10.0)
+        .fill(rgb(palette.popup)).border(1.0, rgb(palette.border_strong));
+    for glyph in quick_glyphs() {
+        let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
+        let mine = is_mine(message, &glyph);
+        let label = glyph.clone();
+        let mut button = row().key(format!("menu-pick-{}-{glyph}", message.id)).size(30.0, 30.0).radius(7.0).center()
+            .hover(rgb(palette.popup_hover))
+            .on_press_tx(move |s: &mut UiState<A>, _| {
+                crate::message_menu::close(s);
+                s.actions.react(&conversation_id, &message_id, &wire(&glyph), mine);
+            })
+            .child(text(label).font(ts(18.0, 400.0)));
+        if mine { button = button.fill(rgb(palette.reaction_on_own)); }
+        bar = bar.child(button);
+    }
+    bar
+}
+
 /// The reaction pills of a message, plus the quick set when it is open. Read-only views show the
 /// pills without the quick set.
 pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> El {
