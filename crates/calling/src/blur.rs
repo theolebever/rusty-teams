@@ -524,20 +524,41 @@ mod tests {
 
     #[test]
     fn the_mask_age_counts_the_frames_shown_since_its_source_frame() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut source = MaskSource::with_inference(SlowSegmenter { delay: Duration::from_millis(60), seen });
-        assert!(!source.refresh(|| marked_frame(5)));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut shown = 1;
-        while !source.refresh(|| marked_frame(6)) && Instant::now() < deadline {
-            shown += 1;
-            std::thread::sleep(Duration::from_millis(10));
+        struct GatedSegmenter {
+            captured: std::sync::mpsc::SyncSender<u8>,
+            release: std::sync::mpsc::Receiver<()>,
         }
-        assert!(shown >= 3, "the mask came back before the model was done");
-        assert_eq!(source.age(), shown - 1);
+
+        impl MaskInference for GatedSegmenter {
+            fn infer(&mut self, frame: I420Buffer) -> Result<Mask> {
+                self.captured.send(frame.data().0[0]).expect("capture receiver");
+                self.release.recv_timeout(Duration::from_secs(10)).map_err(|_| crate::error::Error::Cancelled)?;
+                Ok(Mask::filled(MASK_WIDTH, MASK_HEIGHT, 1.))
+            }
+        }
+
+        let (captured, capture) = std::sync::mpsc::sync_channel(1);
+        let (release, proceed) = std::sync::mpsc::sync_channel(1);
+        let mut source = MaskSource::with_inference(GatedSegmenter { captured, release: proceed });
+        assert!(!source.refresh(|| marked_frame(5)));
+        let captured = capture.recv_timeout(Duration::from_secs(10));
+        if captured != Ok(5) {
+            source.shared.inbox.close();
+            drop(release);
+            panic!("worker did not capture the source frame: {captured:?}");
+        }
+        for _ in 0..3 {
+            assert!(!source.refresh(|| marked_frame(6)));
+        }
+        // Stop after this inference so a second result cannot race the age assertions.
+        source.shared.inbox.close();
+        release.send(()).expect("release inference");
+        source.worker.take().unwrap().join().expect("segmentation worker");
+        assert!(source.refresh(|| marked_frame(7)));
+        assert_eq!(source.age(), 4);
         assert_eq!(source.reference().values.len(), 4);
-        assert!(!source.refresh(|| marked_frame(7)));
-        assert_eq!(source.age(), shown);
+        assert!(!source.refresh(|| marked_frame(8)));
+        assert_eq!(source.age(), 5);
     }
 
     #[test]
