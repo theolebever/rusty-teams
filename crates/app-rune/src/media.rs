@@ -207,12 +207,13 @@ impl MediaState {
         } else {
             let dimensions = ::image::ImageReader::new(std::io::Cursor::new(&bytes))
                 .with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok());
+            // shortcut: animated costs cover the first frame, use decoder frame accounting for a hard animation budget.
             let size = dimensions.map_or(bytes.len(), |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(16) / 3);
             self.originals.remove(&key);
             (self.cache.load(bytes), size)
         };
         self.shown.get_mut().insert(key.clone(), Instant::now());
-        // Avatar publication is deduplicated by the bridge, so retain these until it supports reload.
+        // shortcut: avatars remain outside the budget until the bridge supports republishing evicted photos.
         if !key.starts_with("avatar:") { self.sizes.insert(key.clone(), size); }
         self.images.insert(key, image);
         self.trim(Instant::now());
