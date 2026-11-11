@@ -139,6 +139,10 @@ pub enum Update {
     },
     /// Answer to `search_gifs`; empty query means trending.
     Gifs { query: String, result: Result<Vec<chatsvc::Gif>, String> },
+    /// Answer to `list_cloud_files` for that place.
+    CloudFiles { place: crate::cloud_picker::Place, result: Result<Vec<teams_core::DriveEntry>, String> },
+    /// Answer to `attach_cloud_file`: the reference the draft sends, by file name.
+    CloudAttached { target: SendTarget, name: String, result: Result<teams_core::FileReference, String> },
     /// Sending could not be confirmed; retain the text for the originating conversation.
     SendFailed {
         target: SendTarget,
@@ -209,6 +213,10 @@ pub trait Actions {
     }
     /// Answered with `Update::Gifs`.
     fn search_gifs(&self, _query: &str) {}
+    /// Answered with `Update::CloudFiles`.
+    fn list_cloud_files(&self, _place: crate::cloud_picker::Place) {}
+    /// Shares a OneDrive file with the conversation; answered with `Update::CloudAttached`.
+    fn attach_cloud_file(&self, _target: SendTarget, _file: teams_core::CloudFile) {}
     /// Stores the unsent text of a conversation; blank text deletes the draft.
     fn save_draft(&self, _conversation_id: &str, _text: &str) {}
     fn load_draft(&self, _conversation_id: &str) -> Option<String> { None }

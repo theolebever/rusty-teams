@@ -307,6 +307,23 @@ impl MediaState {
         }
     }
 
+    /// A cloud file waiting for its reference; it blocks sending like an upload does.
+    pub fn attach_cloud(&mut self, target: SendTarget, name: String) {
+        self.attachments.entry(target).or_default().push(Attachment { path: None, name, reference: None, uploaded: None, error: None });
+    }
+
+    /// The answer for a pending cloud file. The file stays in OneDrive, so nothing is cleaned up when its draft is gone.
+    pub fn cloud_attached(&mut self, target: &SendTarget, name: &str, result: Result<FileReference, String>) {
+        let pending = self.attachments.get_mut(target).and_then(|files| files.iter_mut()
+            .find(|file| file.path.is_none() && file.reference.is_none() && file.error.is_none() && file.name == name));
+        if let Some(file) = pending {
+            match result {
+                Ok(reference) => file.reference = Some(reference),
+                Err(error) => file.error = Some(error),
+            }
+        }
+    }
+
     /// Returns an upload to discard when its draft was removed while uploading.
     pub fn uploaded(&mut self, target: SendTarget, path: PathBuf, result: Result<UploadedFile, String>) -> Option<UploadedFile> {
         let pending = self.attachments.get_mut(&target).and_then(|files| files.iter_mut().find(|file| file.path.as_ref() == Some(&path)));
@@ -351,6 +368,7 @@ pub fn attachments<A: Actions + 'static>(s: &UiState<A>, target: &SendTarget) ->
         let target = target.clone();
         let label = match (&file.reference, &file.error) {
             (_, Some(error)) => format!("{}: {error}", file.name),
+            (None, None) if file.path.is_none() => format!("{}: Attaching…", file.name),
             (None, None) => format!("{}: Uploading…", file.name),
             (Some(_), None) => file.name.clone(),
         };

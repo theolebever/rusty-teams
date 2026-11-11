@@ -25,6 +25,7 @@ pub struct Compose {
     pub emoji: crate::emoji_picker::State,
     pub gif: crate::gif_picker::State,
     pub gifs: Vec<chatsvc::Gif>,
+    pub cloud: crate::cloud_picker::State,
     /// Conversation and text last handed to `Actions::save_draft`.
     saved: Option<(String, String)>,
 }
@@ -100,7 +101,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
             .hover(hover)
             .child(sym(name, ICON).color(c(MUTED)))
     };
-    let attach = target.as_ref().map(|target| tool("attach_file", "attach-file").on_press_tx(media::open_picker::<A>(target)));
+    let attach = target.as_ref().map(|_| tool("attach_file", "attach-file").on_press(|s: &mut UiState<A>| s.compose.cloud.menu = !s.compose.cloud.menu));
     let toolbar = row()
         .key("composer-tools")
         .gap(INSET)
@@ -173,6 +174,8 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         }))
         .children(s.emoji_open.then(|| crate::emoji_picker::picker(s)))
         .children(s.compose.gif.open.then(|| crate::gif_picker::picker(s)))
+        .children(target.as_ref().filter(|_| s.compose.cloud.menu).map(|target| crate::cloud_picker::menu::<A>(target)))
+        .children((target.is_some() && s.compose.cloud.open == target).then(|| crate::cloud_picker::picker(s)))
         .children(crate::gif_picker::chips(s))
         .children(target.clone().map(|target| media::attachments(s, &target)))
         .children(s.thread_root_id.as_ref().map(|_| row().key("close-reply").h(28.0).px(8.0).hover(c(crate::ui::HOVER))
@@ -212,6 +215,82 @@ mod tests {
         fn search_gifs(&self, query: &str) { self.calls.borrow_mut().push(format!("gifs [{query}]")); }
         fn save_draft(&self, id: &str, text: &str) { self.calls.borrow_mut().push(format!("draft {id} [{text}]")); }
         fn load_draft(&self, _id: &str) -> Option<String> { self.stored_draft.clone() }
+        fn list_cloud_files(&self, place: crate::cloud_picker::Place) { self.calls.borrow_mut().push(format!("cloud {place:?}")); }
+        fn attach_cloud_file(&self, target: SendTarget, file: teams_core::CloudFile) {
+            self.calls.borrow_mut().push(format!("attach {} to {} by id {:?}", file.name, target.conversation_id, file.item_id));
+        }
+    }
+
+    fn drive_entry(name: &str, folder: bool) -> teams_core::DriveEntry {
+        teams_core::DriveEntry {
+            drive_id: "d".into(), id: name.into(), name: name.into(), web_url: format!("https://x/{name}"), size: 1,
+            modified_at: None, modified_by: Some("Ada".into()), child_count: folder.then_some(2), download_url: None,
+        }
+    }
+
+    fn open_cloud_picker(rt: &mut Runtime<UiState<Quiet>>) {
+        click(rt, "attach-file");
+        click(rt, "attach-cloud");
+        assert!(rt.find("cloud-picker").is_some() && rt.find("attach-menu").is_none());
+        assert!(calls(rt).contains(&"cloud Recent".to_owned()), "{:?}", calls(rt));
+        assert!(rt.find("cloud-attach").is_some() && rt.find("cloud-tab-shared").is_some());
+    }
+
+    #[test]
+    fn picked_cloud_files_join_the_draft_attachments() {
+        let mut rt = rt();
+        open_cloud_picker(&mut rt);
+        rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::MyFiles, result: Ok(vec![drive_entry("stale.txt", false)]) }));
+        rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::Recent,
+            result: Ok(vec![drive_entry("Plans", true), drive_entry("a.docx", false)]) }));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "cloud-row-0");
+        assert!(calls(&rt).iter().any(|call| call.starts_with("cloud Folder")), "a folder opens");
+        assert!(rt.find("cloud-crumb-0").is_some());
+        rt.update(|s, _| {
+            let place = crate::cloud_picker::Place::Folder(drive_entry("Plans", true).folder());
+            s.apply(Update::CloudFiles { place, result: Ok(vec![drive_entry("a.docx", false), drive_entry("b.xlsx", false)]) });
+        });
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "cloud-row-0");
+        click(&mut rt, "cloud-row-1");
+        click(&mut rt, "cloud-attach");
+        assert!(rt.find("cloud-picker").is_none());
+        let attached: Vec<String> = calls(&rt).into_iter().filter(|call| call.starts_with("attach")).collect();
+        assert_eq!(attached, ["attach a.docx to b by id Some(\"a.docx\")", "attach b.xlsx to b by id Some(\"b.xlsx\")"]);
+        assert!(rt.find("attachment-0").is_some() && rt.find("attachment-1").is_some(), "pending files show at once");
+        let target = SendTarget { conversation_id: "b".into(), thread_root_id: None, channel: false };
+        let reference = teams_core::FileReference { attachment_id: "e1".into(), content_url: "https://x/a.docx".into(), name: "a.docx".into() };
+        rt.update(|s, _| s.apply(Update::CloudAttached { target: target.clone(), name: "a.docx".into(), result: Ok(reference.clone()) }));
+        assert_eq!(rt.state.media.files(&target), vec![reference]);
+        assert!(rt.state.media.is_uploading(&target), "b.xlsx is still on its way");
+    }
+
+    #[test]
+    fn cancel_leaves_the_draft_unchanged() {
+        let mut rt = rt();
+        open_cloud_picker(&mut rt);
+        rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::Recent, result: Ok(vec![drive_entry("a.docx", false)]) }));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "cloud-row-0");
+        click(&mut rt, "cloud-cancel");
+        assert!(rt.find("cloud-picker").is_none() && rt.find("attachment-0").is_none());
+        assert!(calls(&rt).iter().all(|call| !call.starts_with("attach")));
+    }
+
+    #[test]
+    fn a_refused_listing_shows_the_error_line_and_an_empty_one_says_so() {
+        let mut rt = rt();
+        open_cloud_picker(&mut rt);
+        click(&mut rt, "cloud-tab-shared");
+        assert!(calls(&rt).contains(&"cloud Shared".to_owned()));
+        rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::Shared, result: Err("403 Forbidden: accessDenied".into()) }));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("cloud-error").is_some());
+        click(&mut rt, "cloud-tab-mine");
+        rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::MyFiles, result: Ok(vec![]) }));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("cloud-error").is_none() && rt.find("cloud-empty").is_some());
     }
 
     fn rt() -> Runtime<UiState<Quiet>> {

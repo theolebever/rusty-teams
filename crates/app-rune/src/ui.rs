@@ -211,6 +211,8 @@ impl<A: Actions> UiState<A> {
                 }
             }
             Update::Gifs { query, result } => self.compose.gif.loaded(query, result),
+            Update::CloudFiles { place, result } => self.compose.cloud.loaded(place, result),
+            Update::CloudAttached { target, name, result } => self.media.cloud_attached(&target, &name, result),
             Update::SendFailed {
                 target,
                 text,

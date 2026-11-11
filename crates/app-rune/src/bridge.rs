@@ -785,6 +785,44 @@ impl Actions for Bridge {
         });
     }
 
+    fn list_cloud_files(&self, place: crate::cloud_picker::Place) {
+        use crate::cloud_picker::{Place, entry};
+        let Some(engine) = self.shared.engine() else {
+            self.shared.publish(Update::CloudFiles { place, result: Err("Not connected yet".into()) });
+            return;
+        };
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            let result = match &place {
+                Place::Recent => engine.picker_recent().await
+                    .map(|files| files.into_iter().map(|(file, owner)| entry(file, owner)).collect()),
+                Place::MyFiles => match engine.picker_root(None).await {
+                    Ok(root) => engine.picker_folder(&root).await,
+                    Err(error) => Err(error),
+                },
+                Place::Shared => engine.picker_shared().await,
+                Place::Folder(folder) => engine.picker_folder(folder).await,
+                Place::Search(query) => engine.search_cloud_files(&teams_core::substrate_search::SearchSession::new(), query).await
+                    .map(|files| files.into_iter().map(|file| entry(file, None)).collect()),
+            };
+            shared.publish(Update::CloudFiles { place, result: result.map_err(|error| error.to_string()) });
+        });
+    }
+
+    fn attach_cloud_file(&self, target: SendTarget, file: teams_core::CloudFile) {
+        let name = file.name.clone();
+        let engine = self.shared.engine().filter(|_| !self.shared.read_only);
+        let Some(engine) = engine else {
+            self.shared.publish(Update::CloudAttached { target, name, result: Err("Not connected yet".into()) });
+            return;
+        };
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            let result = engine.attach_cloud_file(&target.conversation_id, &file).await.map_err(|error| error.to_string());
+            shared.publish(Update::CloudAttached { target, name, result });
+        });
+    }
+
     fn save_draft(&self, conversation_id: &str, text: &str) {
         let Some(engine) = self.shared.engine() else { return };
         let _ = match crate::composed::draft_record(conversation_id, text) {

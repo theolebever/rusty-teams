@@ -6,6 +6,7 @@ mod agent_panel;
 mod arguments;
 mod avatar;
 mod bridge;
+mod cloud_picker;
 mod composed;
 mod emoji_picker;
 mod gif_picker;
