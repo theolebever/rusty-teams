@@ -1,7 +1,7 @@
 //! Message images and file cards, using the core's authenticated image cache.
 
 use std::collections::{HashMap, HashSet};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -146,6 +146,23 @@ impl Content {
     }
 }
 
+struct Watched {
+    images: Vec<ImageRef>,
+    visible: bool,
+    render: u64,
+}
+
+pub fn watch<A: Actions + 'static>(s: &UiState<A>, owner: &str, images: Vec<ImageRef>, element: El) -> El {
+    let owner = format!("{}:{}:{owner}", s.selected.as_deref().unwrap_or_default(), s.shared_open);
+    let mut watched = s.media.watched.borrow_mut();
+    let entry = watched.entry(owner.clone()).or_insert_with(|| Watched {
+        images: Vec::new(), visible: false, render: s.media.render.get(),
+    });
+    entry.images = images;
+    entry.render = s.media.render.get();
+    element.on_visible(move |s: &mut UiState<A>, on, _| s.media.visibility(&owner, on, &s.actions))
+}
+
 pub struct MediaState {
     pub voice: crate::voice::State,
     cache: ImageCache,
@@ -156,7 +173,8 @@ pub struct MediaState {
     sizes: HashMap<String, usize>,
     shown: RefCell<HashMap<String, Instant>>,
     viewer_image: Option<Image>,
-    visible: RefCell<HashSet<String>>,
+    watched: RefCell<HashMap<String, Watched>>,
+    render: Cell<u64>,
     evicted: HashSet<String>,
     pub errors: HashMap<String, String>,
     /// Cache key and alt text of the image open in the full-window viewer.
@@ -178,7 +196,8 @@ impl Default for MediaState {
             sizes: HashMap::new(),
             shown: RefCell::new(HashMap::new()),
             viewer_image: None,
-            visible: RefCell::new(HashSet::new()),
+            watched: RefCell::new(HashMap::new()),
+            render: Cell::new(0),
             evicted: HashSet::new(),
             errors: HashMap::new(),
             viewer: None,
@@ -220,14 +239,21 @@ impl MediaState {
     }
 
     pub fn image(&self, key: &str) -> Option<&Image> {
-        let image = self.images.get(key)?;
-        if let Some(shown) = self.shown.borrow_mut().get_mut(key) { *shown = Instant::now(); }
-        let mut visible = self.visible.borrow_mut();
-        if !visible.contains(key) { visible.insert(key.to_owned()); }
-        Some(image)
+        self.images.get(key)
     }
 
-    pub fn clear_visible(&mut self) { self.visible.get_mut().clear(); }
+    pub fn begin_render(&self) { self.render.set(self.render.get().wrapping_add(1)); }
+
+    fn visibility<A: Actions>(&mut self, owner: &str, on: bool, actions: &A) {
+        let Some(watched) = self.watched.get_mut().get_mut(owner) else { return };
+        watched.visible = on;
+        for image in &watched.images {
+            if let Some(shown) = self.shown.get_mut().get_mut(image.key()) { *shown = Instant::now(); }
+            if on && self.evicted.remove(image.key()) && !self.errors.contains_key(image.key()) {
+                actions.load_image(image.clone());
+            }
+        }
+    }
 
     pub fn open_viewer(&mut self, key: String, alt: String) {
         self.viewer_image = self.originals.get(&key).map(|bytes| self.cache.load(bytes.clone()));
@@ -240,9 +266,11 @@ impl MediaState {
 
     pub fn trim(&mut self, now: Instant) {
         if self.viewer.is_none() { self.viewer_image = None; }
+        self.watched.get_mut().retain(|_, watched| watched.render == self.render.get());
         let mut total = self.sizes.values().fold(0usize, |total, size| total.saturating_add(*size));
         if total <= IMAGE_BUDGET { return; }
-        let visible = self.visible.get_mut();
+        let visible: HashSet<_> = self.watched.get_mut().values().filter(|watched| watched.visible)
+            .flat_map(|watched| watched.images.iter().map(|image| image.key().to_owned())).collect();
         let mut candidates: Vec<_> = self.shown.get_mut().iter()
             .filter(|(key, shown)| self.sizes.contains_key(*key) && !visible.contains(*key) && self.viewer.as_ref().is_none_or(|(viewed, _)| viewed != *key)
                 && now.saturating_duration_since(**shown) >= KEEP_RECENT)
@@ -293,21 +321,6 @@ impl MediaState {
             (None, uploaded) => uploaded.ok(),
         }
     }
-}
-
-pub fn rows_visible<A: Actions>(s: &mut UiState<A>, rows: std::ops::Range<usize>) -> bool {
-    let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
-    let mut visible = HashSet::new();
-    for row in displayed.iter().skip(rows.start).take(rows.len()) {
-        for image in row.media.images.iter().cloned().chain(row.media.rich.images()) {
-            visible.insert(image.key().to_owned());
-            if s.media.evicted.remove(image.key()) && !s.media.errors.contains_key(image.key()) {
-                s.actions.load_image(image);
-            }
-        }
-    }
-    *s.media.visible.get_mut() = visible;
-    crate::find::rows_visible(s, rows)
 }
 
 /// Opens the file picker for `target`; the chosen file joins that draft's attachments.
@@ -382,7 +395,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
                 });
             }
         }
-        body = body.child(picture);
+        body = body.child(watch(s, &format!("image-{message_id}-{index}"), vec![image.clone()], picture));
     }
     for (index, file) in content.files.iter().enumerate() {
         let url = file.open_url.clone();
@@ -468,7 +481,9 @@ mod tests {
             state.shown.get_mut().insert(key.into(), now - KEEP_RECENT);
         }
         state.sizes.insert("old".into(), IMAGE_BUDGET);
-        state.visible.get_mut().insert("visible".into());
+        state.watched.get_mut().insert("visible-owner".into(), Watched {
+            images: vec![crate::rich_text::remote("visible")], visible: true, render: 0,
+        });
         state.viewer = Some(("viewer".into(), String::new()));
         state.trim(now);
         assert!(!state.images.contains_key("old"));
@@ -487,9 +502,70 @@ mod tests {
         state.media.shown.get_mut().insert(image.key().into(), Instant::now() - KEEP_RECENT);
         state.media.sizes.insert(image.key().into(), IMAGE_BUDGET + 1);
         state.media.trim(Instant::now());
-        rows_visible(&mut state, 0..1);
-        rows_visible(&mut state, 0..1);
+        state.media.watched.get_mut().insert("owner".into(), Watched { images: vec![image], visible: false, render: 0 });
+        state.media.visibility("owner", true, &state.actions);
+        state.media.visibility("owner", true, &state.actions);
         assert_eq!(state.actions.calls.borrow().as_slice(), ["load https://example.com/a.png"]);
+    }
+
+    #[test]
+    fn refresh_preserves_visible_images_and_removed_owners_do_not_pin_them() {
+        let mut state = UiState::new(Recorder::default());
+        state.selected = Some("chat".into());
+        let image = crate::rich_text::remote("https://example.com/a.png");
+        state.media.loaded(image.key().into(), png(1, 1));
+        state.media.sizes.insert(image.key().into(), IMAGE_BUDGET + 1);
+        state.media.shown.get_mut().insert(image.key().into(), Instant::now() - KEEP_RECENT);
+        state.media.begin_render();
+        let _ = watch(&state, "first", vec![image.clone()], col());
+        let _ = watch(&state, "second", vec![image.clone()], col());
+        state.media.visibility("chat:false:first", true, &state.actions);
+        state.media.visibility("chat:false:second", true, &state.actions);
+        state.media.visibility("chat:false:first", false, &state.actions);
+        state.apply(Update::Messages { conversation_id: "chat".into(), rows: Vec::new() });
+        state.media.trim(Instant::now() + KEEP_RECENT);
+        assert!(state.media.images.contains_key(image.key()), "second visible instance protects the same URL through refresh");
+        state.media.begin_render();
+        state.media.trim(Instant::now() + KEEP_RECENT);
+        assert!(!state.media.images.contains_key(image.key()), "unmounted owners receive no false event and must expire");
+    }
+
+    #[test]
+    fn nonvirtual_shared_and_channel_images_reload_after_scroll() {
+        for channel in [false, true] {
+            let mut rt = rt();
+            let rows: Vec<_> = (0..8).map(|index| message(&format!("m{index}"), Content {
+                images: vec![ImageRef { id: format!("i{index}"), url: format!("https://example.com/{index}.png"),
+                    width: Some(400), height: Some(250), alt: None }], ..Default::default()
+            })).collect();
+            rt.update(|s, _| {
+                s.selected = Some("chat".into());
+                s.shared_open = !channel;
+                if channel {
+                    s.teams = vec![crate::types::TeamRow { id: "team".into(), name: "Team".into(),
+                        channels: vec![crate::types::ChannelRow { id: "chat".into(), name: "General".into(), hidden: false, unread: false }] }];
+                }
+                s.apply(Update::Messages { conversation_id: "chat".into(), rows });
+                for index in 0..8 { s.media.loaded(format!("https://example.com/{index}.png"), png(1, 1)); }
+            });
+            let scroll = if channel { "messages" } else { "shared" };
+            rt.update(|_, tx| tx.scroll_to_y(scroll, 0.0));
+            rt.frame(1.0);
+            rt.frame(2.0);
+            rt.frame(3.0);
+            rt.update(|s, _| {
+                for shown in s.media.shown.get_mut().values_mut() { *shown = Instant::now() - KEEP_RECENT; }
+                for size in s.media.sizes.values_mut() { *size = IMAGE_BUDGET; }
+                s.media.trim(Instant::now());
+                s.actions.calls.borrow_mut().clear();
+            });
+            assert!(!rt.state.media.images.contains_key("https://example.com/7.png"), "offscreen image must be evictable, channel={channel}");
+            rt.update(|_, tx| tx.scroll_to_y(scroll, 10000.0));
+            rt.frame(4.0);
+            rt.frame(5.0);
+            rt.frame(6.0);
+            assert!(rt.state.actions.calls.borrow().contains(&"load https://example.com/7.png".into()), "scroll must reload evicted nonvirtual image, channel={channel}");
+        }
     }
 
     #[test]

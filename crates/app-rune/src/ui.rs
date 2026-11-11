@@ -202,7 +202,6 @@ impl<A: Actions> UiState<A> {
                 rows,
             } => {
                 if self.selected.as_deref() == Some(conversation_id.as_str()) {
-                    self.media.clear_visible();
                     for image in rows.iter().flat_map(|row| row.media.images.iter().cloned().chain(row.media.rich.images())) {
                         if !self.media.images.contains_key(image.key()) && !self.media.errors.contains_key(image.key()) {
                             self.actions.load_image(image.clone());
@@ -314,6 +313,7 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
+    s.media.begin_render();
     crate::theme::apply(cx, &s.appearance);
     let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
     if s.toast.reconnecting {

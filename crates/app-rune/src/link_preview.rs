@@ -32,12 +32,16 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, preview: &LinkPreview, message
         if let Some(loaded) = s.media.image(image.key()).filter(|loaded| loaded.error().is_none()) {
             card = card.child(col().w(THUMB).h(THUMB).radius(4.0).pixels_fit(loaded.pixels(), SurfaceFit::Fill));
         }
+        card = crate::media::watch(s, &format!("link-preview-{message_id}"), vec![image], card);
     }
     card
 }
 
 /// An image that may still be loading; nothing is drawn until it is.
 pub fn thumbnail<A: Actions + 'static>(s: &UiState<A>, url: &str, w: f32, h: f32) -> Option<El> {
-    let image = s.media.image(remote(url).key()).filter(|image| image.error().is_none())?;
-    Some(col().w(w).h(h).pixels_fit(image.pixels(), SurfaceFit::Fit))
+    let mut frame = col().w(w).h(h);
+    if let Some(image) = s.media.image(remote(url).key()).filter(|image| image.error().is_none()) {
+        frame = frame.pixels_fit(image.pixels(), SurfaceFit::Fit);
+    }
+    Some(frame)
 }

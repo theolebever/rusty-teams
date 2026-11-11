@@ -46,7 +46,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, card: &AdaptiveCard, key: &str
     if !buttons.is_empty() {
         body = body.child(row().w_full().gap(8.0).children(buttons));
     }
-    body
+    crate::media::watch(s, key, image_urls(card).iter().map(|url| crate::rich_text::remote(url)).collect(), body)
 }
 
 fn items<A: Actions + 'static>(s: &UiState<A>, list: &[CardItem]) -> Vec<El> {
@@ -140,7 +140,8 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>, banner: &AnnouncementBanner,
         frame = frame.child(col().absolute(0.0, 0.0).w_full().h_full().pixels_fit(loaded.pixels(), SurfaceFit::Fill))
             .child(col().absolute(0.0, 0.0).w_full().h_full().fill(rgb(0).alpha(BANNER_SHADE)));
     }
-    frame.child(text(banner.title.clone()).font(ts(24.0, 700.0)).color(rgb(0xFFFFFF)).wrap().max_lines(2))
+    let frame = frame.child(text(banner.title.clone()).font(ts(24.0, 700.0)).color(rgb(0xFFFFFF)).wrap().max_lines(2));
+    crate::media::watch(s, key, banner.image().into_iter().collect(), frame)
 }
 
 #[cfg(test)]
