@@ -101,6 +101,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     for update in updates {
         s.apply(update);
     }
+    s.media.trim(now);
     chat_menu::drain(s, tx);
     // Direct writes to `status` (media errors) do not pass through `apply`.
     let status = s.status.clone();
