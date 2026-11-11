@@ -135,7 +135,7 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>, banner: &AnnouncementBanner,
     };
     let mut frame = col().key(key.to_owned()).w_full().h(BANNER_HEIGHT).radius(8.0).fill(rgb(from)).center().px(24.0);
     if let Some(image) = banner.image()
-        && let Some(loaded) = s.media.images.get(image.key()).filter(|loaded| loaded.error().is_none())
+        && let Some(loaded) = s.media.image(image.key()).filter(|loaded| loaded.error().is_none())
     {
         frame = frame.child(col().absolute(0.0, 0.0).w_full().h_full().pixels_fit(loaded.pixels(), SurfaceFit::Fill))
             .child(col().absolute(0.0, 0.0).w_full().h_full().fill(rgb(0).alpha(BANNER_SHADE)));

@@ -109,7 +109,7 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
             |s: &UiState<A>, i| Cow::Owned(format!("msg-{}", s.search_results.as_ref().unwrap_or(&s.messages)[i].id)),
             |s: &UiState<A>, i| message_row(s, i),
         )
-        .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
+        .on_visible_rows(|s: &mut UiState<A>, rows| crate::media::rows_visible(s, rows))
         .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s)));
     let id = s.selected.clone().unwrap_or_default();
     col()

@@ -1,6 +1,8 @@
 //! Message images and file cards, using the core's authenticated image cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,6 +15,24 @@ use crate::ui::UiState;
 use crate::bridge::Shared;
 use crate::types::Update;
 
+const IMAGE_BUDGET: usize = 48 * 1024 * 1024;
+const KEEP_RECENT: Duration = Duration::from_secs(10);
+const PREVIEW_EDGE: u32 = 720;
+pub type Preview = (u32, u32, Vec<u8>);
+
+fn preview(bytes: &[u8]) -> Option<Preview> {
+    let format = ::image::guess_format(bytes).ok()?;
+    if !matches!(format, ::image::ImageFormat::Jpeg | ::image::ImageFormat::Png) { return None; }
+    if format == ::image::ImageFormat::Png
+        && ::image::codecs::png::PngDecoder::new(std::io::Cursor::new(bytes)).ok()?.is_apng().ok()?
+    { return None; }
+    let reader = || ::image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let (width, height) = reader().into_dimensions().ok()?;
+    if width.max(height) <= PREVIEW_EDGE { return None; }
+    let image = reader().decode().ok()?.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE).into_rgba8();
+    Some((image.width(), image.height(), image.into_raw()))
+}
+
 pub fn load_image(shared: Arc<Shared>, image: ImageRef) {
     let Some(engine) = shared.engine() else { return };
     app_backend::runtime::handle().spawn(async move {
@@ -20,7 +40,15 @@ pub fn load_image(shared: Arc<Shared>, image: ImageRef) {
         match engine.fetch_image(&image).await {
             Ok(_) => {
                 if let Some(stored) = engine.image(&key) {
-                    shared.publish(Update::Image { key, bytes: stored.bytes });
+                    let bytes = stored.bytes;
+                    let prepared = tokio::task::spawn_blocking(move || {
+                        let preview = preview(&bytes);
+                        (bytes, preview)
+                    }).await;
+                    match prepared {
+                        Ok((bytes, preview)) => shared.publish(Update::ImagePreview { key, bytes, preview }),
+                        Err(error) => shared.publish(Update::ImageFailed { key, error: error.to_string() }),
+                    }
                 }
             }
             Err(error) => shared.publish(Update::ImageFailed { key, error: error.to_string() }),
@@ -124,6 +152,12 @@ pub struct MediaState {
     /// The app icon the title bar draws.
     logo: Image,
     pub images: HashMap<String, Image>,
+    originals: HashMap<String, Vec<u8>>,
+    sizes: HashMap<String, usize>,
+    shown: RefCell<HashMap<String, Instant>>,
+    viewer_image: Option<Image>,
+    visible: RefCell<HashSet<String>>,
+    evicted: HashSet<String>,
     pub errors: HashMap<String, String>,
     /// Cache key and alt text of the image open in the full-window viewer.
     pub viewer: Option<(String, String)>,
@@ -140,6 +174,12 @@ impl Default for MediaState {
             logo: cache.load(app_backend::appearance::AppIcon::MicrosoftTeams.png()),
             cache,
             images: HashMap::new(),
+            originals: HashMap::new(),
+            sizes: HashMap::new(),
+            shown: RefCell::new(HashMap::new()),
+            viewer_image: None,
+            visible: RefCell::new(HashSet::new()),
+            evicted: HashSet::new(),
             errors: HashMap::new(),
             viewer: None,
             attachments: HashMap::new(),
@@ -154,8 +194,67 @@ impl MediaState {
 
 
     pub fn loaded(&mut self, key: String, bytes: Vec<u8>) {
+        self.loaded_preview(key, bytes, None);
+    }
+
+    pub fn loaded_preview(&mut self, key: String, bytes: Vec<u8>, preview: Option<Preview>) {
+        self.evicted.remove(&key);
         self.errors.remove(&key);
-        self.images.insert(key, self.cache.load(bytes));
+        let (image, size) = if let Some((width, height, rgba)) = preview {
+            let size = rgba.len().saturating_mul(4) / 3 + bytes.len();
+            self.originals.insert(key.clone(), bytes);
+            (self.cache.rgba(width, height, rgba), size)
+        } else {
+            let dimensions = ::image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok());
+            let size = dimensions.map_or(bytes.len(), |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(16) / 3);
+            self.originals.remove(&key);
+            (self.cache.load(bytes), size)
+        };
+        self.shown.get_mut().insert(key.clone(), Instant::now());
+        // Avatar publication is deduplicated by the bridge, so retain these until it supports reload.
+        if !key.starts_with("avatar:") { self.sizes.insert(key.clone(), size); }
+        self.images.insert(key, image);
+        self.trim(Instant::now());
+    }
+
+    pub fn image(&self, key: &str) -> Option<&Image> {
+        let image = self.images.get(key)?;
+        if let Some(shown) = self.shown.borrow_mut().get_mut(key) { *shown = Instant::now(); }
+        let mut visible = self.visible.borrow_mut();
+        if !visible.contains(key) { visible.insert(key.to_owned()); }
+        Some(image)
+    }
+
+    pub fn clear_visible(&mut self) { self.visible.get_mut().clear(); }
+
+    pub fn open_viewer(&mut self, key: String, alt: String) {
+        self.viewer_image = self.originals.get(&key).map(|bytes| self.cache.load(bytes.clone()));
+        self.viewer = Some((key, alt));
+    }
+
+    pub fn viewed_image(&self, key: &str) -> Option<&Image> {
+        self.viewer_image.as_ref().or_else(|| self.image(key))
+    }
+
+    pub fn trim(&mut self, now: Instant) {
+        if self.viewer.is_none() { self.viewer_image = None; }
+        let mut total = self.sizes.values().fold(0usize, |total, size| total.saturating_add(*size));
+        if total <= IMAGE_BUDGET { return; }
+        let visible = self.visible.get_mut();
+        let mut candidates: Vec<_> = self.shown.get_mut().iter()
+            .filter(|(key, shown)| self.sizes.contains_key(*key) && !visible.contains(*key) && self.viewer.as_ref().is_none_or(|(viewed, _)| viewed != *key)
+                && now.saturating_duration_since(**shown) >= KEEP_RECENT)
+            .map(|(key, shown)| (key.clone(), *shown)).collect();
+        candidates.sort_by_key(|(_, shown)| *shown);
+        for (key, _) in candidates {
+            if total <= IMAGE_BUDGET { break; }
+            total = total.saturating_sub(self.sizes.remove(&key).unwrap_or(0));
+            self.images.remove(&key);
+            self.originals.remove(&key);
+            self.shown.get_mut().remove(&key);
+            self.evicted.insert(key);
+        }
     }
 
     pub fn files(&self, target: &SendTarget) -> Vec<FileReference> {
@@ -193,6 +292,21 @@ impl MediaState {
             (None, uploaded) => uploaded.ok(),
         }
     }
+}
+
+pub fn rows_visible<A: Actions>(s: &mut UiState<A>, rows: std::ops::Range<usize>) -> bool {
+    let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
+    let mut visible = HashSet::new();
+    for row in displayed.iter().skip(rows.start).take(rows.len()) {
+        for image in row.media.images.iter().cloned().chain(row.media.rich.images()) {
+            visible.insert(image.key().to_owned());
+            if s.media.evicted.remove(image.key()) && !s.media.errors.contains_key(image.key()) {
+                s.actions.load_image(image);
+            }
+        }
+    }
+    *s.media.visible.get_mut() = visible;
+    crate::find::rows_visible(s, rows)
 }
 
 /// Opens the file picker for `target`; the chosen file joins that draft's attachments.
@@ -253,11 +367,11 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         let mut picture = col().key(format!("image-{message_id}-{index}")).w(width).max_w(400.0).h(height)
             .label(image.alt.clone().unwrap_or_else(|| "Message image".into()));
         let alt = image.alt.clone().unwrap_or_else(|| "Message image".into());
-        match s.media.images.get(&key) {
+        match s.media.image(&key) {
             Some(image) if image.error().is_none() => {
                 let viewed = (key.clone(), alt.clone());
                 picture = picture.pixels_fit(image.pixels(), SurfaceFit::Fit)
-                    .on_press(move |s: &mut UiState<A>| s.media.viewer = Some(viewed.clone()));
+                    .on_press(move |s: &mut UiState<A>| s.media.open_viewer(viewed.0.clone(), viewed.1.clone()));
             }
             _ => {
                 let label = s.media.errors.get(&key).cloned().unwrap_or_else(|| "Load image".into());
@@ -319,6 +433,63 @@ fn is_web_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::new(width, height).write_to(&mut bytes, ::image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn previews_limit_stills_and_viewer_keeps_the_original_resolution() {
+        let bytes = png(1440, 960);
+        let thumb = preview(&bytes).expect("large PNG has a thumbnail");
+        assert_eq!((thumb.0, thumb.1), (720, 480));
+        let mut state = MediaState::default();
+        state.loaded_preview("large".into(), bytes, Some(thumb));
+        assert_eq!(state.images["large"].wait().unwrap(), [720, 480]);
+        state.open_viewer("large".into(), "Original".into());
+        assert_eq!(state.viewed_image("large").unwrap().wait().unwrap(), [1440, 960]);
+        assert!(preview(&png(32, 32)).is_none());
+        let mut gif = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::new(800, 1).write_to(&mut gif, ::image::ImageFormat::Gif).unwrap();
+        assert!(preview(&gif.into_inner()).is_none(), "animations must use Rune's original decoder");
+    }
+
+    #[test]
+    fn eviction_keeps_visible_recent_viewer_and_avatar_images() {
+        let mut state = MediaState::default();
+        for key in ["old", "visible", "recent", "viewer", "avatar:user"] {
+            state.loaded(key.into(), png(1, 1));
+        }
+        let now = Instant::now();
+        for key in ["old", "visible", "viewer", "avatar:user"] {
+            state.shown.get_mut().insert(key.into(), now - KEEP_RECENT);
+        }
+        state.sizes.insert("old".into(), IMAGE_BUDGET);
+        state.visible.get_mut().insert("visible".into());
+        state.viewer = Some(("viewer".into(), String::new()));
+        state.trim(now);
+        assert!(!state.images.contains_key("old"));
+        assert!(state.evicted.contains("old"));
+        for key in ["visible", "recent", "viewer", "avatar:user"] {
+            assert!(state.images.contains_key(key), "{key} must stay loaded");
+        }
+    }
+
+    #[test]
+    fn scrolling_an_evicted_message_into_view_reloads_it_once() {
+        let image = ImageRef { id: "i".into(), url: "https://example.com/a.png".into(), width: None, height: None, alt: None };
+        let mut state = UiState::new(Recorder::default());
+        state.messages.push(message("m", Content { images: vec![image.clone()], ..Default::default() }));
+        state.media.loaded(image.key().into(), png(1, 1));
+        state.media.shown.get_mut().insert(image.key().into(), Instant::now() - KEEP_RECENT);
+        state.media.sizes.insert(image.key().into(), IMAGE_BUDGET + 1);
+        state.media.trim(Instant::now());
+        rows_visible(&mut state, 0..1);
+        rows_visible(&mut state, 0..1);
+        assert_eq!(state.actions.calls.borrow().as_slice(), ["load https://example.com/a.png"]);
+    }
 
     #[test]
     fn image_only_messages_reserve_a_visible_image_box() {

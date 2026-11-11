@@ -10,7 +10,7 @@ use crate::ui::{UiState, ts};
 /// A scrim with the picture centred, or nothing while no image is open.
 pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let (key, alt) = s.media.viewer.as_ref()?;
-    let loaded = s.media.images.get(key).filter(|image| image.error().is_none())?;
+    let loaded = s.media.viewed_image(key).filter(|image| image.error().is_none())?;
     Some(col().key("image-viewer").absolute(0.0, 0.0).w_full().h_full().center().padding(32.0).gap(12.0)
         .fill(rgb(0).alpha(0.85)).label(alt.clone())
         .modal(true, |s: &mut UiState<A>| s.media.viewer = None)

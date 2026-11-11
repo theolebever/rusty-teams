@@ -58,7 +58,7 @@ pub fn avatar(name: &str, size: f32, presence: Option<Presence>) -> El {
 }
 
 fn photo<'a, A: crate::types::Actions + 'static>(s: &'a crate::ui::UiState<A>, id: Option<&str>) -> Option<&'a Image> {
-    id.and_then(|id| s.media.images.get(&format!("avatar:{id}"))).filter(|image| image.is_ready() && image.error().is_none())
+    id.and_then(|id| s.media.image(&format!("avatar:{id}"))).filter(|image| image.is_ready() && image.error().is_none())
 }
 
 pub fn person<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>, name: &str, id: Option<&str>, size: f32, presence: Option<Presence>) -> El {

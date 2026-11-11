@@ -181,6 +181,7 @@ impl<A: Actions> UiState<A> {
             }
             Update::VideoReady => self.calls.apply_video(self.actions.take_video()),
             Update::Image { key, bytes } => self.media.loaded(key, bytes),
+            Update::ImagePreview { key, bytes, preview } => self.media.loaded_preview(key, bytes, preview),
             Update::ImageFailed { key, error } => { self.media.errors.insert(key, error); }
             Update::Attachment { target, path, result } => {
                 if let Some(orphan) = self.media.uploaded(target, path, result) { self.actions.discard_attachment(orphan); }
@@ -201,6 +202,7 @@ impl<A: Actions> UiState<A> {
                 rows,
             } => {
                 if self.selected.as_deref() == Some(conversation_id.as_str()) {
+                    self.media.clear_visible();
                     for image in rows.iter().flat_map(|row| row.media.images.iter().cloned().chain(row.media.rich.images())) {
                         if !self.media.images.contains_key(image.key()) && !self.media.errors.contains_key(image.key()) {
                             self.actions.load_image(image.clone());

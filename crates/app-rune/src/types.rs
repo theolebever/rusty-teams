@@ -122,6 +122,7 @@ pub enum Update {
     Ring(calling::EngineEvent),
     VideoReady,
     Image { key: String, bytes: Vec<u8> },
+    ImagePreview { key: String, bytes: Vec<u8>, preview: Option<crate::media::Preview> },
     ImageFailed { key: String, error: String },
     Attachment { target: SendTarget, path: std::path::PathBuf, result: Result<teams_core::UploadedFile, String> },
     Calendar { week: chrono::NaiveDate, rows: Vec<crate::screens::CalendarRow> },
