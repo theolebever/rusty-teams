@@ -34,7 +34,8 @@ pub struct Bridge {
 /// State shared by the view-facing calls and the event forwarder.
 pub(crate) struct Shared {
     open_threads: Mutex<std::collections::HashSet<String>>,
-    avatars_published: Mutex<std::collections::HashSet<String>>,
+    /// Ids whose photo was looked up and fetched this session. `AvatarsChanged` publishes later ones.
+    avatars_requested: Arc<Mutex<std::collections::HashSet<String>>>,
     pub(crate) read_only: bool,
     calls: Mutex<Option<Arc<app_backend::launcher::CallLauncher>>>,
     call_control: crate::calls_backend::Calls,
@@ -137,25 +138,34 @@ impl Shared {
         }
     }
 
+    /// Each id once per session: the sidebar reloads on every presence change, and reading and
+    /// fetching every member's photo again took up to a quarter of a second each time.
+    /// ponytail: a photo missing at startup is fetched again only on the next launch.
     fn publish_avatars(&self, engine: &Engine, mut ids: Vec<String>) {
-        let mut seen = std::collections::HashSet::new();
-        ids.retain(|id| seen.insert(id.clone()));
+        {
+            let mut requested = self.avatars_requested.lock().unwrap_or_else(PoisonError::into_inner);
+            ids.retain(|id| requested.insert(id.clone()));
+        }
+        if ids.is_empty() { return; }
         for id in &ids {
-            if !self.avatars_published.lock().unwrap_or_else(PoisonError::into_inner).contains(id)
-                && let Some(photo) = engine.avatar(id) {
-                self.avatars_published.lock().unwrap_or_else(PoisonError::into_inner).insert(id.clone());
+            if let Some(photo) = engine.avatar(id) {
                 self.publish(Update::Image { key: format!("avatar:{id}"), bytes: photo.bytes });
             }
         }
+        let requested = self.avatars_requested.clone();
         if let Some(engine) = self.engine() {
             app_backend::runtime::handle().spawn(async move {
                 let mut pending = tokio::task::JoinSet::new();
                 for chunk in ids.chunks(20) {
                     let engine = engine.clone();
                     let chunk = chunk.to_vec();
+                    let requested = requested.clone();
                     pending.spawn(async move {
                         if let Err(error) = engine.fetch_avatars(&chunk).await {
                             app_backend::diagnostics::record(format!("Rune: Profile photos unavailable: {error}"));
+                            // Asked again at the next reload.
+                            let mut requested = requested.lock().unwrap_or_else(PoisonError::into_inner);
+                            for id in &chunk { requested.remove(id); }
                         }
                     });
                     if pending.len() == 3 && let Some(Err(error)) = pending.join_next().await {
@@ -186,7 +196,7 @@ impl Bridge {
             let video_weak = weak.clone();
             Shared {
             open_threads: Mutex::new(std::collections::HashSet::new()),
-            avatars_published: Mutex::new(std::collections::HashSet::new()),
+            avatars_requested: Arc::default(),
             read_only,
             agent_stop: Mutex::new(None),
             calls: Mutex::new(None),
