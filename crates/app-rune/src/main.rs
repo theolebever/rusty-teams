@@ -96,6 +96,8 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     s.actions.set_foreground(chat, s.calls.state.as_ref().is_some_and(calling::CallState::is_active));
     view_composer::persist_draft(s);
     let updates = s.actions.poll();
+    // Arrivals animate in the one commit that adds them (`view_messages::snappy`).
+    s.appearing.clear();
     let before = s.typing.len();
     s.typing.retain(|_, event| (chrono::Utc::now() - event.received_at).num_seconds() < 8);
     let changed = !updates.is_empty() || s.typing.len() != before || s.media.voice.is_playing();

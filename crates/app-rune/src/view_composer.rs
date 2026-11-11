@@ -160,7 +160,6 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
     col()
         .w_full()
         .px(20.0)
-        .pt(8.0)
         .pb(16.0)
         .gap(6.0)
         .children(s.format_open.then(|| {
@@ -413,6 +412,21 @@ mod tests {
         press(&mut rt, Key::Enter);
         let sent = calls(&rt).into_iter().find(|c| c.starts_with("send")).expect("sent");
         assert!(sent.contains("[hey @Bo Peep hi]") && sent.contains("u2"), "{sent}");
+    }
+
+    #[test]
+    fn mention_suggestions_stay_inside_a_short_window() {
+        let mut rt = rt();
+        rt.set_viewport((900.0, 360.0), 1.0);
+        let members = (0..8).map(|i| member(&format!("u{i}"), &format!("Ada {i}"))).collect();
+        let details = crate::types::ChatDetails { members, ..Default::default() };
+        rt.update(|s, _| s.apply(Update::Details([("b".to_owned(), details)].into())));
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("@a".into()));
+        let (list, _) = rt.presented("mention-list").expect("list opens");
+        let (field, _) = rt.presented("composer").unwrap();
+        assert!(list[1] >= 0.0 && list[1] + list[3] <= field[1], "list {list:?} inside the window above the field {field:?}");
+        assert!(rt.find("mention-5").is_some(), "all six suggestions show");
     }
 
     #[test]

@@ -40,6 +40,7 @@ const META: f32 = 11.0;
 const CHECK: f32 = 15.0;
 const ACTION: f32 = 30.0;
 const ACTION_ICON: f32 = 16.0;
+const COMPOSER_GAP: f32 = 16.0;
 
 /// Whether row `i` continues the run of the same sender above it, and whether the next row does.
 pub(crate) fn series(rows: &[MessageRow], i: usize) -> (bool, bool) {
@@ -75,7 +76,20 @@ fn corner_radii(own: bool, has_prev: bool, has_next: bool) -> [f32; 4] {
     }
 }
 
-pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
+/// `el` with its changes landing at once, unless messages arrive live in this commit: then the
+/// new rows slide in on their `transition` (an instant parent mounts its children at once).
+// ponytail: other mounts in that one commit fade too; give the arrival its own commit if that shows.
+pub(crate) fn snappy(el: El, arriving: bool) -> El {
+    if arriving { el } else { el.instant_changes() }
+}
+
+/// How a message that arrives live comes in: own ones rise from the right, others slide from the left.
+fn arrival(own: bool) -> Transition {
+    let (x, y) = if own { (8.0, 16.0) } else { (-18.0, 4.0) };
+    Transition::offset(x, y).combined(Transition::opacity())
+}
+
+pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool) -> El {
     // The version is the id sequence: a reload with the same count but other messages must re-key.
     let displayed = s.search_results.as_ref().unwrap_or(&s.messages);
     if active_target(s).is_some_and(|target| target.channel) && !displayed.is_empty() {
@@ -101,8 +115,10 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .w_full()
         .px(20.0)
         .pt(12.0)
-        .growth(GrowthSpec::default())
-        .instant_changes()
+        // The gap above the composer is inside the scroll, so history runs down to the input's edge.
+        .pb(COMPOSER_GAP)
+        .growth(GrowthSpec::default());
+    let rows = snappy(rows, arriving)
         .virtual_rows(
             displayed.len(),
             MESSAGE_ROW_H,
@@ -112,7 +128,7 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
         .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
         .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s)));
     let id = s.selected.clone().unwrap_or_default();
-    col()
+    let history = col()
         .key("messages")
         .grow(1.0)
         .min_h(0.0)
@@ -122,7 +138,26 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>) -> El {
             .on_press_tx(move |s: &mut UiState<A>, _| s.actions.load_older(&id))
             .child(text("Load older messages").font(ts(13.0, 600.0)).color(rgb(active_palette().foreground))))
         // Rune: a virtual/growth stack must be the last child of its scroll viewport.
-        .child(rows)
+        .child(rows);
+    col().grow(1.0).min_h(0.0).w_full().child(history).children(typing(s))
+}
+
+/// Who is typing in the open chat, as one more incoming message under the history: their
+/// avatar and a bubble with three still dots (no loop: Rune presents every frame while one runs).
+/// The history sticks to the bottom, so it sits under the last message and above the composer.
+fn typing<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    let id = s.selected.as_deref()?;
+    let typers: Vec<_> = s.typing.values()
+        .filter(|e| e.conversation_id == id && (chrono::Utc::now() - e.received_at).num_seconds() < 8).collect();
+    let first = typers.first()?;
+    let names: Vec<&str> = typers.iter().map(|e| e.display_name.as_str()).collect();
+    let palette = active_palette();
+    let dot = || el().size(6.0, 6.0).radius(3.0).fill(rgb(palette.text_muted));
+    Some(row().key("typing-indicator").w_full().px(20.0).pb(8.0).gap(AVATAR_GAP).center_y()
+        .label(format!("{} is typing", names.join(", ")))
+        .child(crate::avatar::person(s, &first.display_name, Some(&first.user_id), AVATAR, None))
+        .child(row().h(AVATAR).px(12.0).gap(4.0).center_y().radius(AVATAR / 2.0).fill(rgb(palette.bubble_other))
+            .child(dot()).child(dot()).child(dot())))
 }
 
 pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
@@ -155,7 +190,6 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     if !m.deleted {
         stack = stack.child(crate::reactions::controls(s, m));
     }
-    stack = stack.children(delete_row(s, m));
     let content = if own {
         let meta = row().gap(4.0).center_y()
             .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(palette.own_meta)))
@@ -168,7 +202,13 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
-    crate::find::mark(s, &m.id, col().w_full().pt(gap).pl(indent).hover_group().child(content))
+    let mut row = col().w_full().pt(gap).pl(indent).hover_group().child(content);
+    if !s.read_only && !m.deleted {
+        let id = m.id.clone();
+        row = row.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
+    }
+    if s.appearing.contains(&m.id) { row = row.transition(arrival(own)); }
+    crate::find::mark(s, &m.id, row)
 }
 
 fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
@@ -211,7 +251,6 @@ fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
             .children(crate::message_menu::edited_mark(s, m))
             .child(crate::media::view(s, &m.media, &m.id))
             .children((!m.deleted).then(|| crate::reactions::controls(s, m)))
-            .children(delete_row(s, m))
             .child(col().w_full().pt(8.0).gap(8.0).child(el().w_full().h(1.0).fill(rgb(palette.border))).child(discussion).child(footer)))
 }
 
@@ -229,7 +268,7 @@ fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded:
         .children(crate::message_menu::edited_mark(s, m));
     if expanded {
         content = content.child(crate::media::view(s, &m.media, &m.id))
-            .child(crate::reactions::controls(s, m)).children(delete_row(s, m));
+            .child(crate::reactions::controls(s, m));
     }
     row().key(format!("post-reply-{}", m.id)).w_full().gap(8.0).py(4.0).hover_group()
         .child(crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), 24.0, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender))
@@ -299,15 +338,13 @@ fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
     }
     let id = m.id.clone();
     bar = bar.child(action_button(format!("more-{}", m.id), "more_horiz", move |s: &mut UiState<A>, _| {
-        s.more_open = (s.more_open.as_deref() != Some(id.as_str())).then(|| id.clone());
+        let open = s.more_open.as_deref() != Some(id.as_str());
+        crate::message_menu::close(s);
+        if open { s.more_open = Some(id.clone()); }
     }));
     Some(bar)
 }
 
-/// Under the message while its "more" is open (`message_menu.rs`).
-fn delete_row<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
-    crate::message_menu::menu(s, m)
-}
 
 #[cfg(test)]
 mod tests {
@@ -412,6 +449,60 @@ mod tests {
         assert!(rt.find("msg-m000").is_none(), "the older page stays above, off screen");
     }
 
+    fn arrive(rt: &mut Runtime<UiState<Fake>>, rows: Vec<MessageRow>) {
+        // As `main::poll`: the last commit's arrivals are done before the next batch applies.
+        rt.update(move |s, _| {
+            s.appearing.clear();
+            s.apply(Update::Messages { conversation_id: "a".into(), rows });
+        });
+    }
+
+    #[test]
+    fn a_message_that_arrives_live_slides_in_once_and_loads_do_not() {
+        let mut rt = show(vec![msg("m1", "Ada", false, "hi")]);
+        for _ in 0..30 { rt.frame(1.0 / 60.0); }
+        assert_eq!(rt.presented("msg-m1").unwrap().1, 1.0, "the first load shows at once");
+        let rest = rt.presented("msg-m1").unwrap().0;
+
+        arrive(&mut rt, vec![msg("m1", "Ada", false, "hi"), msg("m2", "Bo", false, "hey")]);
+        rt.frame(1.0 / 60.0);
+        let (rect, opacity) = rt.presented("msg-m2").expect("new row");
+        assert!(opacity < 1.0, "it fades in, opacity {opacity}");
+        // A later commit (a typing event, a hover) puts the list back to instant mid-entrance.
+        rt.update(|s, _| s.appearing.clear());
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let (settled, opacity) = rt.presented("msg-m2").unwrap();
+        assert_eq!(opacity, 1.0);
+        assert!(settled[0] > rect[0], "it slid in from the left: {rect:?} to {settled:?}");
+        assert_eq!(rt.presented("msg-m1").unwrap().0[0], rest[0], "the message already there stays put");
+
+        let older = vec![msg("m0", "Bo", false, "earlier"), msg("m1", "Ada", false, "hi"), msg("m2", "Bo", false, "hey")];
+        arrive(&mut rt, older);
+        assert!(rt.state.appearing.is_empty(), "an older page is no arrival");
+        rt.update(|s, tx| crate::ui::open_chat(s, "a", tx));
+        arrive(&mut rt, vec![msg("m1", "Ada", false, "hi"), msg("m3", "Bo", false, "new")]);
+        assert!(rt.state.appearing.is_empty(), "reopening a chat is no arrival");
+    }
+
+    #[test]
+    fn someone_typing_shows_as_a_bubble_under_the_last_message() {
+        let mut rt = show(vec![msg("m1", "Ada", false, "hi")]);
+        assert!(rt.find("typing-indicator").is_none());
+        let event = |conversation: &str| chatsvc::TypingEvent { conversation_id: conversation.into(), user_id: "bo".into(), display_name: "Bo".into(), active: true, received_at: chrono::Utc::now() };
+        rt.update(move |s, _| s.apply(Update::Typing(event("other"))));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("typing-indicator").is_none(), "typing in another chat shows nothing here");
+        rt.update(move |s, _| s.apply(Update::Typing(event("a"))));
+        rt.frame(1.0 / 60.0);
+        let bubble = rt.find("typing-indicator").expect("typing bubble");
+        let last = rt.find("msg-m1").unwrap();
+        let composer = rt.find("composer").unwrap();
+        assert!(last.1 < bubble.1 && bubble.1 < composer.1, "between the last message {last:?} and the composer {composer:?}: {bubble:?}");
+        rt.update(move |s, _| s.apply(Update::Typing(chatsvc::TypingEvent { active: false, ..event("a") })));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("typing-indicator").is_none());
+    }
+
     #[test]
     fn series_marks_runs_of_one_sender() {
         let rows = vec![msg("1", "Ada", false, ""), msg("2", "Ada", false, ""), msg("3", "Bo", false, "")];
@@ -454,6 +545,21 @@ mod tests {
         assert!(rt.find("jumbo-m1").is_some());
         assert!(rt.find("bubble-m1").is_none());
         assert!(rt.find("bubble-m2").is_some());
+    }
+
+    #[test]
+    fn reactions_under_a_big_emoji_sit_on_its_side() {
+        let like = || vec![teams_core::ReactionSummary { emoji: "\u{1F44D}".into(), count: 1, mine: false }];
+        let rows = vec![
+            MessageRow { reactions: like(), ..msg("theirs", "Ada", false, "\u{1F389}") },
+            MessageRow { reactions: like(), ..msg("own", "Me", true, "\u{1F389}") },
+        ];
+        let rt = show(rows);
+        let edge = |key: &str| rt.presented(key).unwrap_or_else(|| panic!("no {key}")).0;
+        let (emoji, pill) = (edge("jumbo-theirs"), edge("reaction-theirs-\u{1F44D}"));
+        assert!((pill[0] - emoji[0]).abs() < 1.0, "incoming: pill {pill:?} starts under the emoji {emoji:?}");
+        let (emoji, pill) = (edge("jumbo-own"), edge("reaction-own-\u{1F44D}"));
+        assert!((pill[0] + pill[2] - emoji[0] - emoji[2]).abs() < 1.0, "own: pill {pill:?} ends under the emoji {emoji:?}");
     }
 
     #[test]
