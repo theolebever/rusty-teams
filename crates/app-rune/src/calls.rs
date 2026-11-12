@@ -382,6 +382,9 @@ impl CallView {
                     self.local_share = None;
                     self.own_mri.clear();
                 }
+                if matches!(state, CallState::Ended { .. }) {
+                    self.surfaces.clear();
+                }
                 self.state = Some(state);
             }
             CallUpdate::Muted(muted) => self.muted = muted,
@@ -460,6 +463,13 @@ fn button<A: Actions + 'static>(
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let call = &s.calls;
     let active = call.state.as_ref().is_some_and(CallState::is_active);
+    if s.call_window.is_some() && (active || call.ring.is_some()) {
+        return col().grow(1.0).h_full()
+            .child(button::<A>("Return to call", "return-to-call", |s, _| {
+                if let Some(window) = &s.call_window { window.open(); }
+            }))
+            .child(history_view(s));
+    }
     if !active && call.ring.is_none() && call.link.text.is_empty() && !call.prejoin_open {
         return history_view(s);
     }

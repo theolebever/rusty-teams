@@ -14,6 +14,8 @@ mod emoji_picker;
 mod gif_picker;
 mod mentions;
 mod calls;
+mod call_window;
+mod window_icon;
 mod calls_backend;
 mod calendar_grid;
 mod icons;
@@ -93,8 +95,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
     let input = app_backend::user_activity::latest_input(rune::last_input(), app_backend::user_activity::system_idle(), now);
     s.actions.set_activity(app_backend::user_activity::is_active(input, now, app_backend::user_activity::IDLE_AFTER));
-    let chat = (rune_notify::app_focused() && matches!(s.screens.screen, screens::Screen::Chat | screens::Screen::Teams))
-        .then_some(s.selected.as_deref()).flatten();
+    let chat = rune_notify::app_focused().then(|| s.foreground_chat()).flatten();
     s.actions.set_foreground(chat, s.calls.state.as_ref().is_some_and(calling::CallState::is_active));
     view_composer::persist_draft(s);
     let updates = s.actions.poll();
@@ -104,7 +105,17 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     s.typing.retain(|_, event| (chrono::Utc::now() - event.received_at).num_seconds() < 8);
     let changed = !updates.is_empty() || s.typing.len() != before || s.media.voice.is_playing();
     for update in updates {
+        if let Some(window) = &s.call_window {
+            if matches!(&update, Update::VideoReady) {
+                window.video(s.actions.take_video());
+                continue;
+            }
+            window.forward(&update);
+        }
         s.apply(update);
+    }
+    if let Some(window) = &mut s.call_window {
+        window.sync(&s.calls);
     }
     s.media.trim(now);
     chat_menu::drain(s, tx);
@@ -172,21 +183,38 @@ fn main() {
             ..AppSpec::new(TITLE, SIZE, demo_init, ui::view::<DemoActions>)
         })
         .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
+        .on_window(window_icon::install)
         .run();
         return;
     }
-    let app = App::new(AppSpec {
+    let mut state = init();
+    let call_actions = state.actions.call_window_actions();
+    let mut app = App::new(AppSpec {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(shortcuts::on_key::<Bridge>),
         ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
     })
     .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
+    .on_window(window_icon::install)
+    .on_focus(|state, focused, _| state.window_focused = focused)
     .on_close(|state, _| view_composer::persist_draft(state))
     .on_quit(|state, _| {
         state.actions.shutdown();
         app_backend::presence_link::unregister_on_exit(std::time::Duration::from_millis(800));
     });
+    let call_app = App::new(AppSpec {
+        on_key: Some(shortcuts::on_key::<Bridge>),
+        ..AppSpec::new("Rusty Teams - Call", (1180.0, 760.0), init, call_window::view::<Bridge>)
+    })
+        .init(move || UiState::new(call_actions))
+        .windowless()
+        .on_window(window_icon::install)
+        .on_close(call_window::closed::<Bridge>);
+    let (call_handle, _) = app.window(WindowSpec::from_app("call", call_app)
+        .options(WindowOptions { min_size: Some((560.0, 420.0)), ..Default::default() }));
+    state.call_window = Some(call_window::CallWindow::new(call_handle));
+    let app = app.init(move || state);
     let handle = app.handle();
     let icon = ::image::load_from_memory(app_backend::appearance::AppIcon::MicrosoftTeams.png())
         .expect("embedded application icon").into_rgba8();

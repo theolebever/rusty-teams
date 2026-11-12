@@ -244,6 +244,16 @@ impl Bridge {
         }
     }
 
+    pub(crate) fn call_window_actions(&self) -> Self {
+        // The main window receives events; the call window only shares its backend actions.
+        let (_, updates) = mpsc::channel();
+        Self {
+            shared: self.shared.clone(),
+            updates,
+            _activity: self._activity.clone(),
+        }
+    }
+
     /// Drains pending updates without blocking. Called by the UI each frame.
     pub fn poll(&mut self) -> Vec<Update> {
         self.updates.try_iter().collect()

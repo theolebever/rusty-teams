@@ -34,8 +34,10 @@ pub(crate) fn text(content: impl Into<String>) -> El {
 pub struct UiState<A: Actions> {
     pub actions: A,
     pub read_only: bool,
+    pub(crate) window_focused: bool,
     pub screens: crate::screens::ScreenState,
     pub calls: crate::calls::CallView,
+    pub(crate) call_window: Option<crate::call_window::CallWindow>,
     pub media: crate::media::MediaState,
     pub appearance: app_backend::appearance::AppearanceSettings,
     pub status: String,
@@ -103,8 +105,10 @@ impl<A: Actions> UiState<A> {
             emoji_open: false,
             compose: Default::default(),
             read_only,
+            window_focused: false,
             screens: crate::screens::ScreenState::default(),
             calls: crate::calls::CallView::default(),
+            call_window: None,
             media: crate::media::MediaState::default(),
             appearance: Default::default(),
             status: String::new(),
@@ -138,6 +142,14 @@ impl<A: Actions> UiState<A> {
     }
 
     /// Applies one bridge update. Messages for a conversation other than `selected` are dropped.
+    pub(crate) fn foreground_chat(&self) -> Option<&str> {
+        if self.window_focused && matches!(self.screens.screen, crate::screens::Screen::Chat | crate::screens::Screen::Teams) {
+            self.selected.as_deref()
+        } else {
+            None
+        }
+    }
+
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Audio { url, result } => self.media.voice.loaded(url, result),
@@ -176,11 +188,20 @@ impl<A: Actions> UiState<A> {
             Update::Appearance(settings) => self.appearance = settings,
             Update::Activity(snapshot) => self.screens.activity = snapshot,
             Update::Call(update) => {
-                if matches!(&update, calling::CallUpdate::State(calling::CallState::Connecting)) { self.screens.screen = crate::screens::Screen::Calls; }
+                if self.call_window.is_some() {
+                    match &update {
+                        calling::CallUpdate::Notice(message)
+                        | calling::CallUpdate::State(calling::CallState::Ended {
+                            reason: calling::EndReason::Failed(message),
+                        }) => self.toast.show(message.clone()),
+                        _ => {}
+                    }
+                }
+                if self.call_window.is_none() && matches!(&update, calling::CallUpdate::State(calling::CallState::Connecting)) { self.screens.screen = crate::screens::Screen::Calls; }
                 self.calls.apply(update);
             }
             Update::Ring(event) => {
-                if matches!(&event, calling::EngineEvent::Incoming(_)) { self.screens.screen = crate::screens::Screen::Calls; }
+                if self.call_window.is_none() && matches!(&event, calling::EngineEvent::Incoming(_)) { self.screens.screen = crate::screens::Screen::Calls; }
                 self.calls.apply_ring(event);
             }
             Update::VideoReady => self.calls.apply_video(self.actions.take_video()),

@@ -48,7 +48,7 @@ Le portage comprend les fonctions suivantes ; leur présence dans le code ne gar
 - Composition de messages avec mise en forme, mentions, réactions, GIFs et pièces jointes. Le sélecteur OneDrive propose les fichiers récents, les dossiers et les fichiers partagés.
 - Menus contextuels, indicateurs de saisie, messages animés, images, fichiers et lecture des messages vocaux.
 - Calendrier, agenda, présence, profils et notifications natives.
-- Appels audio et vidéo sur le moteur WebRTC commun, appels entrants, partage d’écran et commandes d’appel.
+- Appels audio et vidéo dans une fenêtre dédiée, sur le moteur WebRTC commun, avec appels entrants, partage d’écran et commandes d’appel.
 - Thèmes partagés, suivi du thème système et panneau d’exécution d’agents CLI.
 
 GPUI conserve une interface de réglages plus complète et l’intégration du serveur MCP avec ses permissions et ses propositions à valider. Les réglages Rune couvrent actuellement l’apparence ; le panneau d’agents CLI de Rune ne remplace pas cette intégration MCP.
