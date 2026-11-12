@@ -17,6 +17,8 @@ struct State {
     generation: u64,
     frames: HashMap<VideoKey, Arc<VideoPicture>>,
     video_pending: bool,
+    retry: Option<(CallSpec, bool)>,
+    prejoin: Vec<CallCommand>,
 }
 
 pub struct Calls {
@@ -40,6 +42,8 @@ impl Calls {
                 generation: 0,
                 frames: HashMap::new(),
                 video_pending: false,
+                retry: None,
+                prejoin: Vec::new(),
             })),
             publish: Arc::new(publish),
             video: Arc::new(video),
@@ -52,19 +56,42 @@ impl Calls {
     }
 
     pub fn start(&self, spec: CallSpec) {
-        if self.read_only { return; }
+        self.start_with_video(spec, false);
+    }
+
+    pub fn retry(&self) -> Option<(CallSpec, bool)> {
+        self.state.lock().expect("call state lock").retry.clone()
+    }
+
+    pub fn start_with_video(&self, spec: CallSpec, video: bool) {
+        if self.read_only {
+            return;
+        }
         let handle = {
             let mut state = self.state.lock().expect("call state lock");
-            if state.joining || state.commands.is_some() { return; }
+            if state.joining || state.commands.is_some() {
+                return;
+            }
             let Some(launcher) = state.launcher.clone() else {
                 (self.publish)(CallUpdate::Notice("Calling is not connected yet".into()));
                 return;
             };
-            let handle = launcher.start_call(spec);
+            state.retry = Some((spec.clone(), video));
+            let handle = if video {
+                launcher.start_video_call(spec)
+            } else {
+                launcher.start_call(spec)
+            };
+            state.prejoin.clear();
             state.commands = Some(handle.commands.clone());
             handle
         };
-        app_backend::runtime::handle().spawn(forward(handle, self.state.clone(), self.publish.clone(), self.video.clone()));
+        app_backend::runtime::handle().spawn(forward(
+            handle,
+            self.state.clone(),
+            self.publish.clone(),
+            self.video.clone(),
+        ));
     }
 
     pub fn join(&self, url: &str, video: bool) {
@@ -72,6 +99,7 @@ impl Calls {
             return;
         }
         let Some(link) = parse_meeting_link(url) else {
+            self.state.lock().expect("call state lock").prejoin.clear();
             (self.publish)(CallUpdate::Notice("Could not find that meeting".into()));
             return;
         };
@@ -81,6 +109,7 @@ impl Calls {
                 return;
             }
             let Some(launcher) = state.launcher.clone() else {
+                state.prejoin.clear();
                 (self.publish)(CallUpdate::Notice("Calling is not connected yet".into()));
                 return;
             };
@@ -108,6 +137,7 @@ impl Calls {
                         return;
                     }
                     state.joining = false;
+                    state.prejoin.clear();
                     publish(CallUpdate::Notice(error));
                     return;
                 }
@@ -118,12 +148,16 @@ impl Calls {
                 if state.generation != generation {
                     return;
                 }
+                state.retry = Some((spec.clone(), video));
                 let handle = if video {
                     launcher.start_video_call(spec)
                 } else {
                     launcher.start_call(spec)
                 };
                 state.commands = Some(handle.commands.clone());
+                for command in state.prejoin.drain(..) {
+                    let _ = handle.commands.send(command);
+                }
                 state.joining = false;
                 handle
             };
@@ -145,6 +179,8 @@ impl Calls {
                 return;
             };
             state.joining = true;
+            state.retry = None;
+            state.prejoin.clear();
             (launcher, state.generation)
         };
         let state = self.state.clone();
@@ -194,9 +230,28 @@ impl Calls {
         if self.read_only {
             return;
         }
-        let state = self.state.lock().expect("call state lock");
-        if let Some(commands) = &state.commands && commands.send(command).is_err() {
-            (self.publish)(CallUpdate::Notice("Call controls are unavailable".into()));
+        if command == CallCommand::Hangup {
+            self.hangup();
+            return;
+        }
+        let mut state = self.state.lock().expect("call state lock");
+        if let Some(commands) = &state.commands {
+            if commands.send(command).is_err() {
+                (self.publish)(CallUpdate::Notice("Call controls are unavailable".into()));
+            }
+        } else if matches!(
+            command,
+            CallCommand::SelectInput(_)
+                | CallCommand::SelectOutput(_)
+                | CallCommand::SelectCamera(_)
+                | CallCommand::SetBackground(_)
+                | CallCommand::SetCameraEffects(_)
+                | CallCommand::Mute(_)
+        ) {
+            state
+                .prejoin
+                .retain(|old| std::mem::discriminant(old) != std::mem::discriminant(&command));
+            state.prejoin.push(command);
         }
     }
 
@@ -204,6 +259,7 @@ impl Calls {
         let mut state = self.state.lock().expect("call state lock");
         state.generation = state.generation.wrapping_add(1);
         state.joining = false;
+        state.prejoin.clear();
         if let Some(commands) = &state.commands {
             let _ = commands.send(CallCommand::Hangup);
         }
@@ -223,8 +279,6 @@ async fn forward(
     frames: Arc<dyn Fn() + Send + Sync>,
 ) {
     publish(CallUpdate::State(CallState::Connecting));
-    let mut own_mri = String::new();
-    let mut roster = Vec::new();
     while let Some(update) = handle.updates.recv().await {
         if matches!(update, CallUpdate::VideoReady) {
             let notify = {
@@ -245,29 +299,6 @@ async fn forward(
         }
         if let CallUpdate::VideoStopped(key) = &update {
             state.lock().expect("call state lock").frames.remove(key);
-        }
-        let changed_roster = match &update {
-            CallUpdate::OwnIdentity { mri } => {
-                own_mri.clone_from(mri);
-                true
-            }
-            CallUpdate::Roster(entries) => {
-                roster.clone_from(entries);
-                true
-            }
-            _ => false,
-        };
-        if changed_roster {
-            let wants = roster
-                .iter()
-                .filter(|entry: &&calling::RosterEntry| entry.has_video && entry.mri != own_mri)
-                .take(calling::video_layout::RECEIVE_SLOTS)
-                .map(|entry| calling::VideoWant {
-                    mri: entry.mri.clone(),
-                    detail: calling::TileDetail::Small,
-                })
-                .collect();
-            let _ = handle.commands.send(CallCommand::SetVideoWants(wants));
         }
         let ended = matches!(update, CallUpdate::State(CallState::Ended { .. }));
         if ended {
@@ -296,6 +327,32 @@ async fn forward(
 mod tests {
     use super::*;
 
+    #[test]
+    fn prejoin_settings_coalesce_and_invalid_joins_clear_them() {
+        let calls = Calls::new(false, |_| {}, || {});
+        calls.command(CallCommand::SelectInput(
+            calling::DeviceChoice::SystemDefault,
+        ));
+        calls.command(CallCommand::SelectInput(calling::DeviceChoice::Device(
+            "mic".into(),
+        )));
+        calls.command(CallCommand::Mute(calling::MuteCommand::Unmute));
+        calls.command(CallCommand::SendReaction(calling::Reaction::Heart));
+        assert_eq!(
+            calls.state.lock().unwrap().prejoin,
+            vec![
+                CallCommand::SelectInput(calling::DeviceChoice::Device("mic".into())),
+                CallCommand::Mute(calling::MuteCommand::Unmute),
+            ]
+        );
+        calls.join("not a meeting link", false);
+        assert!(calls.state.lock().unwrap().prejoin.is_empty());
+        calls.command(CallCommand::Mute(calling::MuteCommand::Unmute));
+        calls.command(CallCommand::Hangup);
+        assert!(calls.state.lock().unwrap().prejoin.is_empty());
+        assert_eq!(calls.state.lock().unwrap().generation, 1);
+    }
+
     #[tokio::test]
     async fn forwards_call_updates_and_releases_handle_after_end() {
         let (handle, control) = calling::call_channel();
@@ -306,6 +363,8 @@ mod tests {
             generation: 0,
             frames: HashMap::new(),
             video_pending: false,
+            retry: None,
+            prejoin: Vec::new(),
         }));
         let (updates, mut received) = tokio::sync::mpsc::unbounded_channel();
         let publish: Arc<dyn Fn(CallUpdate) + Send + Sync> = Arc::new(move |update| {
@@ -324,10 +383,11 @@ mod tests {
             Some(CallUpdate::Muted(false))
         ));
         let peer = VideoKey::Person("8:orgid:peer".into());
-        state.lock().expect("call state lock").frames.insert(
-            peer.clone(),
-            Arc::new(VideoPicture::solid(2, 2, 1, 0, 0)),
-        );
+        state
+            .lock()
+            .expect("call state lock")
+            .frames
+            .insert(peer.clone(), Arc::new(VideoPicture::solid(2, 2, 1, 0, 0)));
         control.send(CallUpdate::VideoStopped(peer.clone()));
         assert!(matches!(
             received.recv().await,
@@ -356,6 +416,8 @@ mod tests {
             generation: 0,
             frames: HashMap::new(),
             video_pending: false,
+            retry: None,
+            prejoin: Vec::new(),
         }));
         let (wakes, mut received) = tokio::sync::mpsc::unbounded_channel();
         let frames = Arc::new(move || {

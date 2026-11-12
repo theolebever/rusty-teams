@@ -14,6 +14,7 @@ mod emoji_picker;
 mod gif_picker;
 mod mentions;
 mod calls;
+mod gallery;
 mod call_window;
 mod window_icon;
 mod calls_backend;
@@ -127,7 +128,8 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
         screens::navigate(s, screens::Screen::Chat);
         ui::open_chat(s, &id, tx);
     });
-    changed || noticed || ticked || opened.is_some()
+    let call_changed = calls::poll(s, _now, tx);
+    changed || noticed || ticked || opened.is_some() || call_changed
 }
 
 fn main() {
@@ -209,10 +211,15 @@ fn main() {
         app_backend::presence_link::unregister_on_exit(std::time::Duration::from_millis(800));
     });
     let call_app = App::new(AppSpec {
+        poll: Some(calls::poll::<Bridge>),
         on_key: Some(shortcuts::on_key::<Bridge>),
         ..AppSpec::new("Rusty Teams - Call", (1180.0, 760.0), init, call_window::view::<Bridge>)
     })
-        .init(move || UiState::new(call_actions))
+        .init(move || {
+            let mut state = UiState::new(call_actions);
+            state.calls.detached = true;
+            state
+        })
         .windowless()
         .on_window(window_icon::install)
         .on_close(call_window::closed::<Bridge>);

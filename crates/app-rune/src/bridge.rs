@@ -254,6 +254,12 @@ impl Bridge {
         }
     }
 
+    pub(crate) fn retry_call(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let (spec, video) = self.shared.call_control.retry()?;
+        let shared = self.shared.clone();
+        Some(Arc::new(move || shared.call_control.start_with_video(spec.clone(), video)))
+    }
+
     /// Drains pending updates without blocking. Called by the UI each frame.
     pub fn poll(&mut self) -> Vec<Update> {
         self.updates.try_iter().collect()
