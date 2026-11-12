@@ -82,14 +82,17 @@ impl Notifications {
         self.late.insert(conversation_id, message_ids);
     }
 
-    pub fn messages(&mut self, engine: &Engine, conversation_id: &str, environment: Environment) {
+    /// Posts the toasts for new messages of a chat; true when one of them @mentions the user.
+    pub fn messages(&mut self, engine: &Engine, conversation_id: &str, environment: Environment) -> bool {
         let store = engine.store();
-        let Ok(sidebar) = engine.sidebar() else { return };
+        let Ok(sidebar) = engine.sidebar() else { return false };
+        let mut mentioned = false;
         let me = store.meta("me_user_id").ok().flatten();
         let mut settings = settings::load(store);
         settings.account = teams_core::stored_chat_settings(store).settings().notifications;
         for mut incoming in self.tracker.collect(store, &sidebar, me.as_deref(), &self.late, conversation_id) {
             incoming.chat.desktop = engine.chat_desktop_notifications(conversation_id);
+            mentioned |= incoming.mentions_me && !environment.chat_in_foreground;
             let decision = rules::decide(&settings, &incoming, environment);
             if !decision.toast { continue; }
             if decision.sound && self.throttle.allow(conversation_id, std::time::Instant::now()) {
@@ -111,6 +114,7 @@ impl Notifications {
                 .info("conversation_id", conversation_id);
             rune_notify::post(&notification);
         }
+        mentioned
     }
 }
 

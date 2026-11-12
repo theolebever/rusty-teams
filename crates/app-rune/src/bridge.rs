@@ -1256,7 +1256,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                     CoreEvent::MessagesChanged { conversation_id } => {
                         let (foreground, in_call) = shared.foreground.lock().unwrap_or_else(PoisonError::into_inner).clone();
                         let environment = crate::notifications::environment(&engine, foreground.as_deref() == Some(&conversation_id), in_call);
-                        notifications.messages(&engine, &conversation_id, environment);
+                        if notifications.messages(&engine, &conversation_id, environment) { shared.publish(Update::Mentioned(conversation_id.clone())); }
                         if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
                     }
                 }

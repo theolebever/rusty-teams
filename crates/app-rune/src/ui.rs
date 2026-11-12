@@ -77,6 +77,7 @@ pub struct UiState<A: Actions> {
     pub agent: crate::agent_panel::State,
     pub settings: crate::settings::State,
     pub reminders: crate::reminders::State,
+    pub tray: crate::tray::State,
     /// The incoming call ringtone, stopped when dropped (`notifications::ring`).
     pub(crate) ringtone: Option<crate::sound::Handle>,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
@@ -105,6 +106,7 @@ impl<A: Actions> UiState<A> {
             agent: Default::default(),
             settings: Default::default(),
             reminders: Default::default(),
+            tray: Default::default(),
             ringtone: None,
             nav: Default::default(),
             details: HashMap::new(),
@@ -250,6 +252,7 @@ impl<A: Actions> UiState<A> {
                 Err(error) => self.toast.show(error),
             },
             Update::Appearance(settings) => self.appearance = settings,
+            Update::Mentioned(id) => { self.tray.mentions.insert(id); }
             Update::Preferences(prefs) => {
                 self.calls.selected_camera = prefs.camera.clone();
                 self.calls.selected_input = prefs.microphone.clone();

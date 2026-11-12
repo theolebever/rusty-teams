@@ -139,6 +139,8 @@ pub enum Update {
     CallHistory(Result<Vec<chatsvc::CallLogEntry>, String>),
     /// Local and account settings for the settings panes, notifications and tray.
     Preferences(Box<crate::settings::Preferences>),
+    /// A message @mentioning the user arrived in a chat that was not in front (tray dot).
+    Mentioned(String),
     AgentSettings(agents::AgentSettings),
     AgentResult(String),
     Details(std::collections::HashMap<String, ChatDetails>),

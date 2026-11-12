@@ -30,6 +30,7 @@ mod find;
 mod shortcuts;
 mod switcher;
 mod taskbar;
+mod tray;
 mod chat_menu;
 mod members;
 mod new_chat;
@@ -139,6 +140,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let reminded = reminders::poll(s, chrono::Utc::now());
     notifications::ring(s);
     taskbar::set_badge(notifications::badge_count(s));
+    tray::sync(s);
     changed || noticed || ticked || opened || call_changed || reminded
 }
 
@@ -253,28 +255,10 @@ fn main() {
     let (call_handle, _) = app.window(WindowSpec::from_app("call", call_app)
         .options(WindowOptions { min_size: Some((560.0, 420.0)), ..Default::default() }));
     state.call_window = Some(call_window::CallWindow::new(call_handle));
+    let has_tray = tray::install(&mut state, app.handle());
     let app = app.init(move || state);
     let app = if hidden { app.windowless() } else { app };
-    let handle = app.handle();
-    let icon = ::image::load_from_memory(app_backend::appearance::AppIcon::MicrosoftTeams.png())
-        .expect("embedded application icon").into_rgba8();
-    let tray = Tray::new(
-        TraySpec::new("rusty-teams-rune", TITLE, TrayIcon::rgba(icon.width(), icon.height(), icon.into_raw()))
-            .tooltip(TITLE).menu(vec![TrayItem::action("open", "Ouvrir"), TrayItem::Separator, TrayItem::action("quit", "Quitter")]),
-        move |event| match event {
-            TrayEvent::Activate { .. } => handle.open(),
-            TrayEvent::Menu(id) if id == "open" => handle.open(),
-            TrayEvent::Menu(id) if id == "quit" => handle.quit(),
-            _ => {}
-        },
-    );
-    match tray {
-        Ok(_tray) => app.keep_running().run(),
-        Err(error) => {
-            app_backend::diagnostics::record(format!("System tray unavailable: {error}"));
-            app.run();
-        }
-    }
+    if has_tray { app.keep_running().run() } else { app.run() }
 }
 
 /// Demo only: fake actions and sample data, so the view can be looked at without a backend.
