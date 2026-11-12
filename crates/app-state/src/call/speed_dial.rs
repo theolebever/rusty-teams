@@ -1,6 +1,6 @@
-use gpui_kit::Context;
 use store::Store;
 
+use crate::Host;
 use crate::app_state::AppState;
 
 const META_KEY: &str = "call_speed_dial";
@@ -57,7 +57,7 @@ impl AppState {
         self.speed_dial.iter().any(|entry| entry.user_id == user_id)
     }
 
-    pub fn add_to_speed_dial(&mut self, user_id: &str, name: &str, cx: &mut Context<Self>) {
+    pub fn add_to_speed_dial(&mut self, user_id: &str, name: &str, cx: &mut dyn Host) {
         let added = SpeedDialEntry {
             user_id: user_id.to_owned(),
             name: name.to_owned(),
@@ -70,7 +70,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn remove_from_speed_dial(&mut self, user_id: &str, cx: &mut Context<Self>) {
+    pub fn remove_from_speed_dial(&mut self, user_id: &str, cx: &mut dyn Host) {
         self.speed_dial.retain(|entry| entry.user_id != user_id);
         save(&self.store, &self.speed_dial);
         cx.notify();

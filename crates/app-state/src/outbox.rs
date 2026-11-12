@@ -2,16 +2,16 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui_kit::Context;
 use store::{MessageRecord, OutboxRecord, OutboxState, OutboxTarget, plain_text};
 use uuid::Uuid;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::backend::Engine;
 use crate::notice::short_error;
+use crate::outgoing::Outgoing;
 use crate::runtime;
 use crate::stored_outgoing::{decode, encode};
-use crate::outgoing::Outgoing;
 
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::from_secs(2),
@@ -237,7 +237,7 @@ async fn resend_record(engine: &Engine, record: OutboxRecord) {
 }
 
 impl AppState {
-    pub fn resend_outbox(&mut self, cx: &mut Context<Self>) {
+    pub fn resend_outbox(&mut self, cx: &mut dyn Host) {
         if self.mode.demo || self.mode.read_only {
             return;
         }
@@ -269,16 +269,16 @@ impl AppState {
             });
         }
         drop(finished);
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             while let Some(conversation_id) = finished_conversations.recv().await {
-                this.update(cx, |state, cx| state.outbox_changed(conversation_id, cx))
-                    .ok();
+                this.update(move |state, cx| state.outbox_changed(conversation_id, cx))
+                    .await;
             }
-        })
-        .detach();
+        }));
     }
 
-    pub fn outbox_changed(&mut self, conversation_id: String, cx: &mut Context<Self>) {
+    pub fn outbox_changed(&mut self, conversation_id: String, cx: &mut dyn Host) {
         self.refresh_local_previews(cx);
         cx.emit(AppEvent::Outbox(conversation_id));
     }

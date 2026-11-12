@@ -11,8 +11,9 @@ use teams_core::{
     ScheduledDraft,
 };
 
+use crate::Host;
 use crate::backend::{BackendEvent, ConnectionState, Engine, LiveState};
-use crate::call::{ActiveCall, CallLauncher, CallMedia, MissedCall, Rings};
+use crate::call::{ActiveCall, CallLauncher, MissedCall, Rings};
 use crate::card_state::{CardState, TaskDialogState};
 use crate::data::{self, Directory};
 use crate::forward_selection::ForwardSelection;
@@ -79,6 +80,8 @@ pub enum AppEvent {
     Directory,
     Cards(String),
     TaskDialog,
+    /// A card opened a web task module; the GPUI side hosts it (`task_dialog`).
+    UrlDialog(crate::task_dialog::UrlDialog),
     Typing,
     LocalPreviews,
     Outbox(String),
@@ -94,6 +97,8 @@ pub enum AppEvent {
     Settings(crate::settings_section::SettingsSection),
     Profile,
     Call,
+    /// Video pictures or speaking levels changed; only video views redraw.
+    CallMedia,
     Ring,
     LiveMeeting,
     MissedCall(MissedCall),
@@ -102,6 +107,7 @@ pub enum AppEvent {
     CallTone(chatsvc::sounds::CallTone),
     SoundSettings,
     ChatSettings,
+    Agents(AgentNote),
     FollowedStatus {
         user_id: String,
         text: &'static str,
@@ -177,7 +183,6 @@ pub struct AppState {
     pub call: Option<ActiveCall>,
     pub held_call: Option<ActiveCall>,
     pub call_end: Option<crate::call::end_screen::CallEndScreen>,
-    pub call_media: Option<Entity<CallMedia>>,
     pub call_launcher: Option<Arc<CallLauncher>>,
     pub call_count: u64,
     pub call_share_sound: bool,
@@ -216,6 +221,18 @@ pub struct AppState {
     pub live_refreshing: HashSet<String>,
     pub translation: TranslationState,
     pub section_changes: crate::section_actions::SectionChanges,
+}
+
+/// Work for the agent API, which lives on the GPUI side (`agent_api`).
+pub enum AgentNote {
+    EngineReady(Arc<Engine>),
+    Caption {
+        meeting_chat_id: String,
+        caption_id: String,
+        speaker: String,
+        text: String,
+    },
+    ClearCaptions(String),
 }
 
 pub struct AppHandle(pub Entity<AppState>);
@@ -336,7 +353,6 @@ impl AppState {
             call: None,
             call_end: None,
             held_call: None,
-            call_media: None,
             call_launcher: None,
             call_count: 0,
             call_share_sound: false,
@@ -421,7 +437,7 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn toggle_collapsed(&mut self, section_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_collapsed(&mut self, section_id: &str, cx: &mut dyn Host) {
         if data::is_pending_folder(section_id) {
             return;
         }
@@ -435,7 +451,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn collapse_sections(&mut self, section_ids: &[String], cx: &mut Context<Self>) {
+    pub fn collapse_sections(&mut self, section_ids: &[String], cx: &mut dyn Host) {
         let newly_collapsed: Vec<String> = section_ids
             .iter()
             .filter(|id| !data::is_pending_folder(id) && !self.collapsed.contains(*id))
@@ -453,7 +469,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn mark_all_chats_read(&mut self, cx: &mut Context<Self>) {
+    pub fn mark_all_chats_read(&mut self, cx: &mut dyn Host) {
         let unread: Vec<String> = self
             .sidebar
             .chats
@@ -486,7 +502,7 @@ impl AppState {
         }));
     }
 
-    pub fn toggle_list_expanded(&mut self, section_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_list_expanded(&mut self, section_id: &str, cx: &mut dyn Host) {
         if !self.expanded_lists.remove(section_id) {
             self.expanded_lists.insert(section_id.to_owned());
         }
@@ -537,12 +553,7 @@ impl AppState {
         }
     }
 
-    pub fn set_chat_section(
-        &mut self,
-        section: ChatSection,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_chat_section(&mut self, section: ChatSection, enabled: bool, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -562,7 +573,7 @@ impl AppState {
         );
     }
 
-    pub fn set_skin_tone(&mut self, tone: u8, cx: &mut Context<Self>) {
+    pub fn set_skin_tone(&mut self, tone: u8, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -582,7 +593,7 @@ impl AppState {
         );
     }
 
-    fn apply_section_settings(&mut self, settings: ChatSectionSettings, cx: &mut Context<Self>) {
+    fn apply_section_settings(&mut self, settings: ChatSectionSettings, cx: &mut dyn Host) {
         self.directory.section_settings = settings;
         let _ = teams_core::store_section_settings(&self.store, &settings);
         cx.emit(AppEvent::Sidebar);
@@ -627,7 +638,7 @@ impl AppState {
         self.directory.unread_importance = unread.importance;
     }
 
-    pub fn request_avatars(&mut self, user_ids: Vec<String>, cx: &mut Context<Self>) {
+    pub fn request_avatars(&mut self, user_ids: Vec<String>, cx: &mut dyn Host) {
         let wanted = self.directory.missing_avatars(user_ids);
         if wanted.is_empty() {
             return;
@@ -659,7 +670,7 @@ impl AppState {
         }
     }
 
-    pub fn request_images(&mut self, images: Vec<ImageRef>, cx: &mut Context<Self>) {
+    pub fn request_images(&mut self, images: Vec<ImageRef>, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -678,23 +689,28 @@ impl AppState {
                 }
                 None => {
                     let done = data::fetch_image(&engine, image.clone());
-                    cx.spawn(async move |this, cx| {
+                    let this = cx.handle();
+                    cx.spawn(Box::pin(async move {
                         let failure = match done.await {
                             Ok(Ok(())) => None,
                             Ok(Err(error)) => Some(error),
                             Err(_) => Some("cancelled".to_owned()),
                         };
                         if let Some(failure) = failure {
-                            let host = image.url.split("://").nth(1).and_then(|rest| rest.split('/').next()).unwrap_or_default();
+                            let host = image
+                                .url
+                                .split("://")
+                                .nth(1)
+                                .and_then(|rest| rest.split('/').next())
+                                .unwrap_or_default();
                             log::warn!("image from {host} not loaded: {failure}");
-                            this.update(cx, |state, cx| {
+                            this.update(move |state, cx| {
                                 state.directory.mark_image_failed(&image.url);
                                 cx.notify();
                             })
-                            .ok();
+                            .await;
                         }
-                    })
-                    .detach();
+                    }));
                 }
             }
         }
@@ -704,12 +720,7 @@ impl AppState {
         }
     }
 
-    pub fn jump_to_message(
-        &mut self,
-        selection: Selection,
-        message_id: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn jump_to_message(&mut self, selection: Selection, message_id: String, cx: &mut dyn Host) {
         self.pending_jump = Some((selection.conversation_id().to_owned(), message_id));
         if self.selection.as_ref() == Some(&selection) {
             cx.emit(AppEvent::Jump);
@@ -721,14 +732,14 @@ impl AppState {
     fn on_done(
         &self,
         done: data::Done,
-        cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut dyn Host,
+        then: impl FnOnce(&mut Self, &mut dyn Host) + 'static,
     ) {
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let _ = done.await;
-            this.update(cx, |state, cx| then(state, cx)).ok();
-        })
-        .detach();
+            this.update(move |state, cx| then(state, cx)).await;
+        }));
     }
 
     fn resolve_pending_avatars(&mut self) {
@@ -763,7 +774,7 @@ impl AppState {
             .collect()
     }
 
-    pub fn request_presence(&mut self, user_ids: Vec<String>, cx: &mut Context<Self>) {
+    pub fn request_presence(&mut self, user_ids: Vec<String>, cx: &mut dyn Host) {
         let now = Instant::now();
         let pushed = self.live == LiveState::Live;
         let wanted = self.directory.stale_presence(user_ids, now, pushed);
@@ -786,12 +797,7 @@ impl AppState {
         }
     }
 
-    pub fn move_chat(
-        &mut self,
-        conversation_id: &str,
-        folder_id: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn move_chat(&mut self, conversation_id: &str, folder_id: Option<&str>, cx: &mut dyn Host) {
         self.place_chat(conversation_id, folder_id, None, cx);
     }
 
@@ -800,7 +806,7 @@ impl AppState {
         conversation_id: &str,
         target_conversation_id: &str,
         folder_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if conversation_id == target_conversation_id {
             return;
@@ -816,7 +822,7 @@ impl AppState {
         conversation_id: &str,
         folder_id: Option<&str>,
         index: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.mode.read_only {
             return;
@@ -852,7 +858,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn mark_chat_read(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn mark_chat_read(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.keeps_unread(conversation_id) {
             self.keep_unread = None;
         }
@@ -885,7 +891,7 @@ impl AppState {
         }
     }
 
-    pub fn mark_channel_read(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+    pub fn mark_channel_read(&mut self, channel_id: &str, cx: &mut dyn Host) {
         if self.mode.read_only {
             return;
         }
@@ -902,7 +908,7 @@ impl AppState {
         }
     }
 
-    pub fn mark_all_channels_read(&mut self, cx: &mut Context<Self>) {
+    pub fn mark_all_channels_read(&mut self, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -943,7 +949,7 @@ impl AppState {
         );
     }
 
-    pub fn open_quick_view(&mut self, view: QuickView, cx: &mut Context<Self>) {
+    pub fn open_quick_view(&mut self, view: QuickView, cx: &mut dyn Host) {
         self.cancel_prejoin(cx);
         self.new_chat = false;
         self.quick_view = Some(view);
@@ -954,21 +960,21 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn close_quick_view(&mut self, cx: &mut Context<Self>) {
+    pub fn close_quick_view(&mut self, cx: &mut dyn Host) {
         if self.quick_view.take().is_some() {
             cx.emit(AppEvent::Sidebar);
             cx.notify();
         }
     }
 
-    pub fn start_new_chat(&mut self, cx: &mut Context<Self>) {
+    pub fn start_new_chat(&mut self, cx: &mut dyn Host) {
         self.quick_view = None;
         self.new_chat = true;
         cx.emit(AppEvent::Selection);
         cx.notify();
     }
 
-    pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
+    pub fn close_new_chat(&mut self, cx: &mut dyn Host) {
         if !self.new_chat {
             return;
         }
@@ -977,7 +983,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
+    pub fn select(&mut self, selection: Selection, cx: &mut dyn Host) {
         self.cancel_prejoin(cx);
         self.call_end = None;
         let was_drafting = std::mem::take(&mut self.new_chat);
@@ -999,7 +1005,7 @@ impl AppState {
         self.refresh_language_stamps(&conversation_id, cx);
     }
 
-    fn apply_typing(&mut self, event: TypingEvent, cx: &mut Context<Self>) {
+    fn apply_typing(&mut self, event: TypingEvent, cx: &mut dyn Host) {
         let is_me = self
             .directory
             .me
@@ -1031,7 +1037,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn clear_typists_who_sent(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    fn clear_typists_who_sent(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if !self.typing.is_active(conversation_id) {
             return;
         }
@@ -1055,37 +1061,40 @@ impl AppState {
         }
     }
 
-    fn schedule_typing_expiry(&mut self, cx: &mut Context<Self>) {
+    fn schedule_typing_expiry(&mut self, cx: &mut dyn Host) {
         if self.typing_timer_running {
             return;
         }
         self.typing_timer_running = true;
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             loop {
-                let next = this.update(cx, |state, _| {
-                    let next = state.typing.next_expiry();
-                    state.typing_timer_running = next.is_some();
-                    next
-                });
-                let Ok(Some(next)) = next else { return };
-                cx.background_executor()
-                    .timer(next.saturating_duration_since(Instant::now()))
+                let next = this
+                    .update(move |state, _| {
+                        let next = state.typing.next_expiry();
+                        state.typing_timer_running = next.is_some();
+                        next
+                    })
                     .await;
-                let alive = this.update(cx, |state, cx| {
-                    if state.typing.expire(Instant::now()) {
-                        cx.emit(AppEvent::Typing);
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
+                let Some(Some(next)) = next else { return };
+                this.sleep(next.saturating_duration_since(Instant::now()))
+                    .await;
+                let alive = this
+                    .update(move |state, cx| {
+                        if state.typing.expire(Instant::now()) {
+                            cx.emit(AppEvent::Typing);
+                            cx.notify();
+                        }
+                    })
+                    .await;
+                if alive.is_none() {
                     return;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
-    pub fn reload_sidebar(&mut self, cx: &mut Context<Self>) {
+    pub fn reload_sidebar(&mut self, cx: &mut dyn Host) {
         self.sidebar_load.local_change();
         if let Ok(sidebar) = self.store.sidebar() {
             self.sidebar = sidebar;
@@ -1103,7 +1112,7 @@ impl AppState {
     pub(crate) fn adopt_loaded_sidebar(
         &mut self,
         loaded: crate::sidebar_load::LoadedSidebar,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.sidebar = loaded.sidebar;
         self.apply_bot_titles();
@@ -1118,7 +1127,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn apply(&mut self, event: BackendEvent, cx: &mut Context<Self>) {
+    pub fn apply(&mut self, event: BackendEvent, cx: &mut dyn Host) {
         match event {
             BackendEvent::Connection(connection) => {
                 if connection != self.connection {
@@ -1141,7 +1150,7 @@ impl AppState {
                 self.on_thread_changed(&conversation_id, cx)
             }
             BackendEvent::Engine(engine) => {
-                crate::agent_api::engine_ready(engine.clone(), cx);
+                cx.emit(AppEvent::Agents(AgentNote::EngineReady(engine.clone())));
                 self.engine = Some(engine);
                 self.resend_outbox(cx);
                 self.refresh_scheduled(cx);

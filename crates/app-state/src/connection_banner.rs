@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::*;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::backend::{ConnectionState, LiveState};
 
@@ -121,7 +121,7 @@ fn show_after(kind: BannerKind) -> Duration {
 }
 
 impl AppState {
-    pub fn refresh_connection_banner(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_connection_banner(&mut self, cx: &mut dyn Host) {
         let wanted = if self.mode.demo {
             let offline = std::env::var_os(DEMO_OFFLINE_VARIABLE).is_some();
             if offline {
@@ -135,12 +135,12 @@ impl AppState {
         let before = self.connection_banner.visible();
         let recheck = self.connection_banner.update(wanted, Instant::now());
         if let Some(wait) = recheck {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(wait).await;
-                this.update(cx, |state, cx| state.refresh_connection_banner(cx))
-                    .ok();
-            })
-            .detach();
+            let this = cx.handle();
+            cx.spawn(Box::pin(async move {
+                this.sleep(wait).await;
+                this.update(move |state, cx| state.refresh_connection_banner(cx))
+                    .await;
+            }));
         }
         if self.connection_banner.visible() != before {
             cx.emit(crate::app_state::AppEvent::Status);

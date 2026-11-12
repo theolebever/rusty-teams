@@ -1,20 +1,19 @@
-use gpui_kit::*;
-
 use super::end_screen::{CallEndScreen, EndCause};
 use super::model::{CallKind, PendingMove};
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 const DEMO_MEETING_THREAD: &str = "demo-chat-meeting-standup";
 
 impl AppState {
-    pub fn dismiss_call_end(&mut self, cx: &mut Context<Self>) {
+    pub fn dismiss_call_end(&mut self, cx: &mut dyn Host) {
         if self.call_end.take().is_some() {
             cx.emit(AppEvent::Call);
             cx.notify();
         }
     }
 
-    pub fn retry_call_end(&mut self, cx: &mut Context<Self>) {
+    pub fn retry_call_end(&mut self, cx: &mut dyn Host) {
         let Some(screen) = self.call_end.take() else {
             return;
         };
@@ -42,7 +41,7 @@ impl AppState {
         }
     }
 
-    pub fn demo_call_end(&mut self, cause: EndCause, cx: &mut Context<Self>) {
+    pub fn demo_call_end(&mut self, cause: EndCause, cx: &mut dyn Host) {
         let screen = match cause {
             EndCause::Removed => CallEndScreen {
                 cause,

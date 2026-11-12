@@ -1,6 +1,6 @@
 use chatsvc::sound_settings::SoundSettings;
-use gpui_kit::Context;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::runtime;
 
@@ -15,12 +15,13 @@ pub fn user_mri(user_id: &str) -> String {
 }
 
 impl AppState {
-    pub fn refresh_sound_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_sound_settings(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let read = runtime::spawn(async move { engine.sound_settings().await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let settings = match read.await {
                 Ok(Ok(settings)) => settings,
                 Ok(Err(error)) => {
@@ -29,17 +30,16 @@ impl AppState {
                 }
                 Err(_) => return,
             };
-            this.update(cx, |state, cx| state.apply_account_sounds(settings, cx))
-                .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.apply_account_sounds(settings, cx))
+                .await;
+        }));
     }
 
     pub fn save_sound_settings(
         &mut self,
         previous: SoundSettings,
         updated: SoundSettings,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             self.apply_account_sounds(previous, cx);
@@ -68,7 +68,7 @@ impl AppState {
         );
     }
 
-    fn apply_account_sounds(&mut self, settings: SoundSettings, cx: &mut Context<Self>) {
+    fn apply_account_sounds(&mut self, settings: SoundSettings, cx: &mut dyn Host) {
         self.account_sounds = Some(settings);
         cx.emit(AppEvent::SoundSettings);
     }

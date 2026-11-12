@@ -1,9 +1,9 @@
 use calling::{CallCommand, CallHandle, CallSpec, CallUpdate, Callee};
-use gpui_kit::*;
 
 use super::demo::{DemoCall, start_demo_call};
 use super::features::TransferCandidate;
 use super::model::{ActiveCall, CallModel, ConsultCall, ConsultTransfer};
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 const CONSULT_REPORT_NOTE: &str = "consult call, the first call is on hold";
@@ -16,7 +16,7 @@ fn send_to(call: &ActiveCall, command: CallCommand) {
 }
 
 impl AppState {
-    pub fn start_consult(&mut self, target: TransferCandidate, cx: &mut Context<Self>) {
+    pub fn start_consult(&mut self, target: TransferCandidate, cx: &mut dyn Host) {
         self.close_transfer_picker(cx);
         if !self.can_transfer_call() {
             return;
@@ -44,7 +44,7 @@ impl AppState {
         self.begin_consult(target, handle, cx);
     }
 
-    fn begin_consult(&mut self, target: TransferCandidate, handle: CallHandle, cx: &mut Context<Self>) {
+    fn begin_consult(&mut self, target: TransferCandidate, handle: CallHandle, cx: &mut dyn Host) {
         let callee = (target.mri.clone(), target.name.clone());
         self.note_call_feature("consult", format!("start with {}", target.mri));
         self.send_call_command(CallCommand::Hold(true));
@@ -65,7 +65,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn transfer_consulted(&mut self, cx: &mut Context<Self>) {
+    pub fn transfer_consulted(&mut self, cx: &mut dyn Host) {
         let (Some(call), Some(held)) = (self.call.as_mut(), self.held_call.as_ref()) else {
             return;
         };
@@ -89,7 +89,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn resume_held_call(&mut self, _cx: &mut Context<Self>) {
+    pub fn resume_held_call(&mut self, _cx: &mut dyn Host) {
         let (Some(call), Some(held)) = (self.call.as_ref(), self.held_call.as_ref()) else {
             return;
         };
@@ -104,7 +104,7 @@ impl AppState {
         self.held_call.as_ref().is_some_and(|held| held.id == call_id)
     }
 
-    pub(super) fn apply_held_call_update(&mut self, update: CallUpdate, cx: &mut Context<Self>) {
+    pub(super) fn apply_held_call_update(&mut self, update: CallUpdate, cx: &mut dyn Host) {
         let Some(held) = self.held_call.as_mut() else {
             return;
         };
@@ -131,13 +131,17 @@ impl AppState {
         let Some(mut ended) = self.held_call.take() else {
             return;
         };
-        ended.pictures.clear(cx);
+        ended.pictures.clear();
         let consult = self.call.as_mut().and_then(|call| {
             let transferred = call
                 .consult
                 .as_ref()
                 .is_some_and(|consult| consult.transfer == ConsultTransfer::Done);
-            if transferred { None } else { call.consult.take() }
+            if transferred {
+                None
+            } else {
+                call.consult.take()
+            }
         });
         if let Some(consult) = consult {
             self.raise_notice(format!("{} hung up", consult.held_name), None, cx);

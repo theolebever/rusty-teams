@@ -2,6 +2,7 @@ use gpui_kit::*;
 use store::TeamRights;
 use teams_core::{ChannelPrivacy, MAX_CHANNEL_NAME_LENGTH};
 
+use crate::Host;
 use crate::app_state::{AppState, Selection};
 
 pub const CREATE_CHANNEL_FAILURE: &str = "We couldn't create the channel.";
@@ -132,15 +133,16 @@ impl AppState {
     pub fn load_channel_description(
         &self,
         channel_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<Option<String>> {
-        let Some(engine) = self.engine.clone() else {
-            return Task::ready(None);
-        };
+    ) -> impl std::future::Future<Output = Option<String>> + use<> {
+        let engine = self.engine.clone();
         let channel_id = channel_id.to_owned();
-        let receiver =
-            crate::runtime::spawn(async move { engine.channel_description(&channel_id).await });
-        cx.background_spawn(async move { receiver.await.ok().and_then(Result::ok) })
+        async move {
+            let engine = engine?;
+            crate::runtime::spawn(async move { engine.channel_description(&channel_id).await })
+                .await
+                .ok()
+                .and_then(Result::ok)
+        }
     }
 
     pub fn edit_channel(
@@ -148,7 +150,7 @@ impl AppState {
         channel_id: &str,
         name: &str,
         description: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(Some(engine)) = self.chat_action_engine(cx) else {
             return;
@@ -171,7 +173,7 @@ impl AppState {
         );
     }
 
-    pub fn delete_channel(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_channel(&mut self, channel_id: &str, cx: &mut dyn Host) {
         let Some(Some(engine)) = self.chat_action_engine(cx) else {
             return;
         };
@@ -182,9 +184,10 @@ impl AppState {
         let owned_id = channel_id.to_owned();
         let receiver = crate::runtime::spawn(async move { engine.delete_channel(&owned_id).await });
         let channel_id = channel_id.to_owned();
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let deleted = matches!(receiver.await, Ok(Ok(())));
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if !deleted {
                     state.raise_notice(delete_channel_failure(&channel_name), None, cx);
                     return;
@@ -196,9 +199,8 @@ impl AppState {
                 }
                 state.raise_notice(channel_deleted_notice(&channel_name), None, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub fn create_channel(
@@ -207,7 +209,7 @@ impl AppState {
         name: &str,
         description: &str,
         privacy: ChannelPrivacy,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(Some(engine)) = self.chat_action_engine(cx) else {
             return;

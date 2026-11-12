@@ -2,10 +2,10 @@ use std::future::Future;
 
 use chatsvc::HistoryShare;
 use chrono::{DateTime, Duration, Local, Offset, Utc};
-use gpui_kit::*;
 use store::{ChannelNotifications, ChatRecord, MemberRecord};
 use teams_core::roster_event::{RosterChange, RosterEvent, SharedHistory, merge_members};
 
+use crate::Host;
 use crate::app_state::{AppState, Selection, chat_title};
 use crate::notice::{NoticeAction, short_error, truncated};
 use crate::sidebar_model::{
@@ -20,7 +20,7 @@ impl AppState {
         self.keep_unread.as_deref() == Some(chat_id)
     }
 
-    pub fn mark_chat_unread(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn mark_chat_unread(&mut self, chat_id: &str, cx: &mut dyn Host) {
         self.mark_chat_unread_from(chat_id, None, cx);
     }
 
@@ -28,7 +28,7 @@ impl AppState {
         &mut self,
         chat_id: &str,
         message_created_at: Option<DateTime<Utc>>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
@@ -72,7 +72,7 @@ impl AppState {
         );
     }
 
-    pub fn set_chat_muted(&mut self, chat_id: &str, muted: bool, cx: &mut Context<Self>) {
+    pub fn set_chat_muted(&mut self, chat_id: &str, muted: bool, cx: &mut dyn Host) {
         if self.chat_record(chat_id).is_none() {
             return;
         }
@@ -102,7 +102,7 @@ impl AppState {
         &mut self,
         channel_id: &str,
         notifications: ChannelNotifications,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(previous) = self.channel_notifications(channel_id) else {
             return;
@@ -147,7 +147,7 @@ impl AppState {
         })
     }
 
-    pub fn hide_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn hide_chat(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
         };
@@ -174,7 +174,7 @@ impl AppState {
         );
     }
 
-    pub fn unhide_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn unhide_chat(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let Some(engine) = self.chat_action_engine(cx).flatten() else {
             return;
         };
@@ -188,7 +188,7 @@ impl AppState {
         );
     }
 
-    pub fn leave_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn leave_chat(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
         };
@@ -209,7 +209,7 @@ impl AppState {
         );
     }
 
-    pub fn remove_chat_member(&mut self, chat_id: &str, user_id: &str, cx: &mut Context<Self>) {
+    pub fn remove_chat_member(&mut self, chat_id: &str, user_id: &str, cx: &mut dyn Host) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
         };
@@ -246,7 +246,7 @@ impl AppState {
         chat_id: &str,
         people: Vec<MemberRecord>,
         share: HistoryShare,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
@@ -281,7 +281,7 @@ impl AppState {
         chat_id: &str,
         people: &[MemberRecord],
         share: HistoryShare,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let me = self.directory.me.as_ref();
         let event = RosterEvent {
@@ -307,12 +307,7 @@ impl AppState {
         self.store_demo_roster_line(chat_id, &event, cx);
     }
 
-    fn store_demo_roster_line(
-        &mut self,
-        chat_id: &str,
-        event: &RosterEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn store_demo_roster_line(&mut self, chat_id: &str, event: &RosterEvent, cx: &mut dyn Host) {
         let now = Utc::now();
         let record = crate::demo::roster_record(
             chat_id,
@@ -326,7 +321,7 @@ impl AppState {
     }
 
     /// Teams' "Remove chat history": hidden for me only until a newer message arrives.
-    pub fn remove_chat_history(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn remove_chat_history(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
         };
@@ -347,7 +342,7 @@ impl AppState {
         );
     }
 
-    pub fn rename_chat(&mut self, chat_id: &str, topic: &str, cx: &mut Context<Self>) {
+    pub fn rename_chat(&mut self, chat_id: &str, topic: &str, cx: &mut dyn Host) {
         let Some(chat) = self.chat_record(chat_id) else {
             return;
         };
@@ -388,7 +383,7 @@ impl AppState {
     }
 
     /// Teams turns adding people to a 1:1 into a new group chat draft with everyone.
-    pub fn start_group_chat_with(&mut self, people: Vec<MemberRecord>, cx: &mut Context<Self>) {
+    pub fn start_group_chat_with(&mut self, people: Vec<MemberRecord>, cx: &mut dyn Host) {
         self.new_chat_people = people;
         self.start_new_chat(cx);
     }
@@ -404,7 +399,7 @@ impl AppState {
     /// `None` stops the action. `Some(None)` is demo mode, which only changes the local store.
     pub fn chat_action_engine(
         &mut self,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> Option<Option<std::sync::Arc<crate::backend::Engine>>> {
         if self.mode.read_only {
             self.raise_notice("Read-only mode: chat not changed".to_owned(), None, cx);
@@ -417,7 +412,7 @@ impl AppState {
         }
     }
 
-    fn remove_chat_locally(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    fn remove_chat_locally(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let was_selected = self.selection == Some(Selection::Chat(chat_id.to_owned()));
         let next = was_selected
             .then(|| self.next_chat_after(chat_id))
@@ -429,7 +424,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn leave_removed_selection(&mut self, next: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn leave_removed_selection(&mut self, next: Option<String>, cx: &mut dyn Host) {
         match next {
             Some(next_id) => self.select(Selection::Chat(next_id), cx),
             None => {
@@ -441,7 +436,7 @@ impl AppState {
         }
     }
 
-    fn restore_chat_locally(&mut self, chat: &ChatRecord, cx: &mut Context<Self>) {
+    fn restore_chat_locally(&mut self, chat: &ChatRecord, cx: &mut dyn Host) {
         let _ = self.store.upsert_chats(std::slice::from_ref(chat));
         let _ = self.store.set_chat_muted(&chat.id, chat.muted);
         self.reload_sidebar(cx);
@@ -484,26 +479,26 @@ impl AppState {
         &mut self,
         label: &'static str,
         call: impl Future<Output = teams_core::Result<()>> + Send + 'static,
-        revert: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
-        on_success: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
+        revert: impl FnOnce(&mut Self, &mut dyn Host) + 'static,
+        on_success: impl FnOnce(&mut Self, &mut dyn Host) + 'static,
+        cx: &mut dyn Host,
     ) {
         let receiver = crate::runtime::spawn(call);
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let failure = match receiver.await {
                 Ok(Ok(())) => None,
                 Ok(Err(error)) => Some(short_error(&error)),
                 Err(_) => Some("cancelled".to_owned()),
             };
-            this.update(cx, |state, cx| match failure {
+            this.update(move |state, cx| match failure {
                 None => on_success(state, cx),
                 Some(reason) => {
                     revert(state, cx);
                     state.raise_notice(format!("{label} failed: {reason}"), None, cx);
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }

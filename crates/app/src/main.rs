@@ -250,6 +250,7 @@ fn main() {
         });
         views::shell::install_globals(&state, user_input, cx);
         agent_api::init(state.read(cx).store.clone(), arguments.demo, cx);
+        host::follow_state(&state, cx);
         agents::install(state.clone(), cx);
         if arguments.demo {
             demo::start_session(&state, cx);

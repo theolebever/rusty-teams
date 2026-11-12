@@ -1,9 +1,9 @@
 use calling::{CallCommand, CallSpec, MeetingTarget, MuteCommand};
-use gpui_kit::Context;
 
 use super::demo::{DemoCall, demo_guests};
 use super::end_screen::join_tone;
 use super::model::CallModel;
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 const OPTIONS_META_KEY: &str = "prejoin_options";
@@ -106,7 +106,7 @@ pub struct PendingJoin {
 }
 
 impl AppState {
-    pub(super) fn stage_meeting_join(&mut self, join: MeetingJoin, cx: &mut Context<Self>) {
+    pub(super) fn stage_meeting_join(&mut self, join: MeetingJoin, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -121,7 +121,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn confirm_prejoin(&mut self, options: JoinOptions, cx: &mut Context<Self>) {
+    pub fn confirm_prejoin(&mut self, options: JoinOptions, cx: &mut dyn Host) {
         let Some(pending) = self.prejoin.take() else {
             return;
         };
@@ -130,7 +130,7 @@ impl AppState {
         self.start_meeting(pending.join, Some(&options), cx);
     }
 
-    pub fn cancel_prejoin(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_prejoin(&mut self, cx: &mut dyn Host) {
         if self.prejoin.take().is_some() {
             cx.notify();
         }
@@ -140,7 +140,7 @@ impl AppState {
         &mut self,
         join: MeetingJoin,
         options: Option<&JoinOptions>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.call.is_some() {
             self.show_call(true, cx);

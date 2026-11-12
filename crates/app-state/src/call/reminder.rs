@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use chatsvc::{CalendarEvent, ResponseType};
 use chrono::{DateTime, Duration, FixedOffset, Utc};
-use gpui_kit::Context;
 
 use super::outlook_reminders::{OutlookReminders, ReminderWrite};
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 pub const LEAD_MINUTES: i64 = 5;
@@ -269,7 +269,7 @@ impl MeetingToasts {
 }
 
 impl AppState {
-    pub fn tick_meeting_reminders(&mut self, show: bool, cx: &mut Context<Self>) {
+    pub fn tick_meeting_reminders(&mut self, show: bool, cx: &mut dyn Host) {
         let now = Utc::now();
         self.poll_outlook_reminders(now, cx);
         let in_call = self.call.is_some();
@@ -298,7 +298,7 @@ impl AppState {
         }
     }
 
-    pub fn join_meeting_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub fn join_meeting_toast(&mut self, id: u64, cx: &mut dyn Host) {
         let Some(toast) = self.meeting_toasts.dismiss_for_good(id) else {
             return;
         };
@@ -309,13 +309,13 @@ impl AppState {
         }
     }
 
-    pub fn join_latest_meeting_toast(&mut self, cx: &mut Context<Self>) {
+    pub fn join_latest_meeting_toast(&mut self, cx: &mut dyn Host) {
         if let Some(id) = self.meeting_toasts.latest().map(|toast| toast.id) {
             self.join_meeting_toast(id, cx);
         }
     }
 
-    pub fn snooze_meeting_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub fn snooze_meeting_toast(&mut self, id: u64, cx: &mut dyn Host) {
         if let Some(toast) = self.meeting_toasts.snooze(id) {
             self.write_outlook_reminder(toast.event_id, ReminderWrite::Snooze(toast.start));
             cx.emit(AppEvent::MeetingReminder);
@@ -323,7 +323,7 @@ impl AppState {
         }
     }
 
-    pub fn dismiss_meeting_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub fn dismiss_meeting_toast(&mut self, id: u64, cx: &mut dyn Host) {
         if let Some(toast) = self.meeting_toasts.dismiss(id) {
             self.write_outlook_reminder(toast.event_id, ReminderWrite::Dismiss);
             cx.emit(AppEvent::MeetingReminder);

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use gpui_kit::*;
 use teams_core::FolderChange;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::data::{Directory, PENDING_FOLDER_PREFIX};
 
@@ -54,14 +54,14 @@ impl SectionChanges {
 }
 
 impl AppState {
-    pub fn create_section(&mut self, name: &str, cx: &mut Context<Self>) {
+    pub fn create_section(&mut self, name: &str, cx: &mut dyn Host) {
         let change = FolderChange::Create {
             name: name.to_owned(),
         };
         self.change_sections(change, "New section", cx);
     }
 
-    pub fn rename_section(&mut self, folder_id: &str, name: &str, cx: &mut Context<Self>) {
+    pub fn rename_section(&mut self, folder_id: &str, name: &str, cx: &mut dyn Host) {
         let change = FolderChange::Rename {
             folder_id: folder_id.to_owned(),
             name: name.to_owned(),
@@ -69,19 +69,14 @@ impl AppState {
         self.change_sections(change, "Rename section", cx);
     }
 
-    pub fn delete_section(&mut self, folder_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_section(&mut self, folder_id: &str, cx: &mut dyn Host) {
         let change = FolderChange::Delete {
             folder_id: folder_id.to_owned(),
         };
         self.change_sections(change, "Delete section", cx);
     }
 
-    pub fn move_section(
-        &mut self,
-        folder_id: &str,
-        target_folder_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn move_section(&mut self, folder_id: &str, target_folder_id: &str, cx: &mut dyn Host) {
         let change = FolderChange::Move {
             folder_id: folder_id.to_owned(),
             target_folder_id: target_folder_id.to_owned(),
@@ -89,12 +84,7 @@ impl AppState {
         self.change_sections(change, "Move section", cx);
     }
 
-    fn change_sections(
-        &mut self,
-        change: FolderChange,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) {
+    fn change_sections(&mut self, change: FolderChange, label: &'static str, cx: &mut dyn Host) {
         if self.mode.read_only {
             self.raise_notice(READ_ONLY_SECTIONS.to_owned(), None, cx);
             return;
@@ -117,7 +107,7 @@ impl AppState {
         }
     }
 
-    fn run_next_section_change(&mut self, cx: &mut Context<Self>) {
+    fn run_next_section_change(&mut self, cx: &mut dyn Host) {
         let Some(queued) = self.section_changes.in_flight().cloned() else {
             return;
         };
@@ -134,7 +124,7 @@ impl AppState {
         );
     }
 
-    fn finish_section_change(&mut self, cx: &mut Context<Self>) {
+    fn finish_section_change(&mut self, cx: &mut dyn Host) {
         let has_next = self.section_changes.finish().is_some();
         self.reload_directory();
         self.notify_sections(cx);
@@ -147,7 +137,7 @@ impl AppState {
         self.section_changes.reapply(&mut self.directory);
     }
 
-    fn notify_sections(&mut self, cx: &mut Context<Self>) {
+    fn notify_sections(&mut self, cx: &mut dyn Host) {
         cx.emit(AppEvent::Sidebar);
         cx.notify();
     }

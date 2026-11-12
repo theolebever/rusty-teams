@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use chatsvc::{CalendarEvent, Reminder};
 use chrono::{DateTime, Duration, Utc};
-use gpui_kit::Context;
 
 use super::reminder::{GRACE_MINUTES, LEAD_MINUTES, is_eligible};
+use crate::Host;
 use crate::app_state::AppState;
 use crate::runtime;
 
@@ -107,7 +107,7 @@ impl OutlookReminders {
 }
 
 impl AppState {
-    pub(super) fn poll_outlook_reminders(&mut self, now: DateTime<Utc>, cx: &mut Context<Self>) {
+    pub(super) fn poll_outlook_reminders(&mut self, now: DateTime<Utc>, cx: &mut dyn Host) {
         if self.mode.demo {
             return;
         }
@@ -122,7 +122,8 @@ impl AppState {
             return;
         };
         let fetched = runtime::spawn(async move { launcher.reminder_view(start, end).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let fetched = fetched
                 .await
                 .unwrap_or_else(|_| Err("reminder fetch was dropped".to_owned()));
@@ -131,15 +132,14 @@ impl AppState {
                     "calendar: Outlook reminders not read: {error}"
                 ));
             }
-            this.update(cx, |state, _| {
+            this.update(move |state, _| {
                 state
                     .meeting_toasts
                     .outlook_mut()
                     .apply(start, end, fetched);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub(super) fn write_outlook_reminder(&mut self, event_id: String, write: ReminderWrite) {

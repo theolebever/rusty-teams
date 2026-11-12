@@ -43,7 +43,3 @@ pub fn spawn_abortable<T: Send + 'static>(
     (receiver, task.abort_handle())
 }
 
-/// Waits `duration` on the network runtime, so the caller's executor needs no timer of its own.
-pub async fn sleep(duration: std::time::Duration) {
-    let _ = spawn(tokio::time::sleep(duration)).await;
-}

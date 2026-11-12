@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
-use gpui_kit::Context;
 use store::{MessageImportance, MessageRecord};
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::notify::urgent_repeat::{REPEAT_INTERVAL_MINUTES, REPEAT_WINDOW_MINUTES};
 use crate::runtime;
@@ -35,7 +35,7 @@ pub fn urgent_to_ack(
 }
 
 impl AppState {
-    pub fn ack_urgent_messages(&mut self, chat_id: &str, _cx: &mut Context<Self>) {
+    pub fn ack_urgent_messages(&mut self, chat_id: &str, _cx: &mut dyn Host) {
         if self.mode.demo || self.mode.read_only {
             return;
         }

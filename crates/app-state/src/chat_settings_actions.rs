@@ -1,10 +1,10 @@
-use gpui_kit::Context;
 use store::Store;
 use teams_core::{
     ChatAccountSettings, ChatNotificationMode, ChatSettingChange, ChatSettingsDocument,
     DesktopNotifications,
 };
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::rows::Receipt;
 use crate::runtime;
@@ -34,12 +34,13 @@ impl AppState {
         self.chat_settings.settings()
     }
 
-    pub fn refresh_chat_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_chat_settings(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let read = runtime::spawn(async move { engine.refresh_chat_settings().await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let document = match read.await {
                 Ok(Ok(document)) => document,
                 Ok(Err(error)) => {
@@ -48,13 +49,12 @@ impl AppState {
                 }
                 Err(_) => return,
             };
-            this.update(cx, |state, cx| state.apply_chat_settings(document, cx))
-                .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.apply_chat_settings(document, cx))
+                .await;
+        }));
     }
 
-    pub fn save_chat_setting(&mut self, change: ChatSettingChange, cx: &mut Context<Self>) {
+    pub fn save_chat_setting(&mut self, change: ChatSettingChange, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -74,7 +74,7 @@ impl AppState {
         );
     }
 
-    fn apply_chat_settings(&mut self, document: ChatSettingsDocument, cx: &mut Context<Self>) {
+    fn apply_chat_settings(&mut self, document: ChatSettingsDocument, cx: &mut dyn Host) {
         if self.chat_settings == document {
             return;
         }
@@ -84,7 +84,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn set_markdown_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_markdown_mode(&mut self, enabled: bool, cx: &mut dyn Host) {
         self.markdown_mode = enabled;
         let _ = self
             .store
@@ -93,7 +93,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn set_actions_on_right_click(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_actions_on_right_click(&mut self, enabled: bool, cx: &mut dyn Host) {
         self.actions_on_right_click = enabled;
         let _ = self.store.set_meta(
             META_ACTIONS_ON_RIGHT_CLICK,
@@ -119,7 +119,7 @@ impl AppState {
         chat_id: &str,
         mode: ChatNotificationMode,
         desktop: DesktopNotifications,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(previous_muted) = self.chat_record(chat_id).map(|chat| chat.muted) else {
             return;

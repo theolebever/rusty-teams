@@ -3,7 +3,7 @@ use gpui_kit::*;
 
 use super::call_stage::{StageMode, render_stage};
 use super::shortcuts::{ZoomShareIn, ZoomShareOut, ZoomShareReset};
-use crate::app_state::AppState;
+use crate::app_state::{AppEvent, AppState};
 use crate::call::ZoomStep;
 use crate::theme;
 
@@ -15,17 +15,17 @@ pub struct SharePopOutView {
     app: Entity<AppState>,
     focus: FocusHandle,
     _app_subscription: Subscription,
-    _media_subscription: Option<Subscription>,
+    _media_subscription: Subscription,
 }
 
 impl SharePopOutView {
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app_subscription = cx.observe(&app, |_, _, cx| cx.notify());
-        let media_subscription = app
-            .read(cx)
-            .call_media
-            .clone()
-            .map(|media| cx.observe(&media, |_, _, cx| cx.notify()));
+        let media_subscription = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
+            if matches!(event, AppEvent::CallMedia) {
+                cx.notify();
+            }
+        });
         let closing_app = app.clone();
         window.on_window_should_close(cx, move |_, cx| {
             closing_app.update(cx, |state, cx| state.return_stage_from_pop_out(cx));

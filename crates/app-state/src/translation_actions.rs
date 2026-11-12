@@ -10,6 +10,7 @@ use teams_core::{
     target_patch,
 };
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::notice::short_error;
 use crate::runtime;
@@ -94,7 +95,7 @@ impl AppState {
         }
     }
 
-    pub fn refresh_translation_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_translation_settings(&mut self, cx: &mut dyn Host) {
         self.load_cached_translation_settings();
         let Some(engine) = self.engine.clone() else {
             return;
@@ -123,11 +124,12 @@ impl AppState {
             };
             (settings, languages)
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let Ok((settings, languages)) = receiver.await else {
                 return;
             };
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if let Ok(settings) = settings {
                     state.translation.settings = Some(settings);
                     state.apply_date_locale();
@@ -141,17 +143,16 @@ impl AppState {
                 state.translation_changed(cx);
                 state.refresh_selected_translation(cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    fn translation_changed(&mut self, cx: &mut Context<Self>) {
+    fn translation_changed(&mut self, cx: &mut dyn Host) {
         cx.emit(AppEvent::Translation);
         cx.notify();
     }
 
-    fn refresh_selected_translation(&mut self, cx: &mut Context<Self>) {
+    fn refresh_selected_translation(&mut self, cx: &mut dyn Host) {
         let Some(selection) = self.selection.clone() else {
             return;
         };
@@ -159,7 +160,7 @@ impl AppState {
         self.schedule_auto_translate(selection.conversation_id(), cx);
     }
 
-    pub fn refresh_language_stamps(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn refresh_language_stamps(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.translation.settings.is_none()
             || self.translation.behavior() == TranslationBehavior::Never
         {
@@ -188,9 +189,10 @@ impl AppState {
         let conversation_id = conversation_id.to_owned();
         let requested = conversation_id.clone();
         let receiver = runtime::spawn(async move { engine.language_stamps(&requested).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = receiver.await;
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.translation.stamps_in_flight.remove(&conversation_id);
                 let Ok(Ok(found)) = outcome else {
                     return;
@@ -205,9 +207,8 @@ impl AppState {
                 }
                 state.schedule_auto_translate(&conversation_id, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     fn unasked_message_ids(&self, conversation_id: &str) -> Vec<String> {
@@ -224,7 +225,7 @@ impl AppState {
             .collect()
     }
 
-    fn schedule_auto_translate(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    fn schedule_auto_translate(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.translation.behavior() != TranslationBehavior::Auto
             || !self
                 .translation
@@ -234,18 +235,18 @@ impl AppState {
             return;
         }
         let conversation_id = conversation_id.to_owned();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(AUTO_DEBOUNCE).await;
-            this.update(cx, |state, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(AUTO_DEBOUNCE).await;
+            this.update(move |state, cx| {
                 state.translation.auto_scheduled.remove(&conversation_id);
                 state.run_auto_translate(&conversation_id, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    fn run_auto_translate(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    fn run_auto_translate(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.translation.behavior() != TranslationBehavior::Auto {
             return;
         }
@@ -293,7 +294,7 @@ impl AppState {
         &mut self,
         conversation_id: &str,
         message_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(record) = self.message_record(conversation_id, message_id) else {
             return;
@@ -316,7 +317,7 @@ impl AppState {
         conversation_id: &str,
         items: Vec<(String, i64)>,
         trigger: TranslationTrigger,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let target = self.translation.target();
         let engine = self.engine.clone();
@@ -342,18 +343,18 @@ impl AppState {
                 .translate_messages(&requested_conversation, &ids, &requested_target, &trigger)
                 .await
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = match receiver.await {
                 Ok(Ok(translations)) => Ok(translations),
                 Ok(Err(error)) => Err(short_error(&error)),
                 Err(_) => Err("cancelled".to_owned()),
             };
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.apply_translations(&conversation_id, &items, &target, outcome, cx)
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     fn apply_translations(
@@ -362,7 +363,7 @@ impl AppState {
         items: &[(String, i64)],
         target: &str,
         outcome: TranslationOutcome,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let answered = outcome.unwrap_or_default();
         for (message_id, version) in items {
@@ -384,7 +385,7 @@ impl AppState {
         self.translation_changed(cx);
     }
 
-    pub fn set_translation_target(&mut self, code: &str, cx: &mut Context<Self>) {
+    pub fn set_translation_target(&mut self, code: &str, cx: &mut dyn Host) {
         let Some(settings) = self.translation.settings.clone() else {
             return;
         };
@@ -393,11 +394,7 @@ impl AppState {
         self.update_language_settings("Translation language", updated, target_patch(code), cx);
     }
 
-    pub fn set_translation_behavior(
-        &mut self,
-        behavior: TranslationBehavior,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_translation_behavior(&mut self, behavior: TranslationBehavior, cx: &mut dyn Host) {
         let Some(settings) = self.translation.settings.clone() else {
             return;
         };
@@ -411,7 +408,7 @@ impl AppState {
         self.update_language_settings("Translation setting", updated, patch, cx);
     }
 
-    pub fn never_translate_language(&mut self, code: &str, cx: &mut Context<Self>) {
+    pub fn never_translate_language(&mut self, code: &str, cx: &mut dyn Host) {
         let Some(settings) = self.translation.settings.clone() else {
             return;
         };
@@ -419,7 +416,7 @@ impl AppState {
         self.set_never_translate_locales(settings, locales, cx);
     }
 
-    pub fn allow_translating_language(&mut self, code: &str, cx: &mut Context<Self>) {
+    pub fn allow_translating_language(&mut self, code: &str, cx: &mut dyn Host) {
         let Some(settings) = self.translation.settings.clone() else {
             return;
         };
@@ -431,7 +428,7 @@ impl AppState {
         &mut self,
         settings: LanguageSettings,
         locales: Vec<String>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let patch = authoring_patch(&locales);
         let mut updated = settings;
@@ -444,7 +441,7 @@ impl AppState {
         label: &'static str,
         updated: LanguageSettings,
         patch: Value,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;

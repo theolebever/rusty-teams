@@ -5,6 +5,7 @@ use super::actions::NOT_CONNECTED_NOTICE;
 use super::features::TransferCandidate;
 use super::model::{CallKind, Tile};
 use super::options_dialog::OptionsDialog;
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::runtime;
 
@@ -12,7 +13,7 @@ const INVITE_FAILED_NOTICE: &str = "Could not add that person";
 const NO_PEER_NOTICE: &str = "This call cannot be extended";
 
 impl AppState {
-    pub fn toggle_call_people(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_people(&mut self, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut() else {
             return;
         };
@@ -26,13 +27,17 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn set_call_lock(&mut self, locked: bool, _cx: &mut Context<Self>) {
-        if self.call.as_ref().is_some_and(|call| call.model.organizes_meeting()) {
+    pub fn set_call_lock(&mut self, locked: bool, _cx: &mut dyn Host) {
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.model.organizes_meeting())
+        {
             self.send_call_command(CallCommand::SetLock(locked));
         }
     }
 
-    pub fn set_call_role(&mut self, mri: String, role: MeetingRole, _cx: &mut Context<Self>) {
+    pub fn set_call_role(&mut self, mri: String, role: MeetingRole, _cx: &mut dyn Host) {
         let allowed = self.call.as_ref().is_some_and(|call| {
             call.model.can_change_roles(&mri) && role != MeetingRole::Organizer
         });
@@ -46,21 +51,45 @@ impl AppState {
         mri: String,
         modality: Modality,
         allowed: bool,
-        _cx: &mut Context<Self>,
+        _cx: &mut dyn Host,
     ) {
-        if self.call.as_ref().is_some_and(|call| call.model.can_change_roles(&mri)) {
-            self.send_call_command(CallCommand::SetAttendeeModality { mri, modality, allowed });
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.model.can_change_roles(&mri))
+        {
+            self.send_call_command(CallCommand::SetAttendeeModality {
+                mri,
+                modality,
+                allowed,
+            });
         }
     }
 
-    pub fn set_call_attendee_restrictions(&mut self, mic_off: bool, camera_off: bool, _cx: &mut Context<Self>) {
-        if self.call.as_ref().is_some_and(|call| call.model.organizes_meeting()) {
-            self.send_call_command(CallCommand::SetAttendeeRestrictions { mic_off, camera_off });
+    pub fn set_call_attendee_restrictions(
+        &mut self,
+        mic_off: bool,
+        camera_off: bool,
+        _cx: &mut dyn Host,
+    ) {
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.model.organizes_meeting())
+        {
+            self.send_call_command(CallCommand::SetAttendeeRestrictions {
+                mic_off,
+                camera_off,
+            });
         }
     }
 
-    pub fn open_meeting_options(&mut self, cx: &mut Context<Self>) {
-        let Some(call) = self.call.as_mut().filter(|call| call.model.organizes_meeting()) else {
+    pub fn open_meeting_options(&mut self, cx: &mut dyn Host) {
+        let Some(call) = self
+            .call
+            .as_mut()
+            .filter(|call| call.model.organizes_meeting())
+        else {
             return;
         };
         call.options_dialog = Some(OptionsDialog::loading());
@@ -68,14 +97,22 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn close_meeting_options(&mut self, cx: &mut Context<Self>) {
-        if let Some(call) = self.call.as_mut().filter(|call| call.options_dialog.is_some()) {
+    pub fn close_meeting_options(&mut self, cx: &mut dyn Host) {
+        if let Some(call) = self
+            .call
+            .as_mut()
+            .filter(|call| call.options_dialog.is_some())
+        {
             call.options_dialog = None;
             cx.notify();
         }
     }
 
-    pub fn edit_meeting_options(&mut self, edit: impl FnOnce(&mut MeetingOptions), cx: &mut Context<Self>) {
+    pub fn edit_meeting_options(
+        &mut self,
+        edit: impl FnOnce(&mut MeetingOptions),
+        cx: &mut dyn Host,
+    ) {
         let Some(draft) = self
             .call
             .as_mut()
@@ -88,7 +125,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn save_meeting_options(&mut self, cx: &mut Context<Self>) {
+    pub fn save_meeting_options(&mut self, cx: &mut dyn Host) {
         let writes = self
             .call
             .as_mut()
@@ -112,25 +149,30 @@ impl AppState {
             .collect()
     }
 
-    pub fn open_invite_picker(
-        &mut self,
-        picker: AnyView,
-        cx: &mut Context<Self>,
-    ) {
-        if self.call.as_ref().is_some_and(|call| call.model.can_invite()) {
+    pub fn open_invite_picker(&mut self, picker: AnyView, cx: &mut dyn Host) {
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.model.can_invite())
+        {
             self.transfer_picker = Some(picker);
             cx.notify();
         }
     }
 
-    pub fn invite_call_person(&mut self, target: TransferCandidate, cx: &mut Context<Self>) {
+    pub fn invite_call_person(&mut self, target: TransferCandidate, cx: &mut dyn Host) {
         self.close_transfer_picker(cx);
         let Some(call) = self.call.as_mut().filter(|call| call.model.can_invite()) else {
             return;
         };
-        let callee = Callee { mri: target.mri.clone(), display_name: target.name.clone() };
+        let callee = Callee {
+            mri: target.mri.clone(),
+            display_name: target.name.clone(),
+        };
         if !call.model.tiles.iter().any(|tile| tile.mri == callee.mri) {
-            call.model.tiles.push(Tile::invited(&callee.mri, &callee.display_name));
+            call.model
+                .tiles
+                .push(Tile::invited(&callee.mri, &callee.display_name));
         }
         let one_to_one = call.model.kind == CallKind::Direct;
         let peer_user_id = call
@@ -143,22 +185,32 @@ impl AppState {
         cx.emit(AppEvent::Call);
         cx.notify();
         if !one_to_one || self.mode.demo {
-            self.send_call_command(CallCommand::Invite { callees: vec![callee], group_thread: None });
+            self.send_call_command(CallCommand::Invite {
+                callees: vec![callee],
+                group_thread: None,
+            });
             return;
         }
         let (Some(engine), Some(peer_user_id), Some(invited_user_id)) =
             (self.engine.clone(), peer_user_id, target.user_id.clone())
         else {
-            let notice = if self.engine.is_none() { NOT_CONNECTED_NOTICE } else { NO_PEER_NOTICE };
+            let notice = if self.engine.is_none() {
+                NOT_CONNECTED_NOTICE
+            } else {
+                NO_PEER_NOTICE
+            };
             self.raise_notice(notice.to_owned(), None, cx);
             return;
         };
         let receiver = runtime::spawn(async move {
-            engine.create_group(&[peer_user_id, invited_user_id], None).await
+            engine
+                .create_group(&[peer_user_id, invited_user_id], None)
+                .await
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let created = receiver.await.ok().and_then(Result::ok);
-            this.update(cx, |state, cx| match created {
+            this.update(move |state, cx| match created {
                 Some(thread_id) if state.call.as_ref().is_some_and(|call| call.id == call_id) => {
                     state.send_call_command(CallCommand::Invite {
                         callees: vec![callee],
@@ -167,9 +219,8 @@ impl AppState {
                 }
                 _ => state.raise_notice(INVITE_FAILED_NOTICE.to_owned(), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 

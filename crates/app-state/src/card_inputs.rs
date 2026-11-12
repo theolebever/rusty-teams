@@ -17,6 +17,7 @@ use teams_core::{
 };
 use tokio::sync::oneshot;
 
+use crate::Host;
 use crate::app_state::{AppHandle, AppState};
 use crate::card_actions::CardTask;
 use crate::card_state::{CardScope, Surface, short_reason};
@@ -410,9 +411,9 @@ impl AppState {
         scope: &CardScope,
         key: &str,
         input: &CardInput,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
-        let value = self.cards.input_text(key, cx);
+        let value = self.cards.input_value(key).to_owned();
         match input.validate(&value) {
             Some(message) => self.cards.set_input_error(key, message),
             None => self.cards.clear_input_errors(&[key.to_owned()]),
@@ -426,7 +427,7 @@ impl AppState {
         action_key: String,
         action: &CardAction,
         inputs: &[CardInput],
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         match &action.kind {
             CardActionKind::OpenUrl(url) => cx.open_url(url),
@@ -508,7 +509,7 @@ impl AppState {
         scope: &CardScope,
         key: &str,
         value: String,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.cards.set_input_value(key, value) {
             self.announce_cards(scope, cx);
@@ -520,7 +521,7 @@ impl AppState {
         scope: &CardScope,
         key: &str,
         value: String,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.cards.set_input_value(key, value);
         self.announce_cards(scope, cx);
@@ -531,7 +532,7 @@ impl AppState {
         scope: &CardScope,
         action: CardAction,
         inputs: &[CardInput],
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> Option<CardTask> {
         let submits = matches!(
             action.kind,
@@ -544,7 +545,9 @@ impl AppState {
                 .collect();
             self.cards.clear_input_errors(&keys);
             let collected = collect_input_values(inputs, |input| {
-                self.cards.input_text(&scope.input_key(&input.id), cx)
+                self.cards
+                    .input_value(&scope.input_key(&input.id))
+                    .to_owned()
             });
             match collected {
                 Ok(values) => values,

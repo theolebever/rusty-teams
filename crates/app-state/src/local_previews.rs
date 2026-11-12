@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use gpui_kit::Context;
 use store::Store;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub fn load_local_previews(store: &Store) -> HashMap<String, LocalPreview> {
 }
 
 impl AppState {
-    pub fn refresh_local_previews(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_local_previews(&mut self, cx: &mut dyn Host) {
         let previews = load_local_previews(&self.store);
         self.set_local_previews(previews, cx);
     }
@@ -33,7 +33,7 @@ impl AppState {
     pub fn set_local_previews(
         &mut self,
         previews: HashMap<String, LocalPreview>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if previews != self.local_previews {
             self.local_previews = previews;

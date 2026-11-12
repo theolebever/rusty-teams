@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
-use gpui_kit::Context;
 use store::ChatRecord;
 use teams_core::{CallDirection, CallLogEntry, CallOutcome};
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState, Selection, chat_title};
 use crate::data::is_one_on_one;
 use crate::format;
@@ -215,7 +215,7 @@ pub fn demo_call_log(now: DateTime<Utc>) -> Vec<CallLogEntry> {
 }
 
 impl AppState {
-    pub fn refresh_call_history(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_call_history(&mut self, cx: &mut dyn Host) {
         if self.mode.demo {
             self.call_history = demo_call_log(Utc::now());
             self.calls_list.invalidate();
@@ -227,34 +227,34 @@ impl AppState {
             return;
         };
         let receiver = runtime::spawn(async move { engine.list_call_logs().await });
-        cx.spawn(async move |this, cx| match receiver.await {
-            Ok(Ok(entries)) => {
-                this.update(cx, |state, cx| {
-                    state.call_history = entries;
-                    state.calls_list.invalidate();
-                    cx.emit(AppEvent::CallHistory);
-                    cx.notify();
-                })
-                .ok();
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            match receiver.await {
+                Ok(Ok(entries)) => {
+                    this.update(move |state, cx| {
+                        state.call_history = entries;
+                        state.calls_list.invalidate();
+                        cx.emit(AppEvent::CallHistory);
+                        cx.notify();
+                    })
+                    .await;
+                }
+                Ok(Err(error)) => crate::diagnostics::record(format!(
+                    "calls: history not loaded: {}",
+                    short_error(&error)
+                )),
+                Err(_) => {}
             }
-            Ok(Err(error)) => crate::diagnostics::record(format!(
-                "calls: history not loaded: {}",
-                short_error(&error)
-            )),
-            Err(_) => {}
-        })
-        .detach();
+        }));
     }
 
-    pub fn refresh_call_history_after_call(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(REFRESH_DELAY_AFTER_CALL)
+    pub fn refresh_call_history_after_call(&mut self, cx: &mut dyn Host) {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(REFRESH_DELAY_AFTER_CALL).await;
+            this.update(move |state, cx| state.refresh_call_history(cx))
                 .await;
-            this.update(cx, |state, cx| state.refresh_call_history(cx))
-                .ok();
-        })
-        .detach();
+        }));
     }
 
     pub fn one_on_one_chat_with(&self, user_id: &str) -> Option<String> {
@@ -284,7 +284,7 @@ impl AppState {
         }
     }
 
-    pub fn call_back_from_history(&mut self, row: &CallRow, cx: &mut Context<Self>) {
+    pub fn call_back_from_history(&mut self, row: &CallRow, cx: &mut dyn Host) {
         let Some(user_id) = row.user_id.as_deref() else {
             return;
         };
@@ -294,7 +294,7 @@ impl AppState {
         }
     }
 
-    pub fn open_chat_of_call_row(&mut self, row: &CallRow, cx: &mut Context<Self>) {
+    pub fn open_chat_of_call_row(&mut self, row: &CallRow, cx: &mut dyn Host) {
         let notice = if row.meeting {
             NO_MEETING_CHAT_NOTICE
         } else {
@@ -306,7 +306,7 @@ impl AppState {
         }
     }
 
-    pub fn activate_call_row(&mut self, row: &CallRow, cx: &mut Context<Self>) {
+    pub fn activate_call_row(&mut self, row: &CallRow, cx: &mut dyn Host) {
         if row.meeting {
             self.open_chat_of_call_row(row, cx);
         } else {

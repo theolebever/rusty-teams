@@ -1,8 +1,8 @@
 use calling::{CallCommand, DeviceChoice, MuteCommand, ShareKind};
-use gpui_kit::*;
 use serde_json::json;
 
 use super::join::JoinMode;
+use crate::Host;
 use crate::app_state::AppState;
 
 pub const JOIN_FLAG: &str = "--join";
@@ -94,17 +94,23 @@ impl RemoteCommand {
 
 impl AppState {
     /// Commands a second `teams` process forwards, used by the call end-to-end test.
-    pub fn run_remote_command(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn run_remote_command(&mut self, text: &str, cx: &mut dyn Host) {
         match RemoteCommand::decode(text) {
             Some(RemoteCommand::Join(link)) => {
                 self.join_link(&link, JoinMode::Direct, cx);
             }
             Some(RemoteCommand::HangUp) => self.leave_call(cx),
             Some(RemoteCommand::AdmitAll) => self.admit_all_call_guests(cx),
-            Some(RemoteCommand::Unmute) => self.send_call_command(CallCommand::Mute(MuteCommand::Unmute)),
-            Some(RemoteCommand::Mute) => self.send_call_command(CallCommand::Mute(MuteCommand::Mute)),
+            Some(RemoteCommand::Unmute) => {
+                self.send_call_command(CallCommand::Mute(MuteCommand::Unmute))
+            }
+            Some(RemoteCommand::Mute) => {
+                self.send_call_command(CallCommand::Mute(MuteCommand::Mute))
+            }
             Some(RemoteCommand::Camera(on)) => self.send_call_command(CallCommand::SetCamera(on)),
-            Some(RemoteCommand::RefreshShareSources) => self.send_call_command(CallCommand::RefreshShareSources),
+            Some(RemoteCommand::RefreshShareSources) => {
+                self.send_call_command(CallCommand::RefreshShareSources)
+            }
             Some(RemoteCommand::ShareScreen) => self.share_first_screen(),
             Some(RemoteCommand::StopShare) => self.send_call_command(CallCommand::StopShare),
             Some(RemoteCommand::Input(name)) => self.switch_input_for_test(&name),

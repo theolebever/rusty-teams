@@ -2,11 +2,11 @@ use chatsvc::{CalendarEvent, Repeat, Reply, ResponseType};
 
 pub use app_backend::schedule::{Invitee, MeetingDraft, attendee_for};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
-use gpui_kit::Context;
 use tokio::sync::oneshot;
 
 use super::actions::NOT_CONNECTED_NOTICE;
 use super::agenda::demo_join_url;
+use crate::Host;
 use crate::app_state::AppState;
 use crate::runtime;
 
@@ -103,7 +103,7 @@ fn demo_event(draft: &MeetingDraft, serial: u64) -> CalendarEvent {
 }
 
 impl AppState {
-    pub fn load_own_time_zone(&mut self, cx: &mut Context<Self>) {
+    pub fn load_own_time_zone(&mut self, cx: &mut dyn Host) {
         if self.own_time_zone.is_some() || self.own_time_zone_requested || self.own_email.is_empty()
         {
             return;
@@ -114,21 +114,21 @@ impl AppState {
         self.own_time_zone_requested = true;
         let mail = self.own_email.clone();
         let looked_up = runtime::spawn(async move { launcher.time_zone_name(&mail).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let time_zone_name = looked_up.await.ok().flatten();
-            this.update(cx, |state, _| {
+            this.update(move |state, _| {
                 state.own_time_zone_requested = time_zone_name.is_some();
                 state.own_time_zone = time_zone_name;
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub fn create_meeting(
         &mut self,
         draft: MeetingDraft,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> oneshot::Receiver<Result<(), String>> {
         let (sender, receiver) = oneshot::channel();
         if self.mode.demo {
@@ -147,21 +147,22 @@ impl AppState {
             return receiver;
         };
         let created = runtime::spawn(async move { launcher.create_meeting(draft).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = created
                 .await
                 .unwrap_or_else(|_| Err("The request was cancelled.".to_owned()))
                 .map(|_| ());
             if outcome.is_ok() {
-                this.update(cx, |state, cx| state.refresh_calendar(cx)).ok();
+                this.update(move |state, cx| state.refresh_calendar(cx))
+                    .await;
             }
             let _ = sender.send(outcome);
-        })
-        .detach();
+        }));
         receiver
     }
 
-    pub fn toggle_rsvp_send_response(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_rsvp_send_response(&mut self, cx: &mut dyn Host) {
         self.rsvp_send_response = !self.rsvp_send_response;
         cx.notify();
     }
@@ -178,7 +179,7 @@ impl AppState {
         self.calls_list.invalidate();
     }
 
-    pub fn respond_to_event(&mut self, event_key: &str, reply: Reply, cx: &mut Context<Self>) {
+    pub fn respond_to_event(&mut self, event_key: &str, reply: Reply, cx: &mut dyn Host) {
         if self.mode.read_only {
             self.raise_notice(RESPONSE_FAILED_NOTICE.to_owned(), None, cx);
             return;
@@ -208,9 +209,10 @@ impl AppState {
                     .await
             }
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let sent = answered.await.is_ok_and(|result| result.is_ok());
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if sent {
                     state.refresh_calendar(cx);
                     return;
@@ -218,9 +220,8 @@ impl AppState {
                 state.set_event_response(&event_id, previous);
                 state.raise_notice(RESPONSE_FAILED_NOTICE.to_owned(), None, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 

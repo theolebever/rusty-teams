@@ -44,7 +44,7 @@ use super::title_bar::{mode_label, render_title_bar, update_button};
 use crate::activity::ActivityCenter;
 use crate::agents::{AgentRunsEvent, StartDialog, StartDialogEvent, StartRequest};
 use crate::app_state::{AppEvent, AppState, QuickView, Selection, selection_for};
-use crate::call::{CallMedia, CallWindows, ZoomStep};
+use crate::call::{CallWindows, ZoomStep};
 use crate::notice::NoticeAction;
 use crate::notify::NotificationCenter;
 use crate::settings::{SettingsDialog, SettingsDialogEvent};
@@ -249,8 +249,6 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let call_media = cx.new(|_| CallMedia);
-        state.update(cx, |state, _| state.call_media = Some(call_media.clone()));
         let activity = cx.new(|cx| ActivityCenter::new(state.clone(), window, cx));
         let activity_panel = cx.new(|cx| ActivityPanel::new(state.clone(), activity.clone(), cx));
         let quick_pane = cx.new(|cx| QuickViewPane::new(state.clone(), activity.clone(), cx));

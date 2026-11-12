@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::app_state::{AppEvent, AppState};
 
@@ -25,14 +26,41 @@ pub trait Host {
     fn write_clipboard(&mut self, text: String);
 }
 
+/// What a host gives spawned tasks: a way back to the state, a timer and a
+/// pool for blocking work. GPUI uses its executors, which keeps tests deterministic.
+pub trait TaskHost {
+    /// Runs the job on the UI thread, now or later. False once the state is gone.
+    fn post(&self, job: Job) -> bool;
+    fn timer(&self, duration: Duration) -> LocalTask;
+    /// Runs `work` off the UI thread; the task ends when it is done.
+    fn background(&self, work: Box<dyn FnOnce() + Send>) -> LocalTask;
+}
+
 /// Posts jobs to the UI thread. Cheap to clone, not `Send`.
 #[derive(Clone)]
-pub struct StateHandle(Rc<dyn Fn(Job) -> bool>);
+pub struct StateHandle(Rc<dyn TaskHost>);
 
 impl StateHandle {
-    /// `post` runs the job on the UI thread, now or later, and returns false once the state is gone.
-    pub fn new(post: impl Fn(Job) -> bool + 'static) -> Self {
-        Self(Rc::new(post))
+    pub fn new(host: impl TaskHost + 'static) -> Self {
+        Self(Rc::new(host))
+    }
+
+    pub async fn sleep(&self, duration: Duration) {
+        self.0.timer(duration).await;
+    }
+
+    /// Runs blocking work (disk, SQLite) off the UI thread.
+    pub async fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.0
+            .background(Box::new(move || {
+                let _ = sender.send(work());
+            }))
+            .await;
+        receiver.await.ok()
     }
 
     /// Runs `f` on the UI thread. `None` once the state is gone.
@@ -45,18 +73,55 @@ impl StateHandle {
         let job: Job = Box::new(move |state, cx| {
             let _ = sender.send(f(state, cx));
         });
-        if !(self.0)(job) {
+        if !self.0.post(job) {
             return None;
         }
         receiver.await.ok()
     }
 }
 
-mod gpui_host {
-    use gpui_kit::{App, ClipboardItem, Context};
+pub use gpui_host::follow_state;
 
-    use super::{Host, LocalTask, StateHandle};
-    use crate::app_state::{AppEvent, AppState};
+mod gpui_host {
+    use std::time::Duration;
+
+    use gpui_kit::{App, AsyncApp, BackgroundExecutor, ClipboardItem, Context, Entity, WeakEntity};
+
+    use super::{Host, Job, LocalTask, StateHandle, TaskHost};
+    use crate::app_state::{AgentNote, AppEvent, AppState};
+    use crate::{agent_api, task_dialog};
+
+    /// Carries out the events that need GPUI-only parts: the agent API, hosted task
+    /// dialogs and the textures of call pictures that are no longer shown.
+    pub fn follow_state(state: &Entity<AppState>, cx: &mut App) {
+        cx.subscribe(state, |state, event: &AppEvent, cx| {
+            app_call_model::pictures::release_retired(cx);
+            forward(state, event, cx);
+        })
+        .detach();
+    }
+
+    fn forward(state: Entity<AppState>, event: &AppEvent, cx: &mut App) {
+        match event {
+            AppEvent::Agents(AgentNote::EngineReady(engine)) => {
+                agent_api::engine_ready(engine.clone(), cx)
+            }
+            AppEvent::Agents(AgentNote::Caption {
+                meeting_chat_id,
+                caption_id,
+                speaker,
+                text,
+            }) => agent_api::note_caption(meeting_chat_id, caption_id, speaker, text, cx),
+            AppEvent::Agents(AgentNote::ClearCaptions(meeting_chat_id)) => {
+                agent_api::clear_captions(meeting_chat_id, cx)
+            }
+            AppEvent::UrlDialog(dialog) => {
+                let engine = state.read(cx).engine.clone();
+                task_dialog::open_url_dialog(dialog.clone(), engine, cx);
+            }
+            _ => {}
+        }
+    }
 
     impl Host for Context<'_, AppState> {
         fn notify(&mut self) {
@@ -72,11 +137,10 @@ mod gpui_host {
         }
 
         fn handle(&mut self) -> StateHandle {
-            let this = self.weak_entity();
-            let cx = self.to_async();
-            StateHandle::new(move |job| {
-                let mut cx = cx.clone();
-                this.update(&mut cx, |state, cx| job(state, cx)).is_ok()
+            StateHandle::new(GpuiTasks {
+                state: self.weak_entity(),
+                cx: self.to_async(),
+                executor: self.background_executor().clone(),
             })
         }
 
@@ -86,6 +150,29 @@ mod gpui_host {
 
         fn write_clipboard(&mut self, text: String) {
             App::write_to_clipboard(self, ClipboardItem::new_string(text));
+        }
+    }
+
+    struct GpuiTasks {
+        state: WeakEntity<AppState>,
+        cx: AsyncApp,
+        executor: BackgroundExecutor,
+    }
+
+    impl TaskHost for GpuiTasks {
+        fn post(&self, job: Job) -> bool {
+            let mut cx = self.cx.clone();
+            self.state
+                .update(&mut cx, |state, cx| job(state, cx))
+                .is_ok()
+        }
+
+        fn timer(&self, duration: Duration) -> LocalTask {
+            Box::pin(self.executor.timer(duration))
+        }
+
+        fn background(&self, work: Box<dyn FnOnce() + Send>) -> LocalTask {
+            Box::pin(self.executor.spawn(async move { work() }))
         }
     }
 }

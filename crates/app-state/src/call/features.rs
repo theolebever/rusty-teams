@@ -9,6 +9,7 @@ use super::health::HealthBanner;
 use super::model::{ActiveCall, BreakoutState, CallKind, CallModel, PendingMove};
 use super::recording_menu::RecordAction;
 use super::target::plan_for_chat;
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::data::is_one_on_one;
 
@@ -39,7 +40,7 @@ fn return_move(room: &BreakoutState) -> PendingMove {
 }
 
 impl AppState {
-    pub fn run_call_record_action(&mut self, action: RecordAction, _cx: &mut Context<Self>) {
+    pub fn run_call_record_action(&mut self, action: RecordAction, _cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_ref()
@@ -57,16 +58,12 @@ impl AppState {
         self.send_call_command(command);
     }
 
-    pub fn open_call_transcript(
-        &mut self,
-        panel: AnyView,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_call_transcript(&mut self, panel: AnyView, cx: &mut dyn Host) {
         self.transcript_panel = Some(panel);
         self.show_call_transcript(cx);
     }
 
-    pub(super) fn show_call_transcript(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn show_call_transcript(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -85,7 +82,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn close_call_transcript(&mut self, cx: &mut Context<Self>) {
+    pub fn close_call_transcript(&mut self, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.transcript_open = false;
         }
@@ -94,7 +91,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn choose_call_caption_language(&mut self, tag: &str, cx: &mut Context<Self>) {
+    pub fn choose_call_caption_language(&mut self, tag: &str, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -121,7 +118,7 @@ impl AppState {
         }
     }
 
-    pub fn accept_recording_notice(&mut self, _cx: &mut Context<Self>) {
+    pub fn accept_recording_notice(&mut self, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -131,7 +128,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_call_hold(&mut self, _cx: &mut Context<Self>) {
+    pub fn toggle_call_hold(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self.call.as_ref() else {
             return;
         };
@@ -143,19 +140,19 @@ impl AppState {
         self.send_call_command(CallCommand::Hold(hold));
     }
 
-    pub fn set_call_incoming_video(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_call_incoming_video(&mut self, enabled: bool, cx: &mut dyn Host) {
         self.send_call_command(CallCommand::SetIncomingVideo(enabled));
         cx.notify();
     }
 
-    pub fn close_call_health_banner(&mut self, banner: HealthBanner, cx: &mut Context<Self>) {
+    pub fn close_call_health_banner(&mut self, banner: HealthBanner, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.model.health.close_banner(banner);
             cx.notify();
         }
     }
 
-    pub fn turn_off_call_effects(&mut self, cx: &mut Context<Self>) {
+    pub fn turn_off_call_effects(&mut self, cx: &mut dyn Host) {
         self.set_call_background(BackgroundPick::None, cx);
         let effects = calling::CameraEffects {
             auto_framing: false,
@@ -166,7 +163,7 @@ impl AppState {
         self.set_call_effects(effects, cx);
     }
 
-    pub fn open_call_whiteboard(&mut self, cx: &mut Context<Self>) {
+    pub fn open_call_whiteboard(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_ref()
@@ -212,24 +209,20 @@ impl AppState {
             && self.held_call.is_none()
     }
 
-    pub fn open_transfer_picker(
-        &mut self,
-        picker: AnyView,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_transfer_picker(&mut self, picker: AnyView, cx: &mut dyn Host) {
         if self.can_transfer_call() {
             self.transfer_picker = Some(picker);
             cx.notify();
         }
     }
 
-    pub fn close_transfer_picker(&mut self, cx: &mut Context<Self>) {
+    pub fn close_transfer_picker(&mut self, cx: &mut dyn Host) {
         if self.transfer_picker.take().is_some() {
             cx.notify();
         }
     }
 
-    pub fn transfer_call_blind(&mut self, target: TransferCandidate, cx: &mut Context<Self>) {
+    pub fn transfer_call_blind(&mut self, target: TransferCandidate, cx: &mut dyn Host) {
         self.close_transfer_picker(cx);
         if !self.can_transfer_call() {
             return;
@@ -244,11 +237,7 @@ impl AppState {
         });
     }
 
-    pub(super) fn begin_breakout_move(
-        &mut self,
-        moved: calling::BreakoutMove,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn begin_breakout_move(&mut self, moved: calling::BreakoutMove, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -293,7 +282,7 @@ impl AppState {
         self.send_call_command(CallCommand::Hangup);
     }
 
-    pub fn return_to_main_meeting(&mut self, _cx: &mut Context<Self>) {
+    pub fn return_to_main_meeting(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -313,7 +302,7 @@ impl AppState {
         self.send_call_command(CallCommand::Hangup);
     }
 
-    pub(super) fn join_moved_call(&mut self, moved: PendingMove, cx: &mut Context<Self>) {
+    pub(super) fn join_moved_call(&mut self, moved: PendingMove, cx: &mut dyn Host) {
         let demo = DemoCall::Meeting {
             guests: super::demo::demo_guests(DEMO_ROOM_GUESTS),
             lobby: false,

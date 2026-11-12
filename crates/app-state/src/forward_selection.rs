@@ -1,5 +1,4 @@
-use gpui_kit::*;
-
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::rows::{Delivery, MessageRow};
 
@@ -118,7 +117,7 @@ impl AppState {
         &mut self,
         conversation_id: &str,
         message_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.mode.read_only {
             self.raise_notice("Read-only mode: message not forwarded".to_owned(), None, cx);
@@ -129,7 +128,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_forward_selected(&mut self, message_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_forward_selected(&mut self, message_id: &str, cx: &mut dyn Host) {
         let Some(selection) = self.forward_selection.as_mut() else {
             return;
         };
@@ -138,7 +137,7 @@ impl AppState {
         }
     }
 
-    pub fn cancel_forward_selection(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_forward_selection(&mut self, cx: &mut dyn Host) {
         if self.forward_selection.take().is_some() {
             cx.emit(AppEvent::ForwardSelection);
             cx.notify();
@@ -146,7 +145,7 @@ impl AppState {
     }
 
     /// `ordered_ids` are the selected messages, oldest first. The selection stays until the forward is sent.
-    pub fn forward_selected(&mut self, ordered_ids: &[String], cx: &mut Context<Self>) {
+    pub fn forward_selected(&mut self, ordered_ids: &[String], cx: &mut dyn Host) {
         let Some(conversation_id) = self
             .forward_selection
             .as_ref()

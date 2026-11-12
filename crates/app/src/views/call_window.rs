@@ -3,18 +3,18 @@ use gpui_kit::component::{TitleBar, elevation, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::actions::ToggleCallMute;
 use super::call_end_view::render_call_end;
 use super::call_pop_out::zoom_listener;
 use super::call_stage::render_stage_overlay;
 use super::call_view::render_call_view;
 use super::conversation::ConversationView;
-use super::actions::ToggleCallMute;
 use super::shortcuts::{
     HangUpCall, OpenLobbyList, PushToTalk, ToggleCallCamera, ToggleCallFullscreen, ToggleCallHand,
     ToggleCallShare, ZoomShareIn, ZoomShareOut, ZoomShareReset,
 };
 use super::title_bar::{TITLE_BAR_HEIGHT, app_icon_image};
-use crate::app_state::{AppState, Selection};
+use crate::app_state::{AppEvent, AppState, Selection};
 use crate::call::ZoomStep;
 use crate::theme;
 
@@ -43,17 +43,17 @@ pub struct CallWindowView {
     fullscreen: bool,
     was_fullscreen: bool,
     _app_subscription: Subscription,
-    _media_subscription: Option<Subscription>,
+    _media_subscription: Subscription,
 }
 
 impl CallWindowView {
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app_subscription = cx.observe(&app, |_, _, cx| cx.notify());
-        let media_subscription = app
-            .read(cx)
-            .call_media
-            .clone()
-            .map(|media| cx.observe(&media, |_, _, cx| cx.notify()));
+        let media_subscription = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
+            if matches!(event, AppEvent::CallMedia) {
+                cx.notify();
+            }
+        });
         let closing_app = app.clone();
         window.on_window_should_close(cx, move |_, cx| {
             leave_or_dismiss(&closing_app, cx);
@@ -134,7 +134,7 @@ impl CallWindowView {
 
 fn call_action<A: Action>(
     app: &Entity<AppState>,
-    action: fn(&mut AppState, &mut Context<AppState>),
+    action: fn(&mut AppState, &mut dyn crate::Host),
 ) -> impl Fn(&A, &mut Window, &mut App) + 'static {
     let app = app.clone();
     move |_, _, cx| app.update(cx, |state, cx| action(state, cx))

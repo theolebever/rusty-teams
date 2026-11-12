@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui_kit::Context;
 use teams_core::ScheduledDraft;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::runtime;
 
@@ -65,7 +65,7 @@ pub fn due_conversations(drafts: &[ScheduledDraft], now: DateTime<Utc>) -> Vec<S
 }
 
 impl AppState {
-    pub fn refresh_scheduled(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_scheduled(&mut self, cx: &mut dyn Host) {
         if self.mode.demo {
             return;
         }
@@ -73,16 +73,16 @@ impl AppState {
             return;
         };
         let receiver = runtime::spawn(async move { engine.scheduled_messages().await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             if let Ok(Ok(drafts)) = receiver.await {
-                this.update(cx, |state, cx| state.apply_scheduled(drafts, cx))
-                    .ok();
+                this.update(move |state, cx| state.apply_scheduled(drafts, cx))
+                    .await;
             }
-        })
-        .detach();
+        }));
     }
 
-    pub fn apply_scheduled(&mut self, drafts: Vec<ScheduledDraft>, cx: &mut Context<Self>) {
+    pub fn apply_scheduled(&mut self, drafts: Vec<ScheduledDraft>, cx: &mut dyn Host) {
         let now = Utc::now();
         let delivered = due_conversations(&self.scheduled, now);
         self.scheduled = pending_drafts(keep_unconfirmed(drafts, &self.scheduled), now);
@@ -92,7 +92,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn scheduled_upserted(&mut self, draft: ScheduledDraft, cx: &mut Context<Self>) {
+    pub fn scheduled_upserted(&mut self, draft: ScheduledDraft, cx: &mut dyn Host) {
         let mut drafts = std::mem::take(&mut self.scheduled);
         let unconfirmed = draft.id.is_empty();
         let same = |known: &ScheduledDraft| {
@@ -112,7 +112,7 @@ impl AppState {
         }
     }
 
-    pub fn scheduled_removed(&mut self, draft_id: &str, cx: &mut Context<Self>) {
+    pub fn scheduled_removed(&mut self, draft_id: &str, cx: &mut dyn Host) {
         let mut drafts = std::mem::take(&mut self.scheduled);
         drafts.retain(|draft| draft.id != draft_id);
         self.apply_scheduled(drafts, cx);
@@ -131,24 +131,24 @@ impl AppState {
         }
     }
 
-    fn poll_scheduled(&mut self, cx: &mut Context<Self>) {
+    fn poll_scheduled(&mut self, cx: &mut dyn Host) {
         if self.scheduled.is_empty() || self.scheduled_polling {
             return;
         }
         self.scheduled_polling = true;
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             loop {
-                cx.background_executor().timer(REFRESH_INTERVAL).await;
-                let keep_going = this.update(cx, |state, cx| state.tick_scheduled(cx));
+                this.sleep(REFRESH_INTERVAL).await;
+                let keep_going = this.update(move |state, cx| state.tick_scheduled(cx)).await;
                 if !keep_going.unwrap_or(false) {
                     break;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
-    fn tick_scheduled(&mut self, cx: &mut Context<Self>) -> bool {
+    fn tick_scheduled(&mut self, cx: &mut dyn Host) -> bool {
         let keep_going = !self.scheduled.is_empty();
         self.scheduled_polling = keep_going;
         let current = self.scheduled.clone();

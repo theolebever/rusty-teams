@@ -44,7 +44,7 @@ impl EditChannelForm {
             cx.subscribe_in(&name, window, Self::on_input),
             cx.subscribe_in(&description, window, Self::on_input),
         ];
-        let loading = state.update(cx, |app, cx| app.load_channel_description(&channel_id, cx));
+        let loading = state.read(cx).load_channel_description(&channel_id);
         cx.spawn_in(window, async move |form, cx| {
             let loaded = loading.await;
             form.update_in(cx, |form, window, cx| {

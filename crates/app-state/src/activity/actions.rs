@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use gpui_kit::*;
-
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::backend::Engine;
 
 impl AppState {
-    pub fn mark_activity_read(&mut self, message_ids: Vec<String>, cx: &mut Context<Self>) {
+    pub fn mark_activity_read(&mut self, message_ids: Vec<String>, cx: &mut dyn Host) {
         let Some(engine) = self.activity_engine() else {
             return;
         };
@@ -16,15 +15,15 @@ impl AppState {
             }
             Ok::<(), teams_core::Error>(())
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             if !matches!(receiver.await, Ok(Ok(()))) {
-                this.update(cx, |_, cx| cx.emit(AppEvent::Activity)).ok();
+                this.update(move |_, cx| cx.emit(AppEvent::Activity)).await;
             }
-        })
-        .detach();
+        }));
     }
 
-    pub fn mark_all_activity_read(&mut self, cx: &mut Context<Self>) {
+    pub fn mark_all_activity_read(&mut self, cx: &mut dyn Host) {
         let Some(Some(engine)) = self.chat_action_engine(cx) else {
             return;
         };

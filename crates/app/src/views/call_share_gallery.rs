@@ -9,7 +9,7 @@ use super::call_mini_window::{CONTROL_SIZE, WINDOW_RADIUS};
 use super::call_view::{
     camera_button, leave_button, mute_button, plain_own_tile, plain_person_tile, round_control,
 };
-use crate::app_state::AppState;
+use crate::app_state::{AppEvent, AppState};
 use crate::call::share_overlay::{
     GALLERY_CONTROLS_HEIGHT, GALLERY_DIVIDER_HEIGHT, GALLERY_INSET, GALLERY_TILE_WIDTH,
     GALLERY_TITLE_HEIGHT, gallery_candidates,
@@ -29,7 +29,7 @@ pub struct ShareGalleryView {
     app: Entity<AppState>,
     _windows_subscription: Subscription,
     _app_subscription: Subscription,
-    _media_subscription: Option<Subscription>,
+    _media_subscription: Subscription,
 }
 
 impl ShareGalleryView {
@@ -37,11 +37,11 @@ impl ShareGalleryView {
         let app = windows.read(cx).app().clone();
         let windows_subscription = cx.observe(&windows, |_, _, cx| cx.notify());
         let app_subscription = cx.observe(&app, |_, _, cx| cx.notify());
-        let media_subscription = app
-            .read(cx)
-            .call_media
-            .clone()
-            .map(|media| cx.observe(&media, |_, _, cx| cx.notify()));
+        let media_subscription = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
+            if matches!(event, AppEvent::CallMedia) {
+                cx.notify();
+            }
+        });
         ShareGalleryView {
             windows,
             app,

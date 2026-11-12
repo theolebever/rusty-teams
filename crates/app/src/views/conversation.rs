@@ -760,6 +760,9 @@ impl ConversationView {
             | AppEvent::CallTone(_)
             | AppEvent::SoundSettings
             | AppEvent::FollowedStatus { .. }
+            | AppEvent::UrlDialog(_)
+            | AppEvent::CallMedia
+            | AppEvent::Agents(_)
             | AppEvent::Call => {}
             AppEvent::LiveMeeting => cx.notify(),
             AppEvent::Saved => cx.notify(),

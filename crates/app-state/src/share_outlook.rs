@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::*;
 use store::MessageRecord;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::notice::short_error;
 use crate::rows::message_text;
@@ -46,7 +46,7 @@ impl AppState {
         conversation_id: &str,
         message_id: &str,
         conversation_title: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(record) = self.message_record(conversation_id, message_id) else {
             return;
@@ -63,22 +63,22 @@ impl AppState {
         let (conversation_id, message_id) = (conversation_id.to_owned(), message_id.to_owned());
         let receiver =
             runtime::spawn(async move { engine.message_link(&conversation_id, &message_id).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let link = match receiver.await {
                 Ok(Ok(link)) => Ok(link),
                 Ok(Err(error)) => Err(short_error(&error)),
                 Err(_) => Err("cancelled".to_owned()),
             };
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if let Err(reason) = &link {
                     state.raise_notice(format!("No link to the message: {reason}"), None, cx);
                 }
                 let body = share_body(&record, link.as_deref().ok());
                 cx.open_url(&teams_core::outlook_compose_link(&subject, &body));
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 

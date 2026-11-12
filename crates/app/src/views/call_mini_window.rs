@@ -10,7 +10,7 @@ use super::avatar::person_avatar;
 use super::call_share_gallery::{SHOW_MORE_PEOPLE, view_switch_button};
 use super::call_view::{camera_button, leave_button, mute_button, round_control, status_line};
 use super::widgets::icon;
-use crate::app_state::AppState;
+use crate::app_state::{AppEvent, AppState};
 use crate::call::{CallModel, CallWindows, Tile, TileState};
 use crate::theme;
 
@@ -27,18 +27,18 @@ pub struct MiniWindowView {
     windows: Entity<CallWindows>,
     app: Entity<AppState>,
     _app_subscription: Subscription,
-    _media_subscription: Option<Subscription>,
+    _media_subscription: Subscription,
 }
 
 impl MiniWindowView {
     pub fn new(windows: Entity<CallWindows>, cx: &mut Context<Self>) -> Self {
         let app = windows.read(cx).app().clone();
         let app_subscription = cx.observe(&app, |_, _, cx| cx.notify());
-        let media_subscription = app
-            .read(cx)
-            .call_media
-            .clone()
-            .map(|media| cx.observe(&media, |_, _, cx| cx.notify()));
+        let media_subscription = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
+            if matches!(event, AppEvent::CallMedia) {
+                cx.notify();
+            }
+        });
         MiniWindowView {
             windows,
             app,

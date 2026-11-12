@@ -5,6 +5,7 @@ use std::time::Instant;
 use gpui_kit::*;
 use teams_core::PersonProfile;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState, Selection};
 use crate::data::existing_one_on_one;
 use crate::demo_profiles;
@@ -33,12 +34,7 @@ pub struct ProfileRequest {
 pub type ProfileCache = HashMap<String, ProfileEntry>;
 
 impl AppState {
-    pub fn open_profile_card(
-        &mut self,
-        user_id: &str,
-        anchor: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_profile_card(&mut self, user_id: &str, anchor: Point<Pixels>, cx: &mut dyn Host) {
         self.profile_request = Some(ProfileRequest {
             user_id: user_id.to_owned(),
             anchor,
@@ -53,7 +49,7 @@ impl AppState {
         self.profile_request.take()
     }
 
-    pub fn request_profile(&mut self, user_id: &str, force: bool, cx: &mut Context<Self>) {
+    pub fn request_profile(&mut self, user_id: &str, force: bool, cx: &mut dyn Host) {
         let now = Instant::now();
         let entry = self.profiles.entry(user_id.to_owned()).or_default();
         if entry.fetching || (!force && entry.is_fresh(now)) {
@@ -78,21 +74,21 @@ impl AppState {
         entry.fetching = true;
         entry.failed = false;
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let result = receiver
                 .await
                 .unwrap_or_else(|_| Err("cancelled".to_owned()));
-            this.update(cx, |state, cx| state.finish_profile(&owned_id, result, cx))
-                .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.finish_profile(&owned_id, result, cx))
+                .await;
+        }));
     }
 
     fn finish_profile(
         &mut self,
         user_id: &str,
         result: Result<PersonProfile, String>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let entry = self.profiles.entry(user_id.to_owned()).or_default();
         entry.fetching = false;
@@ -114,19 +110,19 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn copy_profile_email(&mut self, email: &str, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(email.to_owned()));
+    pub fn copy_profile_email(&mut self, email: &str, cx: &mut dyn Host) {
+        cx.write_clipboard(email.to_owned());
         self.raise_notice("Email copied".to_owned(), None, cx);
     }
 
-    pub fn open_chat_with(&mut self, user_id: &str, cx: &mut Context<Self>) {
+    pub fn open_chat_with(&mut self, user_id: &str, cx: &mut dyn Host) {
         self.with_one_on_one(user_id, cx, |state, chat_id, cx| {
             state.select(Selection::Chat(chat_id.to_owned()), cx)
         });
     }
 
     /// Teams starts a 1:1 call from the profile card; the 1:1 chat is the call thread.
-    pub fn call_person(&mut self, user_id: &str, with_video: bool, cx: &mut Context<Self>) {
+    pub fn call_person(&mut self, user_id: &str, with_video: bool, cx: &mut dyn Host) {
         self.with_one_on_one(user_id, cx, move |state, chat_id, cx| {
             if with_video {
                 state.start_chat_video_call(chat_id, cx);
@@ -139,8 +135,8 @@ impl AppState {
     fn with_one_on_one(
         &mut self,
         user_id: &str,
-        cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Self, &str, &mut Context<Self>) + 'static,
+        cx: &mut dyn Host,
+        then: impl FnOnce(&mut Self, &str, &mut dyn Host) + 'static,
     ) {
         let existing =
             existing_one_on_one(&self.sidebar.chats, self.directory.me.as_ref(), user_id)
@@ -164,11 +160,12 @@ impl AppState {
                 .await
                 .map_err(|error| short_error(&error))
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = receiver
                 .await
                 .unwrap_or_else(|_| Err("cancelled".to_owned()));
-            this.update(cx, |state, cx| match outcome {
+            this.update(move |state, cx| match outcome {
                 Ok(chat_id) => {
                     state.reload_sidebar(cx);
                     then(state, &chat_id, cx);
@@ -177,8 +174,7 @@ impl AppState {
                     state.raise_notice(format!("Chat could not be opened: {reason}"), None, cx)
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }

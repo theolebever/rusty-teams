@@ -8,6 +8,7 @@ use teams_core::{
 use super::actions::{MEETING_UNAVAILABLE_NOTICE, NOT_CONNECTED_NOTICE};
 use super::launcher::NOT_READY;
 use super::prejoin::{DemoMeeting, MeetingJoin};
+use crate::Host;
 use crate::app_state::{AppState, selection_for, selection_title};
 use crate::runtime;
 
@@ -35,12 +36,7 @@ pub(crate) enum JoinMode {
 }
 
 impl AppState {
-    fn join_resolved_meeting(
-        &mut self,
-        target: MeetingTarget,
-        mode: JoinMode,
-        cx: &mut Context<Self>,
-    ) {
+    fn join_resolved_meeting(&mut self, target: MeetingTarget, mode: JoinMode, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -73,7 +69,7 @@ impl AppState {
         }
     }
 
-    fn join_meeting_code(&mut self, code: MeetingCode, mode: JoinMode, cx: &mut Context<Self>) {
+    fn join_meeting_code(&mut self, code: MeetingCode, mode: JoinMode, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -94,20 +90,20 @@ impl AppState {
             return;
         };
         let receiver = runtime::spawn(async move { launcher.resolve_meeting(&meeting_data).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let resolved = receiver.await.ok().unwrap_or_else(|| Err(String::new()));
-            this.update(cx, |state, cx| match resolved {
+            this.update(move |state, cx| match resolved {
                 Ok(target) => state.join_resolved_meeting(target, mode, cx),
                 Err(message) if message == NOT_READY => state.raise_notice(message, None, cx),
                 Err(_) => state.raise_notice(NOT_FOUND_NOTICE.to_owned(), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     /// Teams offers Join in every meeting chat; without a running call the meeting starts from its join link.
-    pub fn join_chat_meeting(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn join_chat_meeting(&mut self, chat_id: &str, cx: &mut dyn Host) {
         if self.call.is_some() || self.running_meeting(chat_id).is_some() || self.mode.demo {
             self.join_meeting_call(chat_id, cx);
             return;
@@ -118,22 +114,22 @@ impl AppState {
         };
         let chat_id = chat_id.to_owned();
         let receiver = runtime::spawn(async move { engine.meeting_join_url(&chat_id).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let url = receiver.await.ok().and_then(Result::ok).flatten();
-            this.update(cx, |state, cx| match url {
+            this.update(move |state, cx| match url {
                 Some(url) => state.join_link(&url, JoinMode::Prejoin, cx),
                 None => state.raise_notice(MEETING_UNAVAILABLE_NOTICE.to_owned(), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn join_meeting_link(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn join_meeting_link(&mut self, text: &str, cx: &mut dyn Host) {
         self.join_link(text, JoinMode::Prejoin, cx);
     }
 
-    pub(crate) fn join_link(&mut self, text: &str, mode: JoinMode, cx: &mut Context<Self>) {
+    pub(crate) fn join_link(&mut self, text: &str, mode: JoinMode, cx: &mut dyn Host) {
         match parse_meeting_link(text) {
             Some(MeetingLink::Thread(meeting)) => {
                 self.join_resolved_meeting(meeting_target(&meeting), mode, cx)
@@ -143,7 +139,7 @@ impl AppState {
         }
     }
 
-    pub fn start_meet_now(&mut self, cx: &mut Context<Self>) {
+    pub fn start_meet_now(&mut self, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -169,9 +165,10 @@ impl AppState {
         cx.notify();
         let receiver =
             runtime::spawn(async move { launcher.create_meet_now(MEET_NOW_SUBJECT).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let created = receiver.await.ok().and_then(Result::ok);
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.meet_now_pending = false;
                 match created {
                     Some(url) => state.join_link(&url, JoinMode::Prejoin, cx),
@@ -179,16 +176,15 @@ impl AppState {
                 }
                 cx.notify();
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub fn join_meeting_by_id(
         &mut self,
         meeting_id: &str,
         passcode: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> Result<(), String> {
         if let Some((url, _)) = find_meeting_link(meeting_id) {
             self.join_meeting_link(&url, cx);

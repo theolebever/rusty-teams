@@ -1,14 +1,13 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::*;
-
+use crate::Host;
 use crate::app_state::AppState;
 
 const NOTICE_DURATION: Duration = Duration::from_secs(6);
 const MAX_REASON_CHARS: usize = 140;
 
-type NoticeCallback = Rc<dyn Fn(&mut AppState, &mut Context<AppState>)>;
+type NoticeCallback = Rc<dyn Fn(&mut AppState, &mut dyn Host)>;
 
 #[derive(Clone)]
 pub struct NoticeAction {
@@ -17,7 +16,7 @@ pub struct NoticeAction {
 }
 
 impl NoticeAction {
-    pub fn new(label: &str, run: impl Fn(&mut AppState, &mut Context<AppState>) + 'static) -> Self {
+    pub fn new(label: &str, run: impl Fn(&mut AppState, &mut dyn Host) + 'static) -> Self {
         NoticeAction {
             label: label.to_owned(),
             run: Rc::new(run),
@@ -45,37 +44,32 @@ pub fn truncated(text: &str, limit: usize) -> String {
 }
 
 impl AppState {
-    pub fn raise_notice(
-        &mut self,
-        text: String,
-        action: Option<NoticeAction>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn raise_notice(&mut self, text: String, action: Option<NoticeAction>, cx: &mut dyn Host) {
         self.notice_count += 1;
         let id = self.notice_count;
         self.notice = Some(Notice { id, text, action });
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(NOTICE_DURATION).await;
-            this.update(cx, |state, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(NOTICE_DURATION).await;
+            this.update(move |state, cx| {
                 if state.notice.as_ref().is_some_and(|notice| notice.id == id) {
                     state.dismiss_notice(cx);
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
         cx.emit(crate::app_state::AppEvent::Status);
         cx.notify();
     }
 
-    pub fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+    pub fn dismiss_notice(&mut self, cx: &mut dyn Host) {
         if self.notice.take().is_some() {
             cx.emit(crate::app_state::AppEvent::Status);
             cx.notify();
         }
     }
 
-    pub fn run_notice_action(&mut self, cx: &mut Context<Self>) {
+    pub fn run_notice_action(&mut self, cx: &mut dyn Host) {
         let Some(notice) = self.notice.take() else {
             return;
         };

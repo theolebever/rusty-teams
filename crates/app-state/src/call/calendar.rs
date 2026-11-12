@@ -2,10 +2,10 @@ use std::sync::OnceLock;
 
 use chatsvc::CalendarEvent;
 use chrono::{DateTime, Local, Offset, Utc};
-use gpui_kit::Context;
 
 use super::agenda::{AgendaRow, demo_events};
 use super::list::HistoryFilter;
+use crate::Host;
 use crate::app_state::{AppEvent, AppState, Selection, selection_for};
 
 const NO_MEETING_CHAT_NOTICE: &str = "This meeting chat is not available";
@@ -16,14 +16,14 @@ pub(crate) fn demo_anchor() -> DateTime<Utc> {
 }
 
 impl AppState {
-    pub fn apply_calendar(&mut self, events: Vec<CalendarEvent>, cx: &mut Context<Self>) {
+    pub fn apply_calendar(&mut self, events: Vec<CalendarEvent>, cx: &mut dyn Host) {
         self.calendar_events = events;
         self.calls_list.invalidate();
         cx.emit(AppEvent::CallHistory);
         cx.notify();
     }
 
-    pub fn refresh_calendar(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_calendar(&mut self, cx: &mut dyn Host) {
         if self.mode.demo {
             let mut events = demo_events(demo_anchor());
             events.extend(self.demo_meetings.iter().cloned());
@@ -36,25 +36,21 @@ impl AppState {
         }
     }
 
-    pub fn rebuild_calls_list(&mut self, cx: &mut Context<Self>) {
+    pub fn rebuild_calls_list(&mut self, cx: &mut dyn Host) {
         let now = Utc::now();
         let offset = Local::now().offset().fix();
-        self.calls_list.rebuild(
-            &self.call_history,
-            &self.sidebar.chats,
-            now,
-            offset,
-        );
+        self.calls_list
+            .rebuild(&self.call_history, &self.sidebar.chats, now, offset);
         cx.emit(AppEvent::CallHistory);
         cx.notify();
     }
 
-    pub fn set_call_history_filter(&mut self, filter: HistoryFilter, cx: &mut Context<Self>) {
+    pub fn set_call_history_filter(&mut self, filter: HistoryFilter, cx: &mut dyn Host) {
         self.calls_list.set_filter(filter);
         self.rebuild_calls_list(cx);
     }
 
-    pub fn join_agenda_row(&mut self, row: &AgendaRow, cx: &mut Context<Self>) {
+    pub fn join_agenda_row(&mut self, row: &AgendaRow, cx: &mut dyn Host) {
         self.join_calendar_meeting(row.join_url.as_deref(), &row.subject, cx);
     }
 
@@ -62,7 +58,7 @@ impl AppState {
         &mut self,
         join_url: Option<&str>,
         subject: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if let Some(url) = join_url {
             self.join_meeting_link(url, cx);
@@ -72,11 +68,11 @@ impl AppState {
         }
     }
 
-    pub fn open_agenda_chat(&mut self, row: &AgendaRow, cx: &mut Context<Self>) {
+    pub fn open_agenda_chat(&mut self, row: &AgendaRow, cx: &mut dyn Host) {
         self.open_meeting_chat(row.thread_id.as_deref(), cx);
     }
 
-    pub fn open_meeting_chat(&mut self, thread_id: Option<&str>, cx: &mut Context<Self>) {
+    pub fn open_meeting_chat(&mut self, thread_id: Option<&str>, cx: &mut dyn Host) {
         let Some(thread_id) = thread_id else {
             return;
         };

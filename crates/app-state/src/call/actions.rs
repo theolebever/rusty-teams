@@ -5,7 +5,6 @@ use calling::{
     AcceptMode, CallCommand, CallHandle, CallSpec, CallState, CallUpdate, Callee, CameraEffects,
     DeviceChoice, EndReason, EngineEvent, MicSettings, MuteCommand, Reaction, RingSignal, ShareSource, VideoKey,
 };
-use gpui_kit::*;
 
 use super::background::{
     BACKGROUND_META_KEY, BackgroundPick, SHOWN_IMAGES, is_image_file, save_custom_backgrounds,
@@ -14,18 +13,19 @@ use super::demo::{
     DemoCall, DemoScene, demo_caller, demo_guests, demo_ring, demo_video_ring, start_demo_call,
     start_demo_scene_call,
 };
-use super::features::{TransferCandidate, room_closed_move};
-use super::media::CallMedia;
-use super::mic::save_mic;
 use super::end_screen::{CallEndScreen, end_tone};
+use super::features::{TransferCandidate, room_closed_move};
+use super::mic::save_mic;
 use super::model::{ActiveCall, CallKind, CallModel, ConsultTransfer, ended_notice};
 use super::prejoin::{DemoMeeting, MeetingJoin};
 use super::report::{
-    CallRecorder, OwnIdentity, SETTING_META_KEY, SharedRecorder, report_directory, save_report, shared,
+    CallRecorder, OwnIdentity, SETTING_META_KEY, SharedRecorder, report_directory, save_report,
+    shared,
 };
 use super::ring::{MissedCall, RingOutcome};
 use super::target::{is_echo_chat, is_organizer, plan_for_chat};
-use crate::app_state::{AppEvent, AppState, Selection, chat_title, selection_for};
+use crate::Host;
+use crate::app_state::{AgentNote, AppEvent, AppState, Selection, chat_title, selection_for};
 use crate::notice::NoticeAction;
 
 const LOBBY_TONE_THROTTLE: Duration = Duration::from_secs(30);
@@ -114,7 +114,7 @@ fn now_unix() -> i64 {
 }
 
 impl AppState {
-    pub fn start_test_call(&mut self, cx: &mut Context<Self>) {
+    pub fn start_test_call(&mut self, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -125,30 +125,33 @@ impl AppState {
         self.begin_call(handle, CallModel::test(), None, cx);
     }
 
-    pub fn start_chat_call(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn start_chat_call(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         self.start_chat_call_with(conversation_id, false, cx);
     }
 
-    pub fn start_chat_video_call(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn start_chat_video_call(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         self.start_chat_call_with(conversation_id, true, cx);
     }
 
-    fn start_chat_call_with(
-        &mut self,
-        conversation_id: &str,
-        with_video: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_chat_call_with(&mut self, conversation_id: &str, with_video: bool, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
         }
-        let chat = self.sidebar.chats.iter().find(|chat| chat.id == conversation_id);
+        let chat = self
+            .sidebar
+            .chats
+            .iter()
+            .find(|chat| chat.id == conversation_id);
         if chat.is_some_and(is_echo_chat) {
             self.start_test_call(cx);
             return;
         }
-        let chat = self.sidebar.chats.iter().find(|chat| chat.id == conversation_id);
+        let chat = self
+            .sidebar
+            .chats
+            .iter()
+            .find(|chat| chat.id == conversation_id);
         let plan = chat.and_then(|chat| plan_for_chat(chat, self.directory.me.as_ref()));
         let Some(plan) = plan else {
             self.raise_notice(NOT_CALLABLE_NOTICE.to_owned(), None, cx);
@@ -183,7 +186,7 @@ impl AppState {
         }
     }
 
-    pub fn join_meeting_call(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn join_meeting_call(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.call.is_some() {
             self.show_call(true, cx);
             return;
@@ -223,7 +226,7 @@ impl AppState {
         spec: CallSpec,
         demo: DemoCall,
         with_video: bool,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> Option<CallHandle> {
         if self.mode.demo {
             return Some(start_demo_call(demo));
@@ -247,7 +250,7 @@ impl AppState {
         handle: CallHandle,
         model: CallModel,
         conversation_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.call_count += 1;
         let call_id = self.call_count;
@@ -301,7 +304,10 @@ impl AppState {
         if let Some(call) = self.call.as_mut() {
             call.report.clone_from(&report);
         }
-        let rights_conversation = self.call.as_ref().and_then(|call| call.conversation_id.clone());
+        let rights_conversation = self
+            .call
+            .as_ref()
+            .and_then(|call| call.conversation_id.clone());
         self.apply_recording_rights(rights_conversation.as_deref(), cx);
         self.follow_call(call_id, updates, report, cx);
         cx.emit(AppEvent::Call);
@@ -341,20 +347,29 @@ impl AppState {
         }
     }
 
-    fn report_saved(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+    fn report_saved(&mut self, path: std::path::PathBuf, cx: &mut dyn Host) {
         let action = NoticeAction::new("Open folder", move |_, _| {
             crate::downloads::reveal_in_file_manager(&path)
         });
-        let text = match self.notice.as_ref().filter(|notice| notice.action.is_none()) {
-            Some(ended) => format!("{}. {REPORT_SAVED_NOTICE}", ended.text.trim_end_matches('.')),
+        let text = match self
+            .notice
+            .as_ref()
+            .filter(|notice| notice.action.is_none())
+        {
+            Some(ended) => format!(
+                "{}. {REPORT_SAVED_NOTICE}",
+                ended.text.trim_end_matches('.')
+            ),
             None => REPORT_SAVED_NOTICE.to_owned(),
         };
         self.raise_notice(text, Some(action), cx);
     }
 
-    pub fn set_call_report_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+    pub fn set_call_report_enabled(&mut self, on: bool, cx: &mut dyn Host) {
         self.call_report_enabled = on;
-        let _ = self.store.set_meta(SETTING_META_KEY, if on { "1" } else { "0" });
+        let _ = self
+            .store
+            .set_meta(SETTING_META_KEY, if on { "1" } else { "0" });
         cx.notify();
     }
 
@@ -363,63 +378,72 @@ impl AppState {
         call_id: u64,
         mut updates: tokio::sync::mpsc::UnboundedReceiver<CallUpdate>,
         report: Option<SharedRecorder>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             while let Some(update) = updates.recv().await {
                 if let Some(report) = &report {
                     report.borrow_mut().observe(&update);
                 }
-                let alive =
-                    this.update(cx, |state, cx| state.apply_call_update(call_id, update, cx));
-                if alive.is_err() {
+                let alive = this
+                    .update(move |state, cx| state.apply_call_update(call_id, update, cx))
+                    .await;
+                if alive.is_none() {
                     return;
                 }
             }
-            let _ = this.update(cx, |state, cx| state.end_orphaned_call(call_id, cx));
+            let _ = this
+                .update(move |state, cx| state.end_orphaned_call(call_id, cx))
+                .await;
             let Some(report) = report else {
                 return;
             };
             let reason = EndReason::Failed("The call stopped unexpectedly".to_owned());
-            report.borrow_mut().observe(&CallUpdate::State(CallState::Ended { reason }));
+            report
+                .borrow_mut()
+                .observe(&CallUpdate::State(CallState::Ended { reason }));
             let recorder = report.borrow().clone();
-            let saved = cx
-                .background_executor()
-                .spawn(async move { save_report(&report_directory(), &recorder.document()) })
+            let saved = this
+                .run_blocking(move || save_report(&report_directory(), &recorder.document()))
                 .await;
             match saved {
-                Ok(saved) => {
-                    let _ = this.update(cx, |state, cx| state.report_saved(saved.json, cx));
+                Some(Ok(saved)) => {
+                    let _ = this
+                        .update(move |state, cx| state.report_saved(saved.json, cx))
+                        .await;
                 }
-                Err(error) => log::warn!("call test report not saved: {error}"),
+                Some(Err(error)) => log::warn!("call test report not saved: {error}"),
+                None => {}
             }
-        })
-        .detach();
-        cx.spawn(async move |this, cx| {
+        }));
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let mut ticks = 0u32;
             loop {
-                cx.background_executor().timer(TIMER_REFRESH).await;
+                this.sleep(TIMER_REFRESH).await;
                 ticks += 1;
-                let running = this.update(cx, |state, cx| {
-                    let visible = state.call.as_ref().is_some_and(|call| call.id == call_id);
-                    if visible {
-                        if ticks.is_multiple_of(SHARE_SOURCES_EVERY_TICKS) {
-                            state.refresh_share_sources();
+                let running = this
+                    .update(move |state, cx| {
+                        let visible = state.call.as_ref().is_some_and(|call| call.id == call_id);
+                        if visible {
+                            if ticks.is_multiple_of(SHARE_SOURCES_EVERY_TICKS) {
+                                state.refresh_share_sources();
+                            }
+                            state.tick_call_layout(cx);
+                            cx.emit(AppEvent::CallMedia);
                         }
-                        state.tick_call_layout(cx);
-                        CallMedia::changed(&state.call_media, cx);
-                    }
-                    visible || state.is_held_call(call_id)
-                });
+                        visible || state.is_held_call(call_id)
+                    })
+                    .await;
                 if !running.unwrap_or(false) {
                     return;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
-    fn end_orphaned_call(&mut self, call_id: u64, cx: &mut Context<Self>) {
+    fn end_orphaned_call(&mut self, call_id: u64, cx: &mut dyn Host) {
         let still_open = self
             .call
             .iter()
@@ -457,26 +481,25 @@ impl AppState {
         &mut self,
         call_id: u64,
         update: CallUpdate,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let update = self.with_known_names(update);
         if self.is_held_call(call_id) {
             self.apply_held_call_update(update, cx);
             return;
         }
-        let media = self.call_media.clone();
         let Some(call) = self.call.as_mut().filter(|call| call.id == call_id) else {
             return;
         };
         match update {
             CallUpdate::VideoReady => {
-                call.pictures.apply(&call.video, cx);
-                CallMedia::changed(&media, cx);
+                call.pictures.apply(&call.video);
+                cx.emit(AppEvent::CallMedia);
                 return;
             }
             CallUpdate::VideoStopped(key) => {
-                call.pictures.forget(&key, cx);
-                CallMedia::changed(&media, cx);
+                call.pictures.forget(&key);
+                cx.emit(AppEvent::CallMedia);
                 return;
             }
             CallUpdate::Stats { .. } => return,
@@ -484,7 +507,7 @@ impl AppState {
                 let before = (call.model.local_speaking, call.model.remote_speaking);
                 call.model.apply(CallUpdate::Levels { local, remote });
                 if before != (call.model.local_speaking, call.model.remote_speaking) {
-                    CallMedia::changed(&media, cx);
+                    cx.emit(AppEvent::CallMedia);
                 }
                 return;
             }
@@ -515,7 +538,11 @@ impl AppState {
                 return;
             }
             CallUpdate::MeetingOptionsSaved(result) => {
-                if call.options_dialog.as_mut().is_some_and(|dialog| dialog.saved(result)) {
+                if call
+                    .options_dialog
+                    .as_mut()
+                    .is_some_and(|dialog| dialog.saved(result))
+                {
                     call.options_dialog = None;
                 }
                 cx.notify();
@@ -529,7 +556,12 @@ impl AppState {
             } else {
                 &entry.display_name
             };
-            crate::agent_api::note_caption(thread, &entry.id, speaker, &entry.text, cx);
+            cx.emit(AppEvent::Agents(AgentNote::Caption {
+                meeting_chat_id: thread.to_owned(),
+                caption_id: entry.id.clone(),
+                speaker: speaker.to_owned(),
+                text: entry.text.clone(),
+            }));
         }
         let sharer_before = call.model.screen_sharer.clone();
         let lobby_before = call.model.lobby_mris();
@@ -540,21 +572,25 @@ impl AppState {
                 .is_none_or(|played_at| played_at.elapsed() >= LOBBY_TONE_THROTTLE)
         {
             call.lobby_tone_at = Some(Instant::now());
-            cx.emit(AppEvent::CallTone(chatsvc::sounds::CallTone::MeetingReminder));
+            cx.emit(AppEvent::CallTone(
+                chatsvc::sounds::CallTone::MeetingReminder,
+            ));
         }
         if call.model.screen_sharer != sharer_before {
-            call.pictures.forget(&VideoKey::Screen, cx);
+            call.pictures.forget(&VideoKey::Screen);
         }
         if let Some(language) = call.model.take_ready_caption_language() {
-            let _ = call.commands.send(CallCommand::SetCaptionLanguage(language));
+            let _ = call
+                .commands
+                .send(CallCommand::SetCaptionLanguage(language));
         }
         if call.model.screen_sharer.is_none() {
             call.stage_fullscreen = false;
             call.share_stage.end();
-            call.pictures.forget(&VideoKey::Screen, cx);
+            call.pictures.forget(&VideoKey::Screen);
         }
         if !call.model.camera_on {
-            call.pictures.forget(&VideoKey::LocalCamera, cx);
+            call.pictures.forget(&VideoKey::LocalCamera);
         }
         let Some(reason) = call.model.ended_reason().cloned() else {
             cx.emit(AppEvent::Call);
@@ -583,9 +619,11 @@ impl AppState {
         let end_screen = (call.viewing && !back_to_held && next_move.is_none())
             .then(|| CallEndScreen::for_call(call, &reason))
             .flatten();
-        call.pictures.clear(cx);
+        call.pictures.clear();
         if let Some(thread) = call.chat_thread() {
-            crate::agent_api::clear_captions(thread, cx);
+            cx.emit(AppEvent::Agents(AgentNote::ClearCaptions(
+                thread.to_owned(),
+            )));
         }
         self.call = None;
         self.transcript_panel = None;
@@ -611,7 +649,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_call_mute(&mut self, _cx: &mut Context<Self>) {
+    pub fn toggle_call_mute(&mut self, _cx: &mut dyn Host) {
         let can_toggle = self
             .call
             .as_ref()
@@ -621,7 +659,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_call_camera(&mut self, _cx: &mut Context<Self>) {
+    pub fn toggle_call_camera(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_ref()
@@ -633,14 +671,14 @@ impl AppState {
         self.send_call_command(CallCommand::SetCamera(on));
     }
 
-    pub fn set_call_mic(&mut self, settings: MicSettings, cx: &mut Context<Self>) {
+    pub fn set_call_mic(&mut self, settings: MicSettings, cx: &mut dyn Host) {
         self.call_mic = settings;
         save_mic(&self.store, settings);
         self.send_call_command(CallCommand::SetMicSettings(settings));
         cx.notify();
     }
 
-    pub fn press_push_to_talk(&mut self, _cx: &mut Context<Self>) {
+    pub fn press_push_to_talk(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut() else {
             return;
         };
@@ -652,7 +690,7 @@ impl AppState {
         }
     }
 
-    pub fn release_push_to_talk(&mut self, _cx: &mut Context<Self>) {
+    pub fn release_push_to_talk(&mut self, _cx: &mut dyn Host) {
         let command = self
             .call
             .as_mut()
@@ -662,7 +700,7 @@ impl AppState {
         }
     }
 
-    pub fn select_call_camera(&mut self, choice: DeviceChoice, _cx: &mut Context<Self>) {
+    pub fn select_call_camera(&mut self, choice: DeviceChoice, _cx: &mut dyn Host) {
         let _ = self.store.set_meta(CAMERA_META_KEY, device_meta(&choice));
         self.call_camera = choice.clone();
         if let Some(launcher) = &self.call_launcher {
@@ -674,11 +712,11 @@ impl AppState {
         self.send_call_command(CallCommand::SelectCamera(choice));
     }
 
-    pub fn start_call_share(&mut self, source: ShareSource, _cx: &mut Context<Self>) {
+    pub fn start_call_share(&mut self, source: ShareSource, _cx: &mut dyn Host) {
         self.send_call_command(CallCommand::StartShare(source));
     }
 
-    pub fn stop_call_share(&mut self, _cx: &mut Context<Self>) {
+    pub fn stop_call_share(&mut self, _cx: &mut dyn Host) {
         self.send_call_command(CallCommand::StopShare);
     }
 
@@ -692,11 +730,11 @@ impl AppState {
         }
     }
 
-    pub fn leave_call(&mut self, _cx: &mut Context<Self>) {
+    pub fn leave_call(&mut self, _cx: &mut dyn Host) {
         self.send_call_command(CallCommand::Hangup);
     }
 
-    pub fn end_meeting_for_all(&mut self, _cx: &mut Context<Self>) {
+    pub fn end_meeting_for_all(&mut self, _cx: &mut dyn Host) {
         let allowed = self
             .call
             .as_ref()
@@ -706,20 +744,20 @@ impl AppState {
         }
     }
 
-    pub fn select_call_input(&mut self, choice: DeviceChoice, _cx: &mut Context<Self>) {
+    pub fn select_call_input(&mut self, choice: DeviceChoice, _cx: &mut dyn Host) {
         let _ = self.store.set_meta(INPUT_META_KEY, device_meta(&choice));
         self.call_input = choice.clone();
         self.send_call_command(CallCommand::SelectInput(choice));
     }
 
-    pub fn select_call_output(&mut self, choice: DeviceChoice, _cx: &mut Context<Self>) {
+    pub fn select_call_output(&mut self, choice: DeviceChoice, _cx: &mut dyn Host) {
         let _ = self.store.set_meta(OUTPUT_META_KEY, device_meta(&choice));
         self.call_output = choice.clone();
         apply_sound_output(&choice);
         self.send_call_command(CallCommand::SelectOutput(choice));
     }
 
-    pub fn show_call(&mut self, viewing: bool, cx: &mut Context<Self>) {
+    pub fn show_call(&mut self, viewing: bool, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut().filter(|call| call.viewing != viewing) else {
             return;
         };
@@ -731,7 +769,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_call_chat(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_chat(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -776,7 +814,7 @@ impl AppState {
         })
     }
 
-    pub fn toggle_call_hand(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_hand(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -794,7 +832,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn lower_call_hand(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn lower_call_hand(&mut self, mri: String, _cx: &mut dyn Host) {
         let allowed = self
             .call
             .as_ref()
@@ -804,7 +842,7 @@ impl AppState {
         }
     }
 
-    pub fn lower_all_call_hands(&mut self, _cx: &mut Context<Self>) {
+    pub fn lower_all_call_hands(&mut self, _cx: &mut dyn Host) {
         let allowed = self
             .call
             .as_ref()
@@ -814,7 +852,7 @@ impl AppState {
         }
     }
 
-    pub fn send_call_reaction(&mut self, reaction: Reaction, cx: &mut Context<Self>) {
+    pub fn send_call_reaction(&mut self, reaction: Reaction, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -823,14 +861,15 @@ impl AppState {
             return;
         };
         if let Some(own_mri) = call.model.own_mri.clone() {
-            call.model.note_reaction(own_mri, reaction.clone(), Instant::now());
+            call.model
+                .note_reaction(own_mri, reaction.clone(), Instant::now());
         }
         self.send_call_command(CallCommand::SendReaction(reaction));
         cx.emit(AppEvent::Call);
         cx.notify();
     }
 
-    pub fn set_call_share_sound(&mut self, on: bool, cx: &mut Context<Self>) {
+    pub fn set_call_share_sound(&mut self, on: bool, cx: &mut dyn Host) {
         self.call_share_sound = on;
         let _ = self
             .store
@@ -839,7 +878,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn admit_call_guest(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn admit_call_guest(&mut self, mri: String, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -849,7 +888,7 @@ impl AppState {
         }
     }
 
-    pub fn admit_all_call_guests(&mut self, _cx: &mut Context<Self>) {
+    pub fn admit_all_call_guests(&mut self, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -859,7 +898,7 @@ impl AppState {
         }
     }
 
-    pub fn deny_call_guest(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn deny_call_guest(&mut self, mri: String, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -869,7 +908,7 @@ impl AppState {
         }
     }
 
-    pub fn mute_call_participant(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn mute_call_participant(&mut self, mri: String, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -879,7 +918,7 @@ impl AppState {
         }
     }
 
-    pub fn mute_all_call(&mut self, _cx: &mut Context<Self>) {
+    pub fn mute_all_call(&mut self, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -889,7 +928,7 @@ impl AppState {
         }
     }
 
-    pub fn remove_call_participant(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn remove_call_participant(&mut self, mri: String, _cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
@@ -899,7 +938,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_call_spotlight(&mut self, mri: String, _cx: &mut Context<Self>) {
+    pub fn toggle_call_spotlight(&mut self, mri: String, _cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_ref()
@@ -915,21 +954,21 @@ impl AppState {
         self.send_call_command(command);
     }
 
-    pub fn toggle_call_pin(&mut self, mri: &str, cx: &mut Context<Self>) {
+    pub fn toggle_call_pin(&mut self, mri: &str, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.model.toggle_pin(mri);
             cx.notify();
         }
     }
 
-    pub fn toggle_call_fit(&mut self, mri: &str, cx: &mut Context<Self>) {
+    pub fn toggle_call_fit(&mut self, mri: &str, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.model.toggle_fit(mri);
             cx.notify();
         }
     }
 
-    pub fn toggle_call_captions(&mut self, _cx: &mut Context<Self>) {
+    pub fn toggle_call_captions(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_ref()
@@ -941,14 +980,14 @@ impl AppState {
         self.send_call_command(CallCommand::SetCaptions(on));
     }
 
-    pub fn set_call_effects(&mut self, effects: CameraEffects, cx: &mut Context<Self>) {
+    pub fn set_call_effects(&mut self, effects: CameraEffects, cx: &mut dyn Host) {
         let _ = self.store.set_meta(EFFECTS_META_KEY, &effects.to_meta());
         self.call_effects = effects;
         self.send_call_command(CallCommand::SetCameraEffects(effects));
         cx.notify();
     }
 
-    pub fn set_call_background(&mut self, pick: BackgroundPick, cx: &mut Context<Self>) {
+    pub fn set_call_background(&mut self, pick: BackgroundPick, cx: &mut dyn Host) {
         let _ = self.store.set_meta(BACKGROUND_META_KEY, &pick.to_meta());
         self.call_background = pick.clone();
         if let Some(call) = self.call.as_mut() {
@@ -958,7 +997,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_call_background_blur(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_background_blur(&mut self, cx: &mut dyn Host) {
         if self.call.is_none() {
             return;
         }
@@ -970,7 +1009,7 @@ impl AppState {
         self.set_call_background(pick, cx);
     }
 
-    pub(super) fn send_background_command(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn send_background_command(&mut self, cx: &mut dyn Host) {
         let pick = self.call_background.clone();
         if let Some(choice) = self.call_backgrounds.choice_for(&pick) {
             self.send_call_command(CallCommand::SetBackground(choice));
@@ -990,9 +1029,10 @@ impl AppState {
             crate::runtime::spawn(
                 async move { launcher.download_background(&cache, &image).await },
             );
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let path = receiver.await.ok().flatten();
-            this.update(cx, |state, cx| match path {
+            this.update(move |state, cx| match path {
                 Some(path) if state.call_background == BackgroundPick::Default(id) => {
                     state.send_call_command(CallCommand::SetBackground(
                         calling::BackgroundChoice::Image(path),
@@ -1005,12 +1045,11 @@ impl AppState {
                     cx,
                 ),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn refresh_call_backgrounds(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_call_backgrounds(&mut self, cx: &mut dyn Host) {
         if self.mode.demo || !self.call_backgrounds.needs_refresh() {
             return;
         }
@@ -1024,52 +1063,32 @@ impl AppState {
             crate::runtime::spawn(
                 async move { launcher.refresh_backgrounds(&cache, wanted).await },
             );
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let catalog = receiver.await.ok().flatten();
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.call_backgrounds.refreshing = false;
                 if let Some(catalog) = catalog {
                     state.call_backgrounds.images = catalog;
                 }
                 cx.notify();
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn add_call_background(&mut self, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let Some(path) = receiver
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten()
-                .and_then(|paths| paths.into_iter().next())
-            else {
-                return;
-            };
-            this.update(cx, |state, cx| {
-                if !is_image_file(&path) {
-                    state.raise_notice("Pick a JPG or PNG picture".to_owned(), None, cx);
-                    return;
-                }
-                state.call_backgrounds.add_custom(path.clone());
-                save_custom_backgrounds(&state.store, &state.call_backgrounds.customs);
-                state.set_call_background(BackgroundPick::Custom(path), cx);
-            })
-            .ok();
-        })
-        .detach();
+    /// Adds a picture the user picked as a custom call background.
+    pub fn add_call_background_path(&mut self, path: std::path::PathBuf, cx: &mut dyn Host) {
+        if !is_image_file(&path) {
+            self.raise_notice("Pick a JPG or PNG picture".to_owned(), None, cx);
+            return;
+        }
+        self.call_backgrounds.add_custom(path.clone());
+        save_custom_backgrounds(&self.store, &self.call_backgrounds.customs);
+        self.set_call_background(BackgroundPick::Custom(path), cx);
     }
 
-    pub fn toggle_stage_fullscreen(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_stage_fullscreen(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -1082,7 +1101,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn leave_stage_fullscreen(&mut self, cx: &mut Context<Self>) {
+    pub fn leave_stage_fullscreen(&mut self, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut().filter(|call| call.stage_fullscreen) else {
             return;
         };
@@ -1103,7 +1122,7 @@ impl AppState {
 }
 
 impl AppState {
-    pub fn on_engine_event(&mut self, event: EngineEvent, cx: &mut Context<Self>) {
+    pub fn on_engine_event(&mut self, event: EngineEvent, cx: &mut dyn Host) {
         match event {
             EngineEvent::Incoming(ring) => self.push_ring(ring, false, cx),
             EngineEvent::RingEnded { ring_id, kind, .. } => {
@@ -1112,7 +1131,7 @@ impl AppState {
         }
     }
 
-    fn push_ring(&mut self, ring: calling::IncomingRing, demo: bool, cx: &mut Context<Self>) {
+    fn push_ring(&mut self, ring: calling::IncomingRing, demo: bool, cx: &mut dyn Host) {
         let caller_user_id = ring
             .caller
             .mri
@@ -1126,15 +1145,15 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn demo_incoming_ring(&mut self, cx: &mut Context<Self>) {
+    pub fn demo_incoming_ring(&mut self, cx: &mut dyn Host) {
         self.push_ring(demo_ring(), true, cx);
     }
 
-    pub fn demo_incoming_video_ring(&mut self, cx: &mut Context<Self>) {
+    pub fn demo_incoming_video_ring(&mut self, cx: &mut dyn Host) {
         self.push_ring(demo_video_ring(), true, cx);
     }
 
-    pub fn start_demo_scene(&mut self, scene: DemoScene, cx: &mut Context<Self>) {
+    pub fn start_demo_scene(&mut self, scene: DemoScene, cx: &mut dyn Host) {
         if self.call.is_some() {
             return;
         }
@@ -1190,13 +1209,13 @@ impl AppState {
         }
     }
 
-    fn signal_ring(&mut self, ring_id: u64, signal: RingSignal, cx: &mut Context<Self>) {
+    fn signal_ring(&mut self, ring_id: u64, signal: RingSignal, cx: &mut dyn Host) {
         if let Some(outcome) = self.rings.signal(ring_id, signal, Instant::now()) {
             self.finish_ring(ring_id, outcome, cx);
         }
     }
 
-    fn finish_ring(&mut self, ring_id: u64, outcome: RingOutcome, cx: &mut Context<Self>) {
+    fn finish_ring(&mut self, ring_id: u64, outcome: RingOutcome, cx: &mut dyn Host) {
         if let RingOutcome::Missed(missed) = outcome {
             if let Some(launcher) = &self.call_launcher {
                 launcher.drop_ring(ring_id);
@@ -1207,7 +1226,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn tick_rings(&mut self, cx: &mut Context<Self>) {
+    pub fn tick_rings(&mut self, cx: &mut dyn Host) {
         if self.rings.is_empty() {
             return;
         }
@@ -1216,19 +1235,19 @@ impl AppState {
         }
     }
 
-    pub fn accept_ringing_call(&mut self, mode: AcceptMode, cx: &mut Context<Self>) {
+    pub fn accept_ringing_call(&mut self, mode: AcceptMode, cx: &mut dyn Host) {
         if let Some(ring_id) = self.rings.first_ringing_id() {
             self.accept_ring(ring_id, mode, cx);
         }
     }
 
-    pub fn decline_ringing_call(&mut self, cx: &mut Context<Self>) {
+    pub fn decline_ringing_call(&mut self, cx: &mut dyn Host) {
         if let Some(ring_id) = self.rings.first_ringing_id() {
             self.decline_ring(ring_id, cx);
         }
     }
 
-    pub fn accept_ring(&mut self, ring_id: u64, mode: AcceptMode, cx: &mut Context<Self>) {
+    pub fn accept_ring(&mut self, ring_id: u64, mode: AcceptMode, cx: &mut dyn Host) {
         let Some(entry) = self.rings.get(ring_id).cloned() else {
             return;
         };
@@ -1258,18 +1277,18 @@ impl AppState {
         };
         let receiver =
             crate::runtime::spawn(async move { launcher.accept_ring(ring_id, mode).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let handle = receiver.await.ok().flatten();
-            this.update(cx, |state, cx| match handle {
+            this.update(move |state, cx| match handle {
                 Some(handle) => state.begin_call(handle, model, conversation_id, cx),
                 None => state.raise_notice(ANSWER_FAILED_NOTICE.to_owned(), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn decline_ring(&mut self, ring_id: u64, cx: &mut Context<Self>) {
+    pub fn decline_ring(&mut self, ring_id: u64, cx: &mut dyn Host) {
         let Some(entry) = self.rings.get(ring_id) else {
             return;
         };
@@ -1339,13 +1358,13 @@ impl AppState {
             )
     }
 
-    pub fn refresh_live_meeting(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn refresh_live_meeting(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.watches_live_meeting(conversation_id) {
             self.fetch_live_meeting(conversation_id, cx);
         }
     }
 
-    pub fn fetch_live_meeting(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn fetch_live_meeting(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.mode.demo {
             return;
         }
@@ -1359,21 +1378,19 @@ impl AppState {
         let receiver =
             crate::runtime::spawn(async move { launcher.live_meeting(&thread_id).await });
         let conversation_id = conversation_id.to_owned();
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let meeting = receiver.await.ok().flatten();
-            this.update(cx, |state, cx| {
-                state.apply_live_meeting(conversation_id, meeting, cx)
-            })
-            .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.apply_live_meeting(conversation_id, meeting, cx))
+                .await;
+        }));
     }
 
     pub fn apply_live_meeting(
         &mut self,
         conversation_id: String,
         meeting: Option<LiveMeeting>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.live_refreshing.remove(&conversation_id);
         let changed = match meeting {
@@ -1390,7 +1407,7 @@ impl AppState {
         }
     }
 
-    pub fn on_thread_changed(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn on_thread_changed(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         self.refresh_live_meeting(conversation_id, cx);
     }
 }

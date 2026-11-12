@@ -1,7 +1,7 @@
-use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use store::Store;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::data::{Presence, PresenceKind};
 
@@ -87,7 +87,7 @@ impl AppState {
         user_id: &str,
         name: &str,
         follow: bool,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if follow == self.is_presence_followed(user_id) {
             return;
@@ -107,7 +107,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn watch_followed_presence(&mut self, cx: &mut Context<Self>) {
+    pub fn watch_followed_presence(&mut self, cx: &mut dyn Host) {
         let user_ids: Vec<String> = self
             .followed_presence
             .iter()
@@ -118,7 +118,12 @@ impl AppState {
         }
     }
 
-    pub(crate) fn note_followed_change(&mut self, user_id: &str, previous: Presence, next: PresenceKind) {
+    pub(crate) fn note_followed_change(
+        &mut self,
+        user_id: &str,
+        previous: Presence,
+        next: PresenceKind,
+    ) {
         if !self.is_presence_followed(user_id) {
             return;
         }
@@ -127,7 +132,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn announce_followed_changes(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn announce_followed_changes(&mut self, cx: &mut dyn Host) {
         for (user_id, text) in std::mem::take(&mut self.followed_changes) {
             cx.emit(AppEvent::FollowedStatus { user_id, text });
         }

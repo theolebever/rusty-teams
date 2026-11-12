@@ -1,10 +1,10 @@
 use chatsvc::{CalendarEvent, ResponseType, ShowAs};
 use chrono::{Duration, FixedOffset, Local, NaiveDate, Offset};
-use gpui_kit::Context;
 
 use super::agenda::demo_events;
 use super::calendar::demo_anchor;
 use super::week_grid::{CalendarSpan, local_midnight, week_range, week_start};
+use crate::Host;
 use crate::app_state::AppState;
 
 pub const CALENDAR_LOAD_FAILURE: &str = "We couldn't load your calendar.";
@@ -25,23 +25,23 @@ impl AppState {
             .unwrap_or_else(|| self.calendar_week.span.start_for(Local::now().date_naive()))
     }
 
-    pub fn open_calendar(&mut self, cx: &mut Context<Self>) {
+    pub fn open_calendar(&mut self, cx: &mut dyn Host) {
         self.calendar_week.start = Some(self.calendar_start());
         self.load_calendar_week(cx);
     }
 
-    pub fn shift_calendar_week(&mut self, steps: i32, cx: &mut Context<Self>) {
+    pub fn shift_calendar_week(&mut self, steps: i32, cx: &mut dyn Host) {
         let span = self.calendar_week.span;
         self.calendar_week.start = Some(span.shifted(self.calendar_start(), steps));
         self.load_calendar_week(cx);
     }
 
-    pub fn calendar_to_today(&mut self, cx: &mut Context<Self>) {
+    pub fn calendar_to_today(&mut self, cx: &mut dyn Host) {
         self.calendar_week.start = None;
         self.open_calendar(cx);
     }
 
-    pub fn set_calendar_span(&mut self, span: CalendarSpan, cx: &mut Context<Self>) {
+    pub fn set_calendar_span(&mut self, span: CalendarSpan, cx: &mut dyn Host) {
         let today = Local::now().date_naive();
         let start = self.calendar_start();
         let shown =
@@ -51,17 +51,17 @@ impl AppState {
         self.load_calendar_week(cx);
     }
 
-    pub fn show_calendar_date(&mut self, date: NaiveDate, cx: &mut Context<Self>) {
+    pub fn show_calendar_date(&mut self, date: NaiveDate, cx: &mut dyn Host) {
         self.calendar_week.start = Some(self.calendar_week.span.start_for(date));
         self.load_calendar_week(cx);
     }
 
-    pub fn show_calendar_day(&mut self, date: NaiveDate, cx: &mut Context<Self>) {
+    pub fn show_calendar_day(&mut self, date: NaiveDate, cx: &mut dyn Host) {
         self.calendar_week.span = CalendarSpan::Day;
         self.show_calendar_date(date, cx);
     }
 
-    fn load_calendar_week(&mut self, cx: &mut Context<Self>) {
+    fn load_calendar_week(&mut self, cx: &mut dyn Host) {
         let start = self.calendar_start();
         let offset = Local::now().offset().fix();
         let (from, to) = week_range(start, self.calendar_week.span.days(), offset);
@@ -83,9 +83,10 @@ impl AppState {
         self.calendar_week.loading = true;
         cx.notify();
         let receiver = crate::runtime::spawn(async move { launcher.calendar_view(from, to).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let loaded = receiver.await.ok().and_then(Result::ok);
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if state.calendar_week.request != request {
                     return;
                 }
@@ -96,9 +97,8 @@ impl AppState {
                 }
                 cx.notify();
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 

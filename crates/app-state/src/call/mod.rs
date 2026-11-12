@@ -7,7 +7,6 @@ pub mod history;
 pub mod join;
 pub use app_backend::launcher;
 pub mod list;
-pub mod media;
 pub mod outlook_reminders;
 pub mod overlay_layout;
 pub mod people_actions;
@@ -47,7 +46,6 @@ pub use health::{HealthBanner, level_text, media_text, network_rows, transport_t
 pub use history::CallRow;
 pub use launcher::CallLauncher;
 pub use list::{CALL_ROW_HEIGHT, CallsList, EMPTY_HEIGHT, HistoryFilter, ListEntry};
-pub use media::CallMedia;
 pub use model::{
     ActiveCall, CAPTION_SHOWN, CallKind, CallModel, Focus, REACTION_SHOWN, Tile, TileSize,
     TileState,

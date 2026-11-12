@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::Context;
 use store::Store;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::own_status::until_label;
 
@@ -33,13 +33,13 @@ impl AppState {
         is_paused(self.notifications_paused_until, now)
     }
 
-    pub fn pause_notifications(&mut self, until: DateTime<Utc>, cx: &mut Context<Self>) {
+    pub fn pause_notifications(&mut self, until: DateTime<Utc>, cx: &mut dyn Host) {
         let _ = self.store.set_meta(META_KEY, &until.to_rfc3339());
         self.notifications_paused_until = Some(until);
         cx.notify();
     }
 
-    pub fn resume_notifications(&mut self, cx: &mut Context<Self>) {
+    pub fn resume_notifications(&mut self, cx: &mut dyn Host) {
         let _ = self.store.set_meta(META_KEY, "");
         self.notifications_paused_until = None;
         cx.notify();

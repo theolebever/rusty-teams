@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use gpui_kit::*;
 use store::{ChatRecord, MessageImportance, Sidebar, Store};
 
+use crate::Host;
 use crate::app_state::{AppState, Selection};
 use crate::backend::Engine;
 use crate::data;
@@ -48,45 +48,51 @@ fn load(store: &Store, engine: Option<&Engine>) -> Option<LoadedSidebar> {
 }
 
 impl AppState {
-    pub fn reload_sidebar_after_sync(&mut self, cx: &mut Context<Self>) {
+    pub fn reload_sidebar_after_sync(&mut self, cx: &mut dyn Host) {
         if self.sidebar_load.running {
             self.sidebar_load.requested_again = true;
             return;
         }
         self.sidebar_load.running = true;
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             loop {
-                let Ok((store, engine, local_changes)) = this.update(cx, |state, _| {
-                    state.sidebar_load.requested_again = false;
-                    (
-                        state.store.clone(),
-                        state.engine.clone(),
-                        state.sidebar_load.local_changes,
-                    )
-                }) else {
+                let Some((store, engine, local_changes)) = this
+                    .update(move |state, _| {
+                        state.sidebar_load.requested_again = false;
+                        (
+                            state.store.clone(),
+                            state.engine.clone(),
+                            state.sidebar_load.local_changes,
+                        )
+                    })
+                    .await
+                else {
                     return;
                 };
-                let loaded = cx
-                    .background_spawn(async move { load(&store, engine.as_deref()) })
+                let loaded = this
+                    .run_blocking(move || load(&store, engine.as_deref()))
+                    .await
+                    .flatten();
+                let again = this
+                    .update(move |state, cx| {
+                        let stale = state.sidebar_load.local_changes != local_changes;
+                        if let Some(loaded) = loaded.filter(|_| !stale) {
+                            state.adopt_synced_sidebar(loaded, cx);
+                        }
+                        let again = state.sidebar_load.requested_again || stale;
+                        state.sidebar_load.running = again;
+                        again
+                    })
                     .await;
-                let again = this.update(cx, |state, cx| {
-                    let stale = state.sidebar_load.local_changes != local_changes;
-                    if let Some(loaded) = loaded.filter(|_| !stale) {
-                        state.adopt_synced_sidebar(loaded, cx);
-                    }
-                    let again = state.sidebar_load.requested_again || stale;
-                    state.sidebar_load.running = again;
-                    again
-                });
-                if !matches!(again, Ok(true)) {
+                if again != Some(true) {
                     return;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
-    fn adopt_synced_sidebar(&mut self, loaded: LoadedSidebar, cx: &mut Context<Self>) {
+    fn adopt_synced_sidebar(&mut self, loaded: LoadedSidebar, cx: &mut dyn Host) {
         let selected = match &self.selection {
             Some(Selection::Chat(chat_id)) => Some(chat_id.clone()),
             _ => None,

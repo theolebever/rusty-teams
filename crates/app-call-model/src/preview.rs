@@ -124,7 +124,8 @@ impl CameraPreview {
     }
 
     pub fn take_frames(&mut self, cx: &mut App) {
-        self.pictures.apply(&self.hub, cx);
+        self.pictures.apply(&self.hub);
+        super::pictures::release_retired(cx);
     }
 
     pub fn image(&self, now: Instant) -> Option<Arc<RenderImage>> {
@@ -155,7 +156,8 @@ impl CameraPreview {
 
     pub fn stop(&mut self, cx: &mut App) {
         self.release_capture();
-        self.pictures.clear(cx);
+        self.pictures.clear();
+        super::pictures::release_retired(cx);
         self.fps = None;
     }
 

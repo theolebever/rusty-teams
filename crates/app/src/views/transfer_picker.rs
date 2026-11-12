@@ -189,7 +189,7 @@ impl TransferPicker {
         id: &'static str,
         label: &'static str,
         primary: bool,
-        run: fn(&mut AppState, TransferCandidate, &mut Context<AppState>),
+        run: fn(&mut AppState, TransferCandidate, &mut dyn crate::Host),
     ) -> AnyElement {
         let button = Button::new(id).label(label);
         let button = if primary { button } else { button.ghost() };

@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Local, Offset, Utc};
-use gpui_kit::*;
 use store::MessageRecord;
 use teams_core::{PinnedMessage, SavedMessage};
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState, Selection, selection_for};
 use crate::channel_menu::{post_pin_failure, post_pin_notice};
 use crate::format;
@@ -123,30 +123,25 @@ impl AppState {
             .any(|pin| pin.message_id == message_id)
     }
 
-    pub fn refresh_saved(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_saved(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let receiver = runtime::spawn(async move { engine.list_saved().await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             if let Ok(Ok(items)) = receiver.await {
-                this.update(cx, |state, cx| {
+                this.update(move |state, cx| {
                     state.saved.replace(items);
                     cx.emit(AppEvent::Saved);
                     cx.notify();
                 })
-                .ok();
+                .await;
             }
-        })
-        .detach();
+        }));
     }
 
-    pub fn toggle_saved(
-        &mut self,
-        conversation_id: &str,
-        message_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn toggle_saved(&mut self, conversation_id: &str, message_id: &str, cx: &mut dyn Host) {
         let existing = self
             .saved
             .items()
@@ -168,7 +163,7 @@ impl AppState {
         }
     }
 
-    pub fn set_saved(&mut self, entry: SavedMessage, saved: bool, cx: &mut Context<Self>) {
+    pub fn set_saved(&mut self, entry: SavedMessage, saved: bool, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -209,40 +204,34 @@ impl AppState {
         );
     }
 
-    pub fn refresh_pins(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub fn refresh_pins(&mut self, chat_id: &str, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let chat_id = chat_id.to_owned();
         let requested_id = chat_id.clone();
         let receiver = runtime::spawn(async move { engine.chat_pins(&requested_id).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             if let Ok(Ok(pins)) = receiver.await {
-                this.update(cx, |state, cx| state.store_pins(&chat_id, pins, cx))
-                    .ok();
+                this.update(move |state, cx| state.store_pins(&chat_id, pins, cx))
+                    .await;
             }
-        })
-        .detach();
+        }));
     }
 
-    fn store_pins(&mut self, chat_id: &str, pins: Vec<PinnedMessage>, cx: &mut Context<Self>) {
+    fn store_pins(&mut self, chat_id: &str, pins: Vec<PinnedMessage>, cx: &mut dyn Host) {
         self.pins.insert(chat_id.to_owned(), pins);
         cx.emit(AppEvent::Pins(chat_id.to_owned()));
         cx.notify();
     }
 
-    pub fn toggle_pinned(&mut self, chat_id: &str, message_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_pinned(&mut self, chat_id: &str, message_id: &str, cx: &mut dyn Host) {
         let pinned = self.is_pinned(chat_id, message_id);
         self.set_pinned(chat_id, message_id, !pinned, cx);
     }
 
-    pub fn set_pinned(
-        &mut self,
-        chat_id: &str,
-        message_id: &str,
-        pinned: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_pinned(&mut self, chat_id: &str, message_id: &str, pinned: bool, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -288,9 +277,8 @@ impl AppState {
                     .await
             }
         };
-        let revert = move |state: &mut Self, cx: &mut Context<Self>| {
-            state.store_pins(&revert_chat, previous, cx)
-        };
+        let revert =
+            move |state: &mut Self, cx: &mut dyn Host| state.store_pins(&revert_chat, previous, cx);
         if channel {
             self.run_channel_action(
                 post_pin_failure(pinned),
@@ -314,44 +302,39 @@ impl AppState {
         &mut self,
         conversation_id: &str,
         message_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(engine) = self.engine.clone() else {
             if !self.mode.demo {
                 return;
             }
             let link = teams_core::chat_message_link(conversation_id, message_id, None);
-            cx.write_to_clipboard(ClipboardItem::new_string(link));
+            cx.write_clipboard(link);
             self.raise_notice("Link copied".to_owned(), None, cx);
             return;
         };
         let (conversation_id, message_id) = (conversation_id.to_owned(), message_id.to_owned());
         let receiver =
             runtime::spawn(async move { engine.message_link(&conversation_id, &message_id).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = match receiver.await {
                 Ok(Ok(link)) => Ok(link),
                 Ok(Err(error)) => Err(short_error(&error)),
                 Err(_) => Err("cancelled".to_owned()),
             };
-            this.update(cx, |state, cx| match outcome {
+            this.update(move |state, cx| match outcome {
                 Ok(link) => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                    cx.write_clipboard(link);
                     state.raise_notice("Link copied".to_owned(), None, cx);
                 }
                 Err(reason) => state.raise_notice(format!("Copy link failed: {reason}"), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn request_forward(
-        &mut self,
-        conversation_id: &str,
-        message_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn request_forward(&mut self, conversation_id: &str, message_id: &str, cx: &mut dyn Host) {
         self.request_forward_messages(conversation_id, &[message_id.to_owned()], cx);
     }
 
@@ -359,7 +342,7 @@ impl AppState {
         &mut self,
         conversation_id: &str,
         message_ids: &[String],
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.mode.read_only {
             self.raise_notice("Read-only mode: message not forwarded".to_owned(), None, cx);
@@ -394,7 +377,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn request_image_viewer(&mut self, request: ViewerRequest, cx: &mut Context<Self>) {
+    pub fn request_image_viewer(&mut self, request: ViewerRequest, cx: &mut dyn Host) {
         self.image_viewer_request = Some(request);
         cx.emit(AppEvent::ImageViewer);
         cx.notify();
@@ -413,7 +396,7 @@ impl AppState {
         source: &ForwardSource,
         target: &Selection,
         comment: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Selection::Chat(chat_id) = target else {
             return;
@@ -429,12 +412,7 @@ impl AppState {
         cx.emit(AppEvent::Messages(chat_id.clone()));
     }
 
-    pub fn mark_unread_from_message(
-        &mut self,
-        chat_id: &str,
-        message_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn mark_unread_from_message(&mut self, chat_id: &str, message_id: &str, cx: &mut dyn Host) {
         let Some(record) = self.message_record(chat_id, message_id) else {
             return;
         };

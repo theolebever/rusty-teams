@@ -1,7 +1,7 @@
-use gpui_kit::*;
 use teams_core::{AdaptiveCard, CardActionOutcome, ExecuteAction, ExecuteTrigger};
 use tokio::sync::oneshot;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::card_actions::CardAnswer;
 use crate::card_state::{CardScope, short_reason};
@@ -13,7 +13,7 @@ impl AppState {
         conversation_id: &str,
         message_id: &str,
         cards: &[AdaptiveCard],
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.mode.read_only {
             return;
@@ -43,7 +43,7 @@ impl AppState {
         &mut self,
         scope: CardScope,
         action: ExecuteAction,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.start_card_refresh(scope, action, ExecuteTrigger::Manual, cx);
     }
@@ -53,7 +53,7 @@ impl AppState {
         scope: CardScope,
         action: ExecuteAction,
         trigger: ExecuteTrigger,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let manual = trigger == ExecuteTrigger::Manual;
         if !self
@@ -67,16 +67,14 @@ impl AppState {
                 .cancel_refresh(&scope.conversation_id, &scope.message_id);
             return;
         };
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let answer = receiver
                 .await
                 .unwrap_or_else(|_| Err("cancelled".to_owned()));
-            this.update(cx, |state, cx| {
-                state.finish_card_refresh(&scope, answer, cx)
-            })
-            .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.finish_card_refresh(&scope, answer, cx))
+                .await;
+        }));
     }
 
     fn refresh_answer(
@@ -100,12 +98,7 @@ impl AppState {
         }))
     }
 
-    fn finish_card_refresh(
-        &mut self,
-        scope: &CardScope,
-        answer: CardAnswer,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_card_refresh(&mut self, scope: &CardScope, answer: CardAnswer, cx: &mut dyn Host) {
         let was_full = self.cards.finish_refresh();
         let replaced = match answer {
             Ok((CardActionOutcome::ReplaceCard(json), _)) => self.replace_card(scope, &json, cx),

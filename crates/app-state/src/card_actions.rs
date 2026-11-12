@@ -6,6 +6,7 @@ use teams_core::{
 };
 use tokio::sync::oneshot;
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::card_state::{
     ActionPhase, BotIdentity, CardOverride, CardScope, DONE_HOLD, Surface, TaskDialogState,
@@ -13,7 +14,7 @@ use crate::card_state::{
 };
 use crate::data::{is_one_on_one, others};
 use crate::runtime;
-use crate::task_dialog::{UrlDialog, UrlDialogNext, open_url_dialog};
+use crate::task_dialog::{UrlDialog, UrlDialogNext};
 
 const NOT_CONNECTED: &str = "Not connected";
 const READ_ONLY: &str = "Read-only mode";
@@ -34,7 +35,7 @@ impl AppState {
         action_key: String,
         action: CardAction,
         inputs: Vec<CardInput>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         if self.cards.is_busy(&action_key) {
             return;
@@ -46,17 +47,15 @@ impl AppState {
         self.cards.clear_note(&scope.card_key());
         self.announce_cards(&scope, cx);
         let answer = self.card_answer(&scope, task);
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let answer = match answer {
                 Some(receiver) => receiver.await.unwrap_or_else(|_| Err(CANCELLED.to_owned())),
                 None => Err(NOT_CONNECTED.to_owned()),
             };
-            this.update(cx, |state, cx| {
-                state.finish_card_task(scope, action_key, answer, cx)
-            })
-            .ok();
-        })
-        .detach();
+            this.update(move |state, cx| state.finish_card_task(scope, action_key, answer, cx))
+                .await;
+        }));
     }
 
     fn card_answer(
@@ -97,7 +96,7 @@ impl AppState {
         scope: CardScope,
         action_key: String,
         answer: CardAnswer,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let (outcome, app) = match answer {
             Ok(answer) => answer,
@@ -143,19 +142,19 @@ impl AppState {
         &mut self,
         scope: CardScope,
         result: Value,
-        cx: &mut Context<Self>,
-    ) -> Task<UrlDialogNext> {
+        cx: &mut dyn Host,
+    ) -> impl std::future::Future<Output = UrlDialogNext> + use<> {
         let answer = self.card_answer(&scope, CardTask::Submit(result));
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        async move {
             let answer = match answer {
                 Some(receiver) => receiver.await.unwrap_or_else(|_| Err(CANCELLED.to_owned())),
                 None => Err(NOT_CONNECTED.to_owned()),
             };
-            this.update(cx, |state, cx| {
-                state.finish_url_dialog_submit(&scope, answer, cx)
-            })
-            .unwrap_or(UrlDialogNext::Close)
-        })
+            this.update(move |state, cx| state.finish_url_dialog_submit(&scope, answer, cx))
+                .await
+                .unwrap_or(UrlDialogNext::Close)
+        }
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -163,7 +162,7 @@ impl AppState {
         &mut self,
         scope: &CardScope,
         answer: CardAnswer,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) -> UrlDialogNext {
         let (outcome, app) = match answer {
             Ok(answer) => answer,
@@ -190,7 +189,7 @@ impl AppState {
         UrlDialogNext::Close
     }
 
-    fn note_card(&mut self, scope: &CardScope, text: String, cx: &mut Context<Self>) {
+    fn note_card(&mut self, scope: &CardScope, text: String, cx: &mut dyn Host) {
         self.cards.set_note(&scope.card_key(), text);
         self.announce_cards(scope, cx);
     }
@@ -200,39 +199,34 @@ impl AppState {
         scope: &CardScope,
         action_key: &str,
         reason: String,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.cards
             .set_phase(action_key, ActionPhase::Failed(short_reason(&reason)));
         self.announce_cards(scope, cx);
     }
 
-    fn mark_done(&mut self, scope: &CardScope, action_key: &str, cx: &mut Context<Self>) {
+    fn mark_done(&mut self, scope: &CardScope, action_key: &str, cx: &mut dyn Host) {
         self.cards.set_phase(action_key, ActionPhase::Done);
         self.announce_cards(scope, cx);
         let (scope, action_key) = (scope.clone(), action_key.to_owned());
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DONE_HOLD).await;
-            this.update(cx, |state, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(DONE_HOLD).await;
+            this.update(move |state, cx| {
                 state.cards.clear_done(&action_key);
                 state.announce_cards(&scope, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    pub fn announce_cards(&mut self, scope: &CardScope, cx: &mut Context<Self>) {
+    pub fn announce_cards(&mut self, scope: &CardScope, cx: &mut dyn Host) {
         cx.emit(AppEvent::Cards(scope.conversation_id.clone()));
         cx.notify();
     }
 
-    pub fn replace_card(
-        &mut self,
-        scope: &CardScope,
-        json: &str,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub fn replace_card(&mut self, scope: &CardScope, json: &str, cx: &mut dyn Host) -> bool {
         let Some(card) = AdaptiveCard::parse(json) else {
             return false;
         };
@@ -277,7 +271,7 @@ impl AppState {
         scope: &CardScope,
         dialog: TaskDialog,
         app: Option<(ChatApp, String)>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let app_name = app.as_ref().map(|(app, _)| app.name.clone());
         let title = dialog.title.clone().or(app_name).unwrap_or_default();
@@ -307,21 +301,17 @@ impl AppState {
                     Some((app, bot_id)) => (app.app_id, bot_id, app.web_application_resource),
                     None => (String::new(), String::new(), None),
                 };
-                open_url_dialog(
-                    UrlDialog {
-                        title,
-                        url,
-                        fallback_url,
-                        width: dialog.width,
-                        height: dialog.height,
-                        app_id,
-                        bot_id,
-                        scope: scope.clone(),
-                        web_application_resource,
-                    },
-                    self.engine.clone(),
-                    cx,
-                );
+                cx.emit(AppEvent::UrlDialog(UrlDialog {
+                    title,
+                    url,
+                    fallback_url,
+                    width: dialog.width,
+                    height: dialog.height,
+                    app_id,
+                    bot_id,
+                    scope: scope.clone(),
+                    web_application_resource,
+                }));
                 if in_dialog {
                     self.close_task_dialog(cx);
                 }
@@ -329,7 +319,7 @@ impl AppState {
         }
     }
 
-    pub fn close_task_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn close_task_dialog(&mut self, cx: &mut dyn Host) {
         if self.task_dialog.take().is_some() {
             self.cards.clear_card(&CardScope::dialog_key());
             cx.emit(AppEvent::TaskDialog);
@@ -337,13 +327,13 @@ impl AppState {
         }
     }
 
-    fn close_task_dialog_later(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DIALOG_MESSAGE_HOLD).await;
-            this.update(cx, |state, cx| state.close_task_dialog(cx))
-                .ok();
-        })
-        .detach();
+    fn close_task_dialog_later(&mut self, cx: &mut dyn Host) {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(DIALOG_MESSAGE_HOLD).await;
+            this.update(move |state, cx| state.close_task_dialog(cx))
+                .await;
+        }));
     }
 
     pub fn toggle_card_elements(
@@ -351,7 +341,7 @@ impl AppState {
         scope: &CardScope,
         root_key: &str,
         elements: Vec<(String, bool, Option<bool>)>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         for (element_id, initial, forced) in elements {
             self.cards
@@ -365,7 +355,7 @@ impl AppState {
         scope: &CardScope,
         actions_key: &str,
         index: usize,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.cards.toggle_open_card(actions_key, index);
         self.announce_cards(scope, cx);
@@ -376,7 +366,7 @@ impl AppState {
         scope: &CardScope,
         slot_key: &str,
         value: usize,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         self.cards.set_slot(slot_key, value);
         self.announce_cards(scope, cx);
@@ -398,7 +388,7 @@ impl AppState {
         })
     }
 
-    pub fn request_chat_apps(&mut self, conversation_id: &str, cx: &mut Context<Self>) {
+    pub fn request_chat_apps(&mut self, conversation_id: &str, cx: &mut dyn Host) {
         if self.bot_apps.contains_key(conversation_id)
             || self.bot_apps_pending.contains(conversation_id)
         {
@@ -413,9 +403,10 @@ impl AppState {
             let conversation_id = conversation_id.clone();
             runtime::spawn(async move { engine.chat_apps(&conversation_id).await })
         };
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let apps = receiver.await.ok().and_then(Result::ok).unwrap_or_default();
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.bot_apps_pending.remove(&conversation_id);
                 state.bot_apps.insert(conversation_id, apps);
                 state.apply_bot_titles();
@@ -423,9 +414,8 @@ impl AppState {
                 cx.emit(AppEvent::Directory);
                 cx.notify();
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub fn apply_bot_titles(&mut self) {

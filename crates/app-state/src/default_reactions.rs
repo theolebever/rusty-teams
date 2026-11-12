@@ -1,5 +1,4 @@
-use gpui_kit::Context;
-
+use crate::Host;
 use crate::app_state::AppState;
 use crate::emoticons;
 
@@ -50,7 +49,7 @@ impl AppState {
         )
     }
 
-    pub fn set_default_reactions(&mut self, reaction_ids: Vec<String>, cx: &mut Context<Self>) {
+    pub fn set_default_reactions(&mut self, reaction_ids: Vec<String>, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };

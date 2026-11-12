@@ -1,7 +1,6 @@
 use std::future::Future;
 
-use gpui_kit::*;
-
+use crate::Host;
 use crate::app_state::AppState;
 use crate::sidebar_model::channel_shown;
 use crate::team_admin::ChannelAdmin;
@@ -228,7 +227,7 @@ impl AppState {
             .any(|id| id == channel_id)
     }
 
-    pub fn set_channel_pinned(&mut self, channel_id: &str, pinned: bool, cx: &mut Context<Self>) {
+    pub fn set_channel_pinned(&mut self, channel_id: &str, pinned: bool, cx: &mut dyn Host) {
         if self.channel_pinned(channel_id) == pinned {
             return;
         }
@@ -255,14 +254,14 @@ impl AppState {
         );
     }
 
-    fn apply_pinned_channels(&mut self, channel_ids: Vec<String>, cx: &mut Context<Self>) {
+    fn apply_pinned_channels(&mut self, channel_ids: Vec<String>, cx: &mut dyn Host) {
         let _ = self.store.replace_pinned_channels(&channel_ids);
         self.directory.pinned_channels = channel_ids;
         cx.emit(crate::app_state::AppEvent::Sidebar);
         cx.notify();
     }
 
-    pub fn set_channel_shown(&mut self, channel_id: &str, shown: bool, cx: &mut Context<Self>) {
+    pub fn set_channel_shown(&mut self, channel_id: &str, shown: bool, cx: &mut dyn Host) {
         if !shown && self.channel_pinned(channel_id) {
             self.raise_notice(PINNED_CHANNEL_CANNOT_HIDE.to_owned(), None, cx);
             return;
@@ -289,7 +288,7 @@ impl AppState {
         );
     }
 
-    pub fn set_team_shown(&mut self, team_id: &str, shown: bool, cx: &mut Context<Self>) {
+    pub fn set_team_shown(&mut self, team_id: &str, shown: bool, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
         };
@@ -312,15 +311,15 @@ impl AppState {
         );
     }
 
-    pub fn copy_channel_link(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+    pub fn copy_channel_link(&mut self, channel_id: &str, cx: &mut dyn Host) {
         self.with_channel_link(channel_id, LinkUse::Copy, cx);
     }
 
-    pub fn manage_channel_in_browser(&mut self, channel_id: &str, cx: &mut Context<Self>) {
+    pub fn manage_channel_in_browser(&mut self, channel_id: &str, cx: &mut dyn Host) {
         self.with_channel_link(channel_id, LinkUse::OpenInBrowser, cx);
     }
 
-    fn with_channel_link(&mut self, channel_id: &str, link_use: LinkUse, cx: &mut Context<Self>) {
+    fn with_channel_link(&mut self, channel_id: &str, link_use: LinkUse, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             if self.mode.demo {
                 let link = teams_core::channel_link(&teams_core::ChannelAddress {
@@ -335,18 +334,22 @@ impl AppState {
             return;
         };
         let owned_id = channel_id.to_owned();
-        self.link_from(async move { engine.channel_link(&owned_id).await }, link_use, cx);
+        self.link_from(
+            async move { engine.channel_link(&owned_id).await },
+            link_use,
+            cx,
+        );
     }
 
-    pub fn copy_team_link(&mut self, team_id: &str, cx: &mut Context<Self>) {
+    pub fn copy_team_link(&mut self, team_id: &str, cx: &mut dyn Host) {
         self.with_team_link(team_id, LinkUse::Copy, cx);
     }
 
-    pub fn manage_team_in_browser(&mut self, team_id: &str, cx: &mut Context<Self>) {
+    pub fn manage_team_in_browser(&mut self, team_id: &str, cx: &mut dyn Host) {
         self.with_team_link(team_id, LinkUse::OpenInBrowser, cx);
     }
 
-    fn with_team_link(&mut self, team_id: &str, link_use: LinkUse, cx: &mut Context<Self>) {
+    fn with_team_link(&mut self, team_id: &str, link_use: LinkUse, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             if self.mode.demo {
                 let team_thread_id = self.store.team_thread_id(team_id).ok().flatten();
@@ -360,7 +363,11 @@ impl AppState {
             return;
         };
         let owned_id = team_id.to_owned();
-        self.link_from(async move { engine.team_link(&owned_id).await }, link_use, cx);
+        self.link_from(
+            async move { engine.team_link(&owned_id).await },
+            link_use,
+            cx,
+        );
     }
 
     pub fn channel_team_id(&self, channel_id: &str) -> Option<String> {
@@ -381,10 +388,10 @@ impl AppState {
             .map(|channel| channel.name.clone())
     }
 
-    fn use_link(&mut self, link: String, link_use: LinkUse, cx: &mut Context<Self>) {
+    fn use_link(&mut self, link: String, link_use: LinkUse, cx: &mut dyn Host) {
         match link_use {
             LinkUse::Copy => {
-                cx.write_to_clipboard(ClipboardItem::new_string(link));
+                cx.write_clipboard(link);
                 self.raise_notice(COPIED_TO_CLIPBOARD.to_owned(), None, cx);
             }
             LinkUse::OpenInBrowser => cx.open_url(&link),
@@ -395,36 +402,37 @@ impl AppState {
         &mut self,
         call: impl Future<Output = teams_core::Result<String>> + Send + 'static,
         link_use: LinkUse,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let receiver = crate::runtime::spawn(call);
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = match receiver.await {
                 Ok(Ok(link)) => Ok(link),
                 Ok(Err(error)) => Err(crate::notice::short_error(&error)),
                 Err(_) => Err("cancelled".to_owned()),
             };
-            this.update(cx, |state, cx| match outcome {
+            this.update(move |state, cx| match outcome {
                 Ok(link) => state.use_link(link, link_use, cx),
                 Err(reason) => state.raise_notice(link_use.failure(&reason), None, cx),
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub(crate) fn run_channel_action(
         &mut self,
         failure: &'static str,
         call: impl Future<Output = teams_core::Result<()>> + Send + 'static,
-        revert: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        revert: impl FnOnce(&mut Self, &mut dyn Host) + 'static,
         success: Option<&'static str>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let receiver = crate::runtime::spawn(call);
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let failed = !matches!(receiver.await, Ok(Ok(())));
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if failed {
                     revert(state, cx);
                     state.raise_notice(failure.to_owned(), None, cx);
@@ -432,9 +440,8 @@ impl AppState {
                     state.raise_notice(text.to_owned(), None, cx);
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 

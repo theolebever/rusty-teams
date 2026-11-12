@@ -1,34 +1,33 @@
-use gpui_kit::Context;
-
 use super::model::CallKind;
+use crate::Host;
 use crate::app_state::AppState;
 use crate::runtime;
 
 impl AppState {
-    pub fn refresh_recording_policy(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_recording_policy(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let read = runtime::spawn(async move { engine.recording_policy().await.ok() });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let Some(policy) = read.await.ok().flatten() else {
                 return;
             };
-            this.update(cx, |state, _| {
+            this.update(move |state, _| {
                 state.recording_policy = policy;
                 if let Some(call) = state.call.as_mut() {
                     call.model.recording_policy = policy;
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub(super) fn apply_recording_rights(
         &mut self,
         conversation_id: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(call) = self.call.as_mut() else {
             return;
@@ -44,19 +43,19 @@ impl AppState {
         let chat_id = chat_id.to_owned();
         let call_id = call.id;
         let read = runtime::spawn(async move { engine.own_tenant_id(&chat_id).await.ok() });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let Some(tenant) = read.await.ok().flatten() else {
                 return;
             };
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.own_tenant = Some(tenant.clone());
                 if let Some(call) = state.call.as_mut().filter(|call| call.id == call_id) {
                     call.model.own_tenant = Some(tenant);
                     cx.notify();
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }

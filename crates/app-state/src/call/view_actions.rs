@@ -1,13 +1,13 @@
 use std::time::{Duration, Instant};
 
 use calling::CallCommand;
-use gpui_kit::*;
 
-use super::caption_style::{CaptionPosition, CaptionSize};
-use super::{gallery_page, measured_stage, video_wants};
 use super::bubbles::{BUBBLE_SHOWN, ChatBubble, push_bubble};
+use super::caption_style::{CaptionPosition, CaptionSize};
 use super::fullscreen::{FullscreenState, HINT_SHOWN};
 use super::view_settings::{CallLayout, ViewSettings};
+use super::{gallery_page, measured_stage, video_wants};
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
 const CHROME_TOUCH_THROTTLE: Duration = Duration::from_millis(250);
@@ -25,7 +25,7 @@ const DEMO_BUBBLES: [(&str, &str); 4] = [
 const TIMER_SLACK: Duration = Duration::from_millis(30);
 
 impl AppState {
-    fn change_call_view(&mut self, change: impl FnOnce(&mut ViewSettings), cx: &mut Context<Self>) {
+    fn change_call_view(&mut self, change: impl FnOnce(&mut ViewSettings), cx: &mut dyn Host) {
         change(&mut self.call_view);
         self.call_view.hide_me = false;
         self.call_view.save(&self.store);
@@ -38,11 +38,11 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn set_call_layout(&mut self, layout: CallLayout, cx: &mut Context<Self>) {
+    pub fn set_call_layout(&mut self, layout: CallLayout, cx: &mut dyn Host) {
         self.change_call_view(|view| view.choose(layout), cx);
     }
 
-    pub fn turn_call_gallery_page(&mut self, forward: bool, cx: &mut Context<Self>) {
+    pub fn turn_call_gallery_page(&mut self, forward: bool, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut() else {
             return;
         };
@@ -57,27 +57,27 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn toggle_call_hide_no_video(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_hide_no_video(&mut self, cx: &mut dyn Host) {
         self.change_call_view(|view| view.hide_no_video = !view.hide_no_video, cx);
     }
 
-    pub fn set_call_caption_size(&mut self, size: CaptionSize, cx: &mut Context<Self>) {
+    pub fn set_call_caption_size(&mut self, size: CaptionSize, cx: &mut dyn Host) {
         self.change_call_view(|view| view.caption_size = size, cx);
     }
 
-    pub fn set_call_caption_position(&mut self, position: CaptionPosition, cx: &mut Context<Self>) {
+    pub fn set_call_caption_position(&mut self, position: CaptionPosition, cx: &mut dyn Host) {
         self.change_call_view(|view| view.caption_position = position, cx);
     }
 
-    pub fn toggle_call_chat_bubbles(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_chat_bubbles(&mut self, cx: &mut dyn Host) {
         self.change_call_view(|view| view.chat_bubbles = !view.chat_bubbles, cx);
     }
 
-    pub fn toggle_call_hide_timer(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_hide_timer(&mut self, cx: &mut dyn Host) {
         self.change_call_view(|view| view.hide_timer = !view.hide_timer, cx);
     }
 
-    pub fn set_call_hide_me(&mut self, hidden: bool, cx: &mut Context<Self>) {
+    pub fn set_call_hide_me(&mut self, hidden: bool, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.model.view.hide_me = hidden;
             call.model.refresh_layout(Instant::now());
@@ -85,7 +85,7 @@ impl AppState {
         }
     }
 
-    pub fn tick_call_layout(&mut self, cx: &mut Context<Self>) {
+    pub fn tick_call_layout(&mut self, cx: &mut dyn Host) {
         let changed = self
             .call
             .as_mut()
@@ -108,7 +108,7 @@ impl AppState {
         }
     }
 
-    pub fn toggle_call_fullscreen(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_fullscreen(&mut self, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut().filter(|call| call.viewing) else {
             return;
         };
@@ -121,7 +121,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn escape_call_fullscreen(&mut self, cx: &mut Context<Self>) {
+    pub fn escape_call_fullscreen(&mut self, cx: &mut dyn Host) {
         if self.stage_fullscreen() {
             self.leave_stage_fullscreen(cx);
             return;
@@ -140,7 +140,7 @@ impl AppState {
             .is_some_and(|call| call.viewing && call.fullscreen.is_some())
     }
 
-    pub fn touch_call_chrome(&mut self, cx: &mut Context<Self>) {
+    pub fn touch_call_chrome(&mut self, cx: &mut dyn Host) {
         let now = Instant::now();
         let Some(fullscreen) = self.call.as_mut().and_then(|call| call.fullscreen.as_mut()) else {
             return;
@@ -158,7 +158,7 @@ impl AppState {
         }
     }
 
-    pub fn set_call_chrome_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+    pub fn set_call_chrome_hovered(&mut self, hovered: bool, cx: &mut dyn Host) {
         let Some(fullscreen) = self
             .call
             .as_mut()
@@ -173,7 +173,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn watch_fullscreen_chrome(&mut self, cx: &mut Context<Self>) {
+    fn watch_fullscreen_chrome(&mut self, cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut() else {
             return;
         };
@@ -186,17 +186,18 @@ impl AppState {
             return;
         };
         fullscreen.timer_running = true;
-        cx.spawn(async move |this, cx| {
-            while let Ok(Some(wait)) =
-                this.update(cx, |state, cx| state.fullscreen_tick(call_id, cx))
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            while let Some(Some(wait)) = this
+                .update(move |state, cx| state.fullscreen_tick(call_id, cx))
+                .await
             {
-                cx.background_executor().timer(wait).await;
+                this.sleep(wait).await;
             }
-        })
-        .detach();
+        }));
     }
 
-    fn fullscreen_tick(&mut self, call_id: u64, cx: &mut Context<Self>) -> Option<Duration> {
+    fn fullscreen_tick(&mut self, call_id: u64, cx: &mut dyn Host) -> Option<Duration> {
         cx.notify();
         let now = Instant::now();
         let fullscreen = self
@@ -226,7 +227,7 @@ impl AppState {
         sender_id: Option<String>,
         sender_name: &str,
         text: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(call) = self.call.as_mut().filter(|call| {
             !call.chat_open
@@ -245,31 +246,29 @@ impl AppState {
                 at: Instant::now(),
             },
         );
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(BUBBLE_SHOWN + TIMER_SLACK)
-                .await;
-            this.update(cx, |_, cx| cx.notify()).ok();
-        })
-        .detach();
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(BUBBLE_SHOWN + TIMER_SLACK).await;
+            this.update(move |_, cx| cx.notify()).await;
+        }));
         cx.notify();
     }
 
-    pub fn set_call_share_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+    pub fn set_call_share_menu(&mut self, open: bool, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.share_menu_open = open;
             cx.notify();
         }
     }
 
-    pub fn set_call_lobby_list(&mut self, open: bool, cx: &mut Context<Self>) {
+    pub fn set_call_lobby_list(&mut self, open: bool, cx: &mut dyn Host) {
         if let Some(call) = self.call.as_mut() {
             call.lobby_list_open = open;
             cx.notify();
         }
     }
 
-    pub fn toggle_call_share(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_call_share(&mut self, cx: &mut dyn Host) {
         let Some(call) = self.call.as_ref() else {
             return;
         };
@@ -283,7 +282,7 @@ impl AppState {
         }
     }
 
-    pub fn open_call_lobby_list(&mut self, cx: &mut Context<Self>) {
+    pub fn open_call_lobby_list(&mut self, cx: &mut dyn Host) {
         let waiting = self
             .call
             .as_ref()
@@ -294,27 +293,30 @@ impl AppState {
         }
     }
 
-    pub(super) fn queue_demo_bubbles(&mut self, thread: &str, cx: &mut Context<Self>) {
+    pub(super) fn queue_demo_bubbles(&mut self, thread: &str, cx: &mut dyn Host) {
         let thread = thread.to_owned();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DEMO_BUBBLE_START).await;
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            this.sleep(DEMO_BUBBLE_START).await;
             for (index, (name, text)) in DEMO_BUBBLES.iter().enumerate() {
-                let sent = this.update(cx, |state, cx| {
-                    state.note_call_chat_message(
-                        &thread,
-                        &format!("demo-bubble-{index}"),
-                        Some(format!("demo-guest-{index}")),
-                        name,
-                        text,
-                        cx,
-                    )
-                });
-                if sent.is_err() {
+                let thread = thread.clone();
+                let sent = this
+                    .update(move |state, cx| {
+                        state.note_call_chat_message(
+                            &thread,
+                            &format!("demo-bubble-{index}"),
+                            Some(format!("demo-guest-{index}")),
+                            name,
+                            text,
+                            cx,
+                        )
+                    })
+                    .await;
+                if sent.is_none() {
                     return;
                 }
-                cx.background_executor().timer(DEMO_BUBBLE_EVERY).await;
+                this.sleep(DEMO_BUBBLE_EVERY).await;
             }
-        })
-        .detach();
+        }));
     }
 }

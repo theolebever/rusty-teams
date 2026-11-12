@@ -516,8 +516,28 @@ pub fn background_items(popup: PopupMenu, app: &Entity<AppState>, menu: &CameraM
     popup.item(
         PopupMenuItem::new("Add image...")
             .icon(IconName::Plus)
-            .on_click(move |_, _, cx| {
-                add_app.update(cx, |state, cx| state.add_call_background(cx))
-            }),
+            .on_click(move |_, _, cx| add_call_background(add_app.clone(), cx)),
     )
+}
+
+fn add_call_background(app: Entity<AppState>, cx: &mut App) {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    });
+    cx.spawn(async move |cx| {
+        let Some(path) = receiver
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .and_then(|paths| paths.into_iter().next())
+        else {
+            return;
+        };
+        app.update(cx, |state, cx| state.add_call_background_path(path, cx));
+    })
+    .detach();
 }

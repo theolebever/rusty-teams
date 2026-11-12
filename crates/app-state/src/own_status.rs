@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Duration, NaiveTime, TimeZone, Utc};
-use gpui_kit::*;
 use teams_core::{
     ForcedAvailability, ForcedKind, PresenceStatus, StatusNote, WorkLocation, WorkLocationKind,
     WorkLocationSource,
 };
 
+use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::backend::Engine;
 use crate::data::PresenceKind;
@@ -285,14 +285,14 @@ impl AppState {
         }
     }
 
-    pub fn set_status_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    pub fn set_status_menu_open(&mut self, open: bool, cx: &mut dyn Host) {
         if self.status_menu_open != open {
             self.status_menu_open = open;
             cx.notify();
         }
     }
 
-    pub fn request_status_message(&mut self, cx: &mut Context<Self>) {
+    pub fn request_status_message(&mut self, cx: &mut dyn Host) {
         self.status_message_request = true;
         cx.emit(AppEvent::StatusMessage);
         cx.notify();
@@ -302,7 +302,7 @@ impl AppState {
         std::mem::take(&mut self.status_message_request)
     }
 
-    pub fn refresh_own_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_own_status(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone().filter(|_| !self.mode.demo) else {
             return;
         };
@@ -312,17 +312,13 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn apply_own_status(&mut self, status: PresenceStatus, cx: &mut Context<Self>) {
+    pub fn apply_own_status(&mut self, status: PresenceStatus, cx: &mut dyn Host) {
         self.own_status = status;
         cx.emit(AppEvent::Directory);
         cx.notify();
     }
 
-    pub fn set_own_availability(
-        &mut self,
-        forced: Option<ForcedAvailability>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_own_availability(&mut self, forced: Option<ForcedAvailability>, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.own_status_engine(cx) else {
             return;
         };
@@ -347,7 +343,7 @@ impl AppState {
         );
     }
 
-    pub fn set_own_status_note(&mut self, note: Option<StatusNote>, cx: &mut Context<Self>) {
+    pub fn set_own_status_note(&mut self, note: Option<StatusNote>, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.own_status_engine(cx) else {
             return;
         };
@@ -371,11 +367,7 @@ impl AppState {
         );
     }
 
-    pub fn set_own_work_location(
-        &mut self,
-        kind: Option<WorkLocationKind>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_own_work_location(&mut self, kind: Option<WorkLocationKind>, cx: &mut dyn Host) {
         let Some(engine_or_demo) = self.own_status_engine(cx) else {
             return;
         };
@@ -393,21 +385,21 @@ impl AppState {
         let location = kind.map(|kind| (kind, end_of_day(&chrono::Local::now())));
         let receiver =
             crate::runtime::spawn(async move { engine.set_own_work_location(location).await });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let succeeded = matches!(receiver.await, Ok(Ok(())));
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 if succeeded {
                     return;
                 }
                 state.own_status = previous_status;
                 state.raise_notice(WORK_LOCATION_FAILED.to_owned(), None, cx);
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
-    fn show_own_presence(&mut self, kind: PresenceKind, cx: &mut Context<Self>) {
+    fn show_own_presence(&mut self, kind: PresenceKind, cx: &mut dyn Host) {
         if let Some(me) = self
             .directory
             .me
@@ -420,7 +412,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn own_status_engine(&mut self, cx: &mut Context<Self>) -> Option<Option<Arc<Engine>>> {
+    fn own_status_engine(&mut self, cx: &mut dyn Host) -> Option<Option<Arc<Engine>>> {
         if self.mode.read_only {
             self.raise_notice("Read-only mode: status not changed".to_owned(), None, cx);
             return None;

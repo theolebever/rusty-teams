@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use gpui_kit::*;
 use teams_core::PostFollowState;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::runtime;
 
@@ -65,7 +65,7 @@ impl AppState {
         &mut self,
         channel_id: &str,
         root_id: &str,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let key = post_key(channel_id, root_id);
         if !self.post_follows.requested.insert(key) {
@@ -82,9 +82,10 @@ impl AppState {
                 .post_follow_states(&requested_channel, &requested)
                 .await
         });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let outcome = receiver.await;
-            this.update(cx, |state, cx| match outcome {
+            this.update(move |state, cx| match outcome {
                 Ok(Ok(states)) => {
                     if let Some(follow_state) = states.get(&root) {
                         state
@@ -95,12 +96,14 @@ impl AppState {
                     }
                 }
                 _ => {
-                    state.post_follows.requested.remove(&post_key(&channel, &root));
+                    state
+                        .post_follows
+                        .requested
+                        .remove(&post_key(&channel, &root));
                 }
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 
     pub fn set_post_followed(
@@ -108,7 +111,7 @@ impl AppState {
         channel_id: &str,
         root_id: &str,
         followed: bool,
-        cx: &mut Context<Self>,
+        cx: &mut dyn Host,
     ) {
         let Some(engine_or_demo) = self.chat_action_engine(cx) else {
             return;
@@ -130,7 +133,8 @@ impl AppState {
         self.run_channel_action(
             follow_failure(followed),
             async move {
-                let annotation_failure = engine.set_post_followed(&channel, &root, followed).await?;
+                let annotation_failure =
+                    engine.set_post_followed(&channel, &root, followed).await?;
                 if let Some(error) = annotation_failure {
                     log::warn!("post follow annotation not written: {error}");
                 }

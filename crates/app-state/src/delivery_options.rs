@@ -1,7 +1,7 @@
-use gpui_kit::Context;
 use store::MessageImportance;
 use teams_core::NOTES_CHAT_ID;
 
+use crate::Host;
 use crate::app_state::AppState;
 use crate::data::is_one_on_one;
 use crate::runtime;
@@ -104,22 +104,22 @@ impl AppState {
         })
     }
 
-    pub fn refresh_messaging_policy(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_messaging_policy(&mut self, cx: &mut dyn Host) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         let read = runtime::spawn(async move { engine.allow_priority_messages().await.ok() });
-        cx.spawn(async move |this, cx| {
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
             let Some(allowed) = read.await.ok().flatten() else {
                 return;
             };
-            this.update(cx, |state, cx| {
+            this.update(move |state, cx| {
                 state.allow_priority_messages = allowed;
                 cx.notify();
             })
-            .ok();
-        })
-        .detach();
+            .await;
+        }));
     }
 }
 
