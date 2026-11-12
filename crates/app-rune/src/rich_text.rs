@@ -15,6 +15,8 @@ use crate::ui::{UiState, ts};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Rich {
     pub spans: Vec<Md>,
+    /// The own body before subject and card previews are added for display.
+    pub(crate) edit_draft: Option<teams_core::Draft>,
     pub preview: Option<LinkPreview>,
     pub cards: Vec<AdaptiveCard>,
     pub banner: Option<AnnouncementBanner>,
@@ -28,6 +30,8 @@ impl Rich {
         let attachments = teams_core::attachments(record);
         let cards = teams_core::adaptive_cards(record);
         let mut spans = teams_core::message_spans(record);
+        let own_spans: Vec<_> = spans.iter().filter(|span| !matches!(span, Md::Quote { .. })).cloned().collect();
+        let edit_draft = Some(teams_core::Draft::from_spans(&own_spans).trimmed());
         // Plain bodies keep using `MessageRow.text`, which also carries subject and card text.
         if spans.iter().all(|span| matches!(span, Md::Text(_))) {
             spans.clear();
@@ -43,6 +47,7 @@ impl Rich {
         }
         Self {
             spans,
+            edit_draft,
             preview: teams_core::link_preview(record),
             cards,
             banner: AnnouncementBanner::from_attachments(&attachments),

@@ -5,6 +5,8 @@
 use std::time::{Duration, Instant};
 
 use app_backend::schemes::active_palette;
+use app_backend::backend::LiveState;
+use chrono::{DateTime, Local, Utc};
 use rune::*;
 
 use crate::avatar::rgb;
@@ -24,6 +26,11 @@ pub struct State {
     seen: String,
     bad_since: Option<Instant>,
     banner: bool,
+    live: Option<LiveState>,
+    live_bad_since: Option<Instant>,
+    live_banner: bool,
+    pub(crate) retry_ready: bool,
+    pub(crate) last_sync: Option<DateTime<Utc>>,
 }
 
 /// The banner text for a connection status line; `None` when it is a notice or online.
@@ -44,6 +51,16 @@ fn is_connection_line(status: &str) -> bool {
 }
 
 impl State {
+    pub fn live(&mut self, state: LiveState) {
+        self.live = Some(state);
+        if matches!(state, LiveState::Connecting | LiveState::Reconnecting | LiveState::Failed) {
+            self.live_bad_since.get_or_insert_with(Instant::now);
+        } else {
+            self.live_bad_since = None;
+            self.live_banner = false;
+        }
+    }
+
     pub fn show(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), Instant::now()));
     }
@@ -81,6 +98,10 @@ impl State {
             self.banner = true;
             changed = true;
         }
+        if !self.live_banner && self.live_bad_since.is_some_and(|since| now.duration_since(since) >= SHOW_AFTER) {
+            self.live_banner = true;
+            changed = true;
+        }
         changed
     }
 }
@@ -95,11 +116,20 @@ pub fn reconnect<A: Actions + 'static>(s: &UiState<A>, _reduced_motion: bool) ->
         .child(indicator)
         .child(text("Connecting to Teams").font(ts(20.0, 600.0)).color(rgb(palette.foreground)))
         .child(text(s.toast.connection_status.clone()).font(ts(14.0, 400.0)).color(rgb(palette.text_muted)).wrap())
+        .children(s.toast.last_sync.map(|at| text(format!("Last synced {}", at.with_timezone(&Local).format("%H:%M")))
+            .font(ts(12.0, 400.0)).color(rgb(palette.text_muted))))
 }
 
 /// The amber strip for a bad connection, in the flow under the title bar.
 pub fn banner<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
-    let text_line = banner_text(&s.status).filter(|_| s.toast.banner)?;
+    let connection = banner_text(&s.toast.connection_status).filter(|_| s.toast.banner);
+    let live = s.toast.live.filter(|_| s.toast.live_banner);
+    let text_line = connection.or(match live {
+        Some(LiveState::Connecting) => Some("Connecting..."),
+        Some(LiveState::Reconnecting) => Some("Reconnecting..."),
+        Some(LiveState::Failed) => Some("Live updates unavailable"),
+        _ => None,
+    })?;
     let palette = active_palette();
     Some(
         row()
@@ -113,7 +143,9 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             .radius(8.0)
             .fill(rgb(palette.amber).alpha(0.14))
             .child(sym("status_away", 14.0).color(rgb(palette.amber)))
-            .child(text(text_line).font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0)),
+            .child(text(text_line).font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0).grow(1.0))
+            .children((connection.is_none() && live == Some(LiveState::Failed) && s.toast.retry_ready).then(||
+                crate::screens::button("Retry", "live-retry", |s: &mut UiState<A>, _| s.actions.retry_live()))),
     )
 }
 

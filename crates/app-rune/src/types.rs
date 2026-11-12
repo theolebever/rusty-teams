@@ -38,6 +38,8 @@ pub struct MessageRow {
     pub reply_to_id: Option<String>,
     pub deleted: bool,
     pub can_delete: bool,
+    pub forwarded: bool,
+    pub importance: store::MessageImportance,
     pub reactions: Vec<teams_core::ReactionSummary>,
     pub sender: String,
     /// Local time, "14:05" today, "08/11 14:05" otherwise.
@@ -81,12 +83,20 @@ pub struct Person {
     pub mail: Option<String>,
 }
 
-/// What the composer hands over at send: the text, its real mentions and chosen GIFs.
+/// The original message referenced by a chat reply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyReference {
+    pub message_id: String,
+    pub sender: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Composed {
     pub text: String,
     pub mentions: Vec<teams_core::MentionInput>,
     pub gifs: Vec<chatsvc::Gif>,
+    pub reply: Option<ReplyReference>,
 }
 
 /// What the bridge reports to the view. The view applies them in order.
@@ -105,6 +115,15 @@ pub enum Update {
     /// Ids of the edited messages of the open conversation (`message_menu.rs`).
     Edited { conversation_id: String, ids: Vec<String> },
     Typing(chatsvc::TypingEvent),
+    Receipts { conversation_id: String, states: std::collections::HashMap<String, teams_core::ReceiptState> },
+    FirstUnread { conversation_id: String, message_id: Option<String> },
+    Live(app_backend::backend::LiveState),
+    LiveRetryReady,
+    Synced(chrono::DateTime<chrono::Utc>),
+    Deleted { conversation_id: String, message_id: String },
+    Restored { conversation_id: String, message_id: String },
+    Forwarded { conversation_id: String, message_id: String, result: Result<(), String> },
+    EditFinished { conversation_id: String, message_id: String, result: Result<(), String> },
     /// Human-readable connection line: "Connecting…", "Online", "Sign in in the browser window", …
     Status(String),
     /// The signed-in user, known once the first sidebar refresh stored it.
@@ -147,6 +166,7 @@ pub enum Update {
     SendFailed {
         target: SendTarget,
         text: String,
+        reply: Option<ReplyReference>,
         files: Vec<teams_core::FileReference>,
         error: String,
     },
@@ -174,6 +194,7 @@ pub trait Actions {
     /// Shows the cached messages at once, then fetches newer ones.
     fn open(&self, conversation_id: &str);
     fn send(&self, target: SendTarget, text: String, files: Vec<teams_core::FileReference>);
+    fn send_typing(&self, _target: SendTarget, _active: bool) {}
     fn load_older(&self, _conversation_id: &str) {}
     fn open_thread(&self, _conversation_id: &str, _root: &str) {}
     fn search(&self, _conversation_id: &str, _query: &str) {}
@@ -181,10 +202,13 @@ pub trait Actions {
     fn search_all(&self, _query: &str) {}
     fn react(&self, _conversation_id: &str, _message_id: &str, _reaction: &str, _remove: bool) {}
     fn delete_message(&self, _conversation_id: &str, _message_id: &str) {}
+    fn undo_delete_message(&self, _conversation_id: &str, _message_id: &str) {}
+    fn retry_live(&self) {}
     fn read_only(&self) -> bool { false }
-    fn edit_message(&self, _conversation_id: &str, _message_id: &str, _text: &str) {}
+    /// Edits the HTML body, retaining stored mention identities.
+    fn edit_message(&self, _conversation_id: &str, _message_id: &str, _html: &str) {}
     fn pin_message(&self, _conversation_id: &str, _message_id: &str, _pin: bool) {}
-    fn forward_message(&self, _source_id: &str, _target_id: &str, _message_id: &str) {}
+    fn forward_message(&self, _source_id: &str, _target_id: &str, _message_id: &str, _comment: &str) {}
     fn mark_unread_from(&self, _conversation_id: &str, _message_id: &str) {}
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}

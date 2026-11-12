@@ -52,6 +52,9 @@ pub struct UiState<A: Actions> {
     pub chatlist: crate::view_chatlist::ChatListState,
     /// Messages of `selected`, oldest first.
     pub messages: Vec<MessageRow>,
+    pub(crate) receipts: HashMap<String, teams_core::ReceiptState>,
+    pub(crate) first_unread: Option<String>,
+    pub(crate) deleted_here: std::collections::HashSet<(String, String)>,
     pub send_error: Option<String>,
     pub composer: TextEdit,
     /// The in-conversation search field, shown while `search_open`.
@@ -86,6 +89,7 @@ pub struct UiState<A: Actions> {
     /// `poll` empties it, so only the commit that adds them animates.
     pub(crate) appearing: Vec<String>,
     drafts: HashMap<SendTarget, String>,
+    reply_drafts: HashMap<SendTarget, crate::types::ReplyReference>,
     send_errors: HashMap<SendTarget, String>,
 }
 
@@ -121,6 +125,9 @@ impl<A: Actions> UiState<A> {
             expanded_teams: Vec::new(),
             chatlist: Default::default(),
             messages: Vec::new(),
+            receipts: HashMap::new(),
+            first_unread: None,
+            deleted_here: Default::default(),
             send_error: None,
             composer: TextEdit::new(""),
             search: TextEdit::new(""),
@@ -136,6 +143,7 @@ impl<A: Actions> UiState<A> {
             more_open: None,
             menu: Default::default(),
             drafts: HashMap::new(),
+            reply_drafts: HashMap::new(),
             send_errors: HashMap::new(),
             appearing: Vec::new(),
         }
@@ -152,6 +160,40 @@ impl<A: Actions> UiState<A> {
 
     pub fn apply(&mut self, update: Update) {
         match update {
+            Update::EditFinished { conversation_id, message_id, result } => {
+                if self.selected.as_deref() == Some(&conversation_id) && self.menu.edit_id.as_deref() == Some(&message_id) {
+                    self.menu.edit_saving = false;
+                    match result {
+                        Ok(()) => self.menu.edit_id = None,
+                        Err(error) => self.menu.edit_error = Some(error),
+                    }
+                } else if let Err(error) = result { self.toast.show(format!("Could not edit message: {error}")); }
+            }
+            Update::Live(state) => self.toast.live(state),
+            Update::LiveRetryReady => self.toast.retry_ready = true,
+            Update::Synced(at) => self.toast.last_sync = Some(at),
+            Update::Deleted { conversation_id, message_id } => { self.deleted_here.insert((conversation_id, message_id)); }
+            Update::Restored { conversation_id, message_id } => { self.deleted_here.remove(&(conversation_id, message_id)); }
+            Update::Forwarded { conversation_id, message_id, result } => {
+                let active = self.selected.as_deref() == Some(&conversation_id) && self.menu.forward.as_deref() == Some(&message_id);
+                if active { self.menu.forward_sending = false; }
+                match result {
+                    Ok(()) => {
+                        if active { crate::message_menu::close(self); }
+                        self.toast.show("Message forwarded");
+                    }
+                    Err(error) => {
+                        if active { self.menu.forward_error = Some(error); }
+                        else { self.toast.show(format!("Could not forward message: {error}")); }
+                    }
+                }
+            }
+            Update::FirstUnread { conversation_id, message_id } => {
+                if self.selected.as_deref() == Some(&conversation_id) { self.first_unread = message_id; }
+            }
+            Update::Receipts { conversation_id, states } => {
+                if self.selected.as_deref() == Some(&conversation_id) { self.receipts = states; }
+            }
             Update::Audio { url, result } => self.media.voice.loaded(url, result),
             Update::CallHistory(result) => {
                 self.calls.history_loading = false;
@@ -243,16 +285,19 @@ impl<A: Actions> UiState<A> {
             Update::SendFailed {
                 target,
                 text,
+                reply,
                 files,
                 error,
             } => {
                 self.media.restore_files(target.clone(), files);
                 let error = format!("Send could not be confirmed: {error}");
                 if active_target(self).as_ref() == Some(&target) {
+                    if self.compose.reply.is_none() { self.compose.reply = reply; }
                     let current = &self.composer.text;
                     self.composer = TextEdit::new(join_draft(&text, current));
                     self.send_error = Some(error);
                 } else {
+                    if let Some(reply) = reply { self.reply_drafts.entry(target.clone()).or_insert(reply); }
                     let current = self.drafts.remove(&target).unwrap_or_default();
                     self.drafts
                         .insert(target.clone(), join_draft(&text, &current));
@@ -286,6 +331,8 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
     s.more_open = None;
     s.menu = Default::default();
     s.messages.clear();
+    s.receipts.clear();
+    s.first_unread = None;
     s.media.voice.pause();
     s.search.clear();
     s.search_open = false;
@@ -305,7 +352,10 @@ pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
 }
 
 pub(crate) fn save_draft<A: Actions>(s: &mut UiState<A>) {
+    crate::view_composer::stop_typing(s);
     if let Some(target) = active_target(s) {
+        if let Some(reply) = &s.compose.reply { s.reply_drafts.insert(target.clone(), reply.clone()); }
+        else { s.reply_drafts.remove(&target); }
         s.drafts.insert(target.clone(), s.composer.text.clone());
         if let Some(error) = s.send_error.take() { s.send_errors.insert(target, error); }
     }
@@ -315,6 +365,7 @@ fn restore_draft<A: Actions>(s: &mut UiState<A>) {
     if let Some(target) = active_target(s) {
         let stored = if target.thread_root_id.is_none() { s.actions.load_draft(&target.conversation_id) } else { None };
         s.composer = TextEdit::new(s.drafts.remove(&target).or(stored).unwrap_or_default());
+        s.compose.reply = s.reply_drafts.remove(&target);
         s.send_error = s.send_errors.remove(&target);
     }
 }
@@ -345,6 +396,7 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
         return;
     }
     s.send_error = None;
+    crate::view_composer::stop_typing(s);
     s.media.clear(&target);
     let composed = s.compose.take(text);
     s.actions.send_composed(target, composed, files);
@@ -453,6 +505,11 @@ mod tests {
         fn delete_message(&self, conversation_id: &str, message_id: &str) {
             self.calls.borrow_mut().push(format!("delete {conversation_id} {message_id}"));
         }
+        fn undo_delete_message(&self, conversation_id: &str, message_id: &str) {
+            self.calls.borrow_mut().push(format!("undo {conversation_id} {message_id}"));
+        }
+        fn retry_live(&self) { self.calls.borrow_mut().push("retry live".into()); }
+        fn load_calendar(&self, _: chrono::NaiveDate) { self.calls.borrow_mut().push("calendar".into()); }
     }
 
     fn chat(id: &str, title: &str) -> ChatRow {
@@ -467,6 +524,7 @@ mod tests {
 
     fn msg(id: &str, sender: &str, text: &str, mine: bool) -> MessageRow {
         MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: id.into(),
@@ -536,6 +594,60 @@ mod tests {
         let pane = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("teams-overview")).unwrap();
         assert_eq!(pane.opacity, 1.0, "pane must not fade in");
         assert!(rt.elements().iter().all(|e| !e.exiting), "old pane must not fade out");
+    }
+
+    #[test]
+    fn live_failure_offers_retry_without_hiding_chat_and_calendar_updates_apply() {
+        let mut rt = rt();
+        apply(&mut rt, Update::Status("Online".into()));
+        apply(&mut rt, Update::LiveRetryReady);
+        let synced = chrono::Utc::now();
+        apply(&mut rt, Update::Synced(synced));
+        apply(&mut rt, Update::Live(app_backend::backend::LiveState::Failed));
+        rt.update(|s, _| { s.toast.tick(std::time::Instant::now() + std::time::Duration::from_secs(5)); });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("connection-banner").is_some());
+        assert!(rt.find("reconnecting").is_none());
+        assert_eq!(rt.state.toast.last_sync, Some(synced));
+        click(&mut rt, "live-retry");
+        assert_eq!(calls(&rt), ["retry live"]);
+        apply(&mut rt, Update::Status("Could not load a photo".into()));
+        assert!(rt.find("live-retry").is_some());
+        apply(&mut rt, Update::Live(app_backend::backend::LiveState::Live));
+        assert!(rt.find("connection-banner").is_none());
+        apply(&mut rt, Update::CalendarRefresh);
+        apply(&mut rt, Update::Agenda(vec![]));
+        assert_eq!(calls(&rt), ["retry live", "calendar"]);
+        assert!(rt.state.screens.agenda.is_empty());
+    }
+
+    #[test]
+    fn undo_only_appears_after_successful_deletion_in_this_session() {
+        let mut rt = rt();
+        apply(&mut rt, Update::Chats(vec![chat("a", "Ada"), chat("b", "Bo")]));
+        click(&mut rt, "chat-a");
+        let mut own = msg("own", "Me", "deleted", true);
+        own.deleted = true;
+        let mut other = msg("other", "Ada", "deleted", false);
+        other.deleted = true;
+        apply(&mut rt, Update::Messages { conversation_id: "a".into(), rows: vec![own.clone(), other] });
+        assert!(rt.find("undo-delete-own").is_none());
+        apply(&mut rt, Update::Deleted { conversation_id: "a".into(), message_id: "own".into() });
+        assert!(rt.find("undo-delete-own").is_some());
+        apply(&mut rt, Update::Deleted { conversation_id: "a".into(), message_id: "other".into() });
+        assert!(rt.find("undo-delete-other").is_none());
+        click(&mut rt, "undo-delete-own");
+        assert_eq!(calls(&rt).last().unwrap(), "undo a own");
+        click(&mut rt, "chat-b");
+        apply(&mut rt, Update::Messages { conversation_id: "b".into(), rows: vec![own] });
+        assert!(rt.find("undo-delete-own").is_none());
+        click(&mut rt, "chat-a");
+        apply(&mut rt, Update::Messages { conversation_id: "a".into(), rows: vec![{
+            let mut m = msg("own", "Me", "deleted", true); m.deleted = true; m
+        }] });
+        assert!(rt.find("undo-delete-own").is_some());
+        apply(&mut rt, Update::Restored { conversation_id: "a".into(), message_id: "own".into() });
+        assert!(rt.find("undo-delete-own").is_none());
     }
 
     #[test]
@@ -742,7 +854,7 @@ mod tests {
         click(&mut rt, "chat-b");
         apply(
             &mut rt,
-            Update::SendFailed {
+            Update::SendFailed { reply: None,
                 target: SendTarget { conversation_id: "b".into(), thread_root_id: None, channel: false },
                 text: "hello".into(),
                 files: vec![],
@@ -770,7 +882,7 @@ mod tests {
         press(&mut rt, Key::Text("draft b".into()), Mods::default());
         apply(
             &mut rt,
-            Update::SendFailed {
+            Update::SendFailed { reply: None,
                 target: SendTarget { conversation_id: "a".into(), thread_root_id: None, channel: false },
                 text: "failed".into(),
                 files: vec![],
@@ -803,7 +915,7 @@ mod tests {
         press(&mut rt, Key::Text("new draft".into()), Mods::default());
         apply(
             &mut rt,
-            Update::SendFailed {
+            Update::SendFailed { reply: None,
                 target: SendTarget { conversation_id: "a".into(), thread_root_id: None, channel: false },
                 text: "sent".into(),
                 files: vec![],
@@ -826,7 +938,7 @@ mod tests {
         click(&mut rt, "reply-root");
         assert!(rt.state.composer.text.is_empty());
         click(&mut rt, "close-reply");
-        apply(&mut rt, Update::SendFailed { target: SendTarget { conversation_id: "channel".into(), thread_root_id: Some("root".into()), channel: true }, text: "reply".into(), files: vec![], error: "offline".into() });
+        apply(&mut rt, Update::SendFailed { reply: None, target: SendTarget { conversation_id: "channel".into(), thread_root_id: Some("root".into()), channel: true }, text: "reply".into(), files: vec![], error: "offline".into() });
         assert_eq!(rt.state.composer.text, "new post");
         click(&mut rt, "reply-root");
         assert_eq!(rt.state.composer.text, "reply");

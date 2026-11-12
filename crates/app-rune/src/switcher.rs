@@ -28,7 +28,7 @@ fn close<A: Actions>(s: &mut UiState<A>) {
 }
 
 /// `(id, title)` of the conversations matching `query`, recent ones first, at most `LIMIT`.
-fn candidates<A: Actions>(s: &UiState<A>, query: &str) -> Vec<(String, String)> {
+pub(crate) fn candidates<A: Actions>(s: &UiState<A>, query: &str) -> Vec<(String, String)> {
     let mut all: Vec<(String, String)> = s.chats.iter().map(|chat| (chat.id.clone(), chat.title.clone())).collect();
     all.extend(s.teams.iter().flat_map(|team| &team.channels).filter(|channel| !channel.hidden).map(|channel| (channel.id.clone(), format!("# {}", channel.name))));
     let rank = |id: &str| s.nav.recent.iter().position(|recent| recent == id).unwrap_or(usize::MAX);

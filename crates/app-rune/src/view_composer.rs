@@ -3,6 +3,8 @@
 //! add icons and the send icon inline on its right. Attachments, a thread banner and send errors
 //! stack above it.
 
+use std::time::{Duration, Instant};
+
 use app_backend::schemes::active_palette;
 use rune::*;
 use crate::ui::text;
@@ -17,10 +19,14 @@ const ICON: f32 = 20.0;
 const BUTTON: f32 = 32.0;
 const INSET: f32 = 6.0;
 const ACCENT: &str = "#5B5FC7";
+// Same interval as app-state::typing::OutgoingTyping.
+const TYPING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Composer state beyond the text: mentions, pickers and the GIFs waiting to be sent.
 #[derive(Default)]
 pub struct Compose {
+    pub reply: Option<crate::types::ReplyReference>,
+    typing_sent_at: Option<Instant>,
     pub mentions: crate::mentions::State,
     pub emoji: crate::emoji_picker::State,
     pub gif: crate::gif_picker::State,
@@ -30,13 +36,30 @@ pub struct Compose {
     saved: Option<(String, String)>,
 }
 
+fn typing_changed<A: Actions>(s: &mut UiState<A>, now: Instant) {
+    if s.read_only { return; }
+    let Some(target) = active_target(s) else { return };
+    if s.composer.text.trim().is_empty() {
+        stop_typing(s);
+    } else if s.compose.typing_sent_at.is_none_or(|sent| now.duration_since(sent) >= TYPING_INTERVAL) {
+        s.compose.typing_sent_at = Some(now);
+        s.actions.send_typing(target, true);
+    }
+}
+
+pub(crate) fn stop_typing<A: Actions>(s: &mut UiState<A>) {
+    if s.compose.typing_sent_at.take().is_some() && let Some(target) = active_target(s) {
+        s.actions.send_typing(target, false);
+    }
+}
+
 impl Compose {
     /// What is sent with `text`; the mentions and GIFs are used up.
     pub fn take(&mut self, text: String) -> crate::types::Composed {
         let mentions = crate::mentions::resolve(&text, &self.mentions.chosen);
         self.mentions.chosen.clear();
         self.gif.open = false;
-        crate::types::Composed { text, mentions, gifs: std::mem::take(&mut self.gifs) }
+        crate::types::Composed { text, mentions, gifs: std::mem::take(&mut self.gifs), reply: self.reply.take() }
     }
 }
 
@@ -51,7 +74,16 @@ pub(crate) fn persist_draft<A: Actions>(s: &mut UiState<A>) {
 }
 
 /// Ctrl+B, I, U, then the mention list's keys.
-fn composer_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent) -> bool {
+fn composer_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx) -> bool {
+    let empty = s.composer.text.is_empty() && s.compose.reply.is_none() && s.compose.gifs.is_empty()
+        && active_target(s).is_some_and(|target| s.media.files(&target).is_empty() && !s.media.is_uploading(&target));
+    if key.key == Key::Up && key.mods == Mods::default() && empty && !s.read_only {
+        let channel = active_target(s).is_some_and(|target| target.channel);
+        if let Some(message) = s.messages.iter().rev().find(|m| m.mine && !m.deleted && !m.system && (!channel || m.reply_to_id == s.thread_root_id)).cloned() {
+            crate::message_menu::begin_edit(s, &message, tx);
+            return true;
+        }
+    }
     for (letter, before, after) in [('b', "**", "**"), ('i', "*", "*"), ('u', "<u>", "</u>")] {
         if key.is_command(letter) {
             format_selection(&mut s.composer, before, after);
@@ -82,7 +114,8 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .color(c(INK))
         .w_full()
         .on_edit(|s: &mut UiState<A>| &mut s.composer)
-        .on_input_key(|s: &mut UiState<A>, key: &KeyEvent, _tx: &mut Tx| composer_key(s, key))
+        .on_input_change(|s: &mut UiState<A>, _| typing_changed(s, Instant::now()))
+        .on_input_key(|s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx| composer_key(s, key, tx))
         .on_submit(|s: &mut UiState<A>, _tx: &mut Tx| send(s));
     let field = row()
         .key("composer-field")
@@ -177,6 +210,9 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .children((target.is_some() && s.compose.cloud.open == target).then(|| crate::cloud_picker::picker(s)))
         .children(crate::gif_picker::chips(s))
         .children(target.clone().map(|target| media::attachments(s, &target)))
+        .children(s.compose.reply.as_ref().map(|reply| row().key("reply-reference").w_full().gap(8.0).px(8.0).py(6.0).center_y()
+            .child(text(format!("Replying to {}: {}", reply.sender, reply.text)).font(ts(12.0, 600.0)).color(c(INK)).truncate().grow(1.0).min_w(0.0))
+            .child(crate::screens::button("Cancel", "reply-cancel", |s: &mut UiState<A>, _| s.compose.reply = None))))
         .children(s.thread_root_id.as_ref().map(|_| row().key("close-reply").h(28.0).px(8.0).hover(c(crate::ui::HOVER))
             .on_press_tx(|s: &mut UiState<A>, _| select_thread(s, None))
             .child(text("Replying in thread · Close").font(ts(12.0, 600.0)).color(c(INK)))))
@@ -207,6 +243,9 @@ mod tests {
     impl Actions for Quiet {
         fn open(&self, _conversation_id: &str) {}
         fn send(&self, _target: SendTarget, _text: String, _files: Vec<teams_core::FileReference>) {}
+        fn send_typing(&self, target: SendTarget, active: bool) {
+            self.calls.borrow_mut().push(format!("typing {} {:?} {active}", target.conversation_id, target.thread_root_id));
+        }
         fn send_composed(&self, _target: SendTarget, composed: crate::types::Composed, _files: Vec<teams_core::FileReference>) {
             let ids: Vec<String> = composed.mentions.iter().map(|m| format!("{:?}", m.target)).collect();
             self.calls.borrow_mut().push(format!("send [{}] mentions {ids:?} gifs {}", composed.text, composed.gifs.len()));
@@ -233,6 +272,43 @@ mod tests {
         assert!(rt.find("cloud-picker").is_some() && rt.find("attach-menu").is_none());
         assert!(calls(rt).contains(&"cloud Recent".to_owned()), "{:?}", calls(rt));
         assert!(rt.find("cloud-attach").is_some() && rt.find("cloud-tab-shared").is_some());
+    }
+
+    #[test]
+    fn composer_throttles_typing_and_stops_on_send_empty_or_switch() {
+        let mut rt = rt();
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("hi".into()));
+        press(&mut rt, Key::Text(" there".into()));
+        assert_eq!(calls(&rt).iter().filter(|c| c.starts_with("typing")).count(), 1);
+        let sent = rt.state.compose.typing_sent_at.unwrap();
+        rt.update(move |s, _| typing_changed(s, sent + TYPING_INTERVAL));
+        assert_eq!(calls(&rt).iter().filter(|c| c.ends_with("true")).count(), 2);
+        rt.update(|s, _| { s.composer.clear(); typing_changed(s, Instant::now()); });
+        assert_eq!(calls(&rt).last().unwrap(), "typing b None false");
+        press(&mut rt, Key::Text("again".into()));
+        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        assert!(calls(&rt).iter().rev().take(2).any(|c| c == "typing b None false"));
+        press(&mut rt, Key::Text("draft".into()));
+        rt.update(|s, tx| crate::ui::open_chat(s, "a", tx));
+        assert_eq!(calls(&rt).last().unwrap(), "typing b None false");
+        rt.update(|s, _| { s.read_only = true; s.composer = TextEdit::new("hello"); typing_changed(s, Instant::now()); });
+        assert!(rt.state.compose.typing_sent_at.is_none());
+    }
+
+    #[test]
+    fn thread_typing_is_cleared_before_leaving_the_thread_or_screen() {
+        let mut rt = rt();
+        rt.update(|s, _| crate::ui::select_thread(s, Some("root".into())));
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("reply".into()));
+        assert_eq!(calls(&rt).last().unwrap(), "typing b Some(\"root\") true");
+        rt.update(|s, _| crate::ui::select_thread(s, None));
+        assert_eq!(calls(&rt).last().unwrap(), "typing b Some(\"root\") false");
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("chat".into()));
+        rt.update(|s, _| crate::screens::navigate(s, crate::screens::Screen::Agents));
+        assert_eq!(calls(&rt).last().unwrap(), "typing b None false");
     }
 
     #[test]

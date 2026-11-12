@@ -126,7 +126,7 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
             |s: &UiState<A>, i| message_row(s, i),
         )
         .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
-        .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s)));
+        .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s), s.first_unread.clone()));
     let id = s.selected.clone().unwrap_or_default();
     let history = col()
         .key("messages")
@@ -140,6 +140,18 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
         // Rune: a virtual/growth stack must be the last child of its scroll viewport.
         .child(rows);
     col().grow(1.0).min_h(0.0).w_full().child(history).children(typing(s))
+}
+
+fn new_divider() -> El {
+    let palette = active_palette();
+    row().key("first-unread").w_full().h(28.0).gap(8.0).center_y().label("New messages")
+        .child(el().grow(1.0).h(1.0).fill(rgb(palette.accent)))
+        .child(text("New").font(ts(12.0, 600.0)).color(rgb(palette.accent)))
+        .child(el().grow(1.0).h(1.0).fill(rgb(palette.accent)))
+}
+
+fn unread_divider<A: Actions>(s: &UiState<A>, id: &str) -> Option<El> {
+    (s.search_results.is_none() && s.first_unread.as_deref() == Some(id)).then(new_divider)
 }
 
 /// Who is typing in the open chat, as one more incoming message under the history: their
@@ -164,7 +176,7 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     let rows = s.search_results.as_ref().unwrap_or(&s.messages);
     let m = &rows[i];
     if m.system {
-        return col().w_full().child(row().key(format!("event-{}", m.id)).w_full().py(12.0).gap(8.0).center()
+        return col().w_full().children(unread_divider(s, &m.id)).child(row().key(format!("event-{}", m.id)).w_full().py(12.0).gap(8.0).center()
             .child(sym("videocam", 18.0).color(rgb(active_palette().text_muted)))
             .child(text(m.text.clone()).font(ts(12.0, 400.0)).color(rgb(active_palette().text_muted)).wrap())
             .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(active_palette().text_muted))));
@@ -173,7 +185,7 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     let (has_prev, has_next) = series(rows, i);
     let own = m.mine;
     let palette = active_palette();
-    let jumbo = !m.deleted && emoji_only(&m.text);
+    let jumbo = !m.deleted && !m.forwarded && m.importance == store::MessageImportance::Normal && emoji_only(&m.text);
     let body = bubble(s, m, own, has_prev, has_next, jumbo);
     let bubble_row = if own {
         row().gap(4.0).center_y().children(toolbar(s, m)).child(body)
@@ -193,7 +205,7 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     let content = if own {
         let meta = row().gap(4.0).center_y()
             .child(text(m.when.clone()).font(ts(META, 400.0)).color(rgb(palette.own_meta)))
-            .children((!m.deleted).then(|| sym("done_all", CHECK).color(rgb(palette.own_read))));
+            .children((!m.deleted).then(|| receipt(s, m)).flatten());
         row().w_full().justify_end().child(stack.child(meta))
     } else {
         // Only the first post of a run carries the avatar; the rest keep the spacer so text stays aligned.
@@ -202,13 +214,49 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
     let gap = if has_prev { SERIES_GAP } else { START_GAP };
-    let mut line = col().w_full().pt(gap).pl(indent).hover_group().child(content);
+    let mut line = col().w_full().pt(gap).pl(indent).hover_group().children(unread_divider(s, &m.id)).child(content);
     if !s.read_only && !m.deleted {
         let id = m.id.clone();
         line = line.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
     }
     if s.appearing.contains(&m.id) { line = line.transition(arrival(own)); }
     crate::find::mark(s, &m.id, line)
+}
+
+fn receipt<A: Actions>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
+    let (icon, label) = match s.receipts.get(&m.id)? {
+        teams_core::ReceiptState::Sent => ("check", "Sent"),
+        teams_core::ReceiptState::Read { .. } => ("done_all", "Seen"),
+        teams_core::ReceiptState::Unknown => return None,
+    };
+    Some(sym(icon, CHECK).key(format!("receipt-{}-{label}", m.id)).label(label).color(rgb(active_palette().own_read)))
+}
+
+fn labels(m: &MessageRow) -> Option<El> {
+    if m.deleted { return None; }
+    let palette = active_palette();
+    let mut line = row().key(format!("labels-{}", m.id)).gap(8.0).center_y();
+    if m.forwarded {
+        line = line.child(text("Forwarded").key(format!("forwarded-{}", m.id)).font(ts(11.0, 400.0)).color(rgb(palette.text_muted)));
+    }
+    let importance = match m.importance {
+        store::MessageImportance::Normal => None,
+        store::MessageImportance::High => Some("Important"),
+        store::MessageImportance::Urgent => Some("Urgent"),
+    };
+    if let Some(label) = importance {
+        line = line.child(text(label).key(format!("importance-{}", m.id)).font(ts(12.0, 600.0)).color(rgb(palette.red)));
+    }
+    (m.forwarded || importance.is_some()).then_some(line)
+}
+
+fn undo<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
+    let conversation = s.selected.as_ref()?;
+    if s.read_only || !m.mine || !m.deleted || !s.deleted_here.contains(&(conversation.clone(), m.id.clone())) { return None; }
+    let (conversation, id) = (conversation.clone(), m.id.clone());
+    Some(crate::screens::button("Undo", &format!("undo-delete-{id}"), move |s: &mut UiState<A>, _| {
+        s.actions.undo_delete_message(&conversation, &id);
+    }))
 }
 
 fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
@@ -247,6 +295,8 @@ fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
                     .child(text(m.when.clone()).font(ts(12.0, 400.0)).color(rgb(palette.text_muted))))
                 .children(toolbar(s, m)))
             .children((!m.text.is_empty() && s.menu.edit_id.as_deref() != Some(m.id.as_str())).then(|| crate::rich_text::body::<A>(m, 14.0, rgb(palette.foreground))))
+            .children(labels(m))
+            .children(undo(s, m))
             .children(crate::message_menu::edit_field(s, m))
             .children(crate::message_menu::edited_mark(s, m))
             .child(crate::media::view(s, &m.media, &m.id))
@@ -266,6 +316,7 @@ fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded:
                 .unwrap_or_else(|| crate::rich_text::body::<A>(m, 13.0, rgb(palette.foreground)))
         } else { body.truncate() })
         .children(crate::message_menu::edited_mark(s, m));
+    content = content.children(labels(m)).children(undo(s, m));
     if expanded {
         content = content.child(crate::media::view(s, &m.media, &m.id))
             .child(crate::reactions::controls(s, m));
@@ -295,7 +346,8 @@ fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_p
         body = body.fill(rgb(if own { palette.bubble_own } else { palette.bubble_other }));
         palette.foreground
     };
-    body.child(crate::rich_text::body::<A>(m, BODY, rgb(ink)))
+    body.children(labels(m)).child(crate::rich_text::body::<A>(m, BODY, rgb(ink)))
+        .children(undo(s, m))
         .child(crate::media::view(s, &m.media, &m.id))
         .children(crate::message_menu::edited_mark(s, m))
 }
@@ -361,6 +413,7 @@ mod tests {
 
     fn msg(id: &str, sender: &str, mine: bool, text: &str) -> MessageRow {
         MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: id.into(),
@@ -393,6 +446,58 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn unread_boundary_survives_refresh_and_stays_out_of_search_and_other_chats() {
+        let rows = vec![msg("old", "Ada", false, "before"), msg("new", "Bo", false, "after")];
+        let mut rt = show(rows.clone());
+        rt.update(|s, _| s.apply(Update::FirstUnread { conversation_id: "a".into(), message_id: Some("new".into()) }));
+        rt.frame(1.0 / 60.0);
+        let divider = rt.find("first-unread").unwrap();
+        assert!(rt.find("msg-old").unwrap().1 < divider.1 && divider.1 < rt.find("bubble-new").unwrap().1);
+        rt.update(move |s, _| {
+            s.apply(Update::Messages { conversation_id: "a".into(), rows });
+            s.apply(Update::FirstUnread { conversation_id: "other".into(), message_id: None });
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("first-unread").is_some());
+        rt.update(|s, _| s.search_results = Some(s.messages.clone()));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("first-unread").is_none());
+        rt.update(|s, tx| crate::ui::open_chat(s, "other", tx));
+        assert!(rt.state.first_unread.is_none());
+    }
+
+    #[test]
+    fn own_receipts_follow_backend_state_and_ignore_other_chats() {
+        let mut rt = show(vec![msg("m1", "Me", true, "hello")]);
+        assert!(rt.find("receipt-m1-Seen").is_none());
+        for state in [teams_core::ReceiptState::Sent, teams_core::ReceiptState::Read { readers: vec![], total_others: 1 }, teams_core::ReceiptState::Unknown] {
+            let label = match state { teams_core::ReceiptState::Sent => "Sent", teams_core::ReceiptState::Read { .. } => "Seen", _ => "Unknown" };
+            rt.update(move |s, _| s.apply(Update::Receipts { conversation_id: "a".into(), states: [("m1".into(), state)].into() }));
+            rt.frame(1.0 / 60.0);
+            assert_eq!(rt.find(&format!("receipt-m1-{label}")).is_some(), label != "Unknown");
+        }
+        rt.update(|s, _| s.apply(Update::Receipts { conversation_id: "other".into(), states: [("m1".into(), teams_core::ReceiptState::Sent)].into() }));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("receipt-m1-Sent").is_none());
+    }
+
+    #[test]
+    fn forwarded_and_importance_labels_follow_the_row_and_hide_when_deleted() {
+        let mut m = msg("m", "Ada", false, "hello");
+        m.forwarded = true;
+        m.importance = store::MessageImportance::High;
+        let mut rt = show(vec![m]);
+        assert!(rt.find("forwarded-m").is_some());
+        assert!(rt.find("importance-m").is_some());
+        rt.update(|s, _| s.messages[0].importance = store::MessageImportance::Urgent);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("importance-m").is_some());
+        rt.update(|s, _| s.messages[0].deleted = true);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("labels-m").is_none());
     }
 
     #[test]

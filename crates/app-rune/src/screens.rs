@@ -90,6 +90,7 @@ fn occurs_on(event: &CalendarRow, date: NaiveDate) -> bool {
 }
 
 pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
+    if s.screens.screen != screen { crate::view_composer::stop_typing(s); }
     if screen == Screen::Teams && s.selected.as_ref().is_some_and(|id| !s.teams.iter().flat_map(|t| &t.channels).any(|c| &c.id == id)) {
         ui::save_draft(s);
         s.selected = None;

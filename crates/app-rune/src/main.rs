@@ -123,11 +123,9 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let status = s.status.clone();
     let noticed = s.toast.observe(&status);
     let ticked = s.toast.tick(now);
-    let opened = s.profile.chat_request.take().map(|id| {
-        screens::navigate(s, screens::Screen::Chat);
-        ui::open_chat(s, &id, tx);
-    });
-    changed || noticed || ticked || opened.is_some()
+    let opened = notifications::open_pending(s, tx);
+    if opened { rune_notify::bring_to_front(); }
+    changed || noticed || ticked || opened
 }
 
 fn main() {
@@ -166,7 +164,7 @@ fn main() {
         }
         app_backend::crash_log::install(directory.join(app_backend::crash_log::CRASH_LOG_FILE));
         app_backend::diagnostics::install(directory.join(app_backend::diagnostics::DIAGNOSTICS_FILE));
-        if let Err(error) = rune_notify::register(&rune_notify::Identity::new("rusty-teams-rune", TITLE)) {
+        if let Err(error) = rune_notify::register(&rune_notify::Identity::new("rusty-teams-rune", TITLE).activation(notifications::ACTIVATION_SCHEME)) {
             app_backend::diagnostics::record(format!("Notifications unavailable: {error}"));
         }
     }
@@ -202,7 +200,15 @@ fn main() {
     })
     .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
     .on_window(window_icon::install)
-    .on_focus(|state, focused, _| state.window_focused = focused)
+    .on_focus(|state, focused, _| {
+        state.window_focused = focused;
+        if !focused { view_composer::stop_typing(state); }
+    })
+    .on_open_url(|state, url, _| {
+        if let Some(click) = rune_notify::click_from_url(url) && let Some(update) = notifications::clicked(&click) {
+            state.apply(update);
+        }
+    })
     .on_close(|state, _| view_composer::persist_draft(state))
     .on_quit(|state, _| {
         state.actions.shutdown();
@@ -310,6 +316,7 @@ fn demo_init() -> UiState<DemoActions> {
     });
     let rows = (0..60)
         .map(|i| MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: format!("m{i}"),

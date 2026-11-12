@@ -398,6 +398,7 @@ mod runtime_tests {
         apply(rt, Update::Chats(vec![ChatRow { id: "a".into(), title: "Ada".into(), preview: String::new(), unread: false, when: String::new() }]));
         click(rt, "chat-a");
         let row = MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: Some("u1".into()), system: false, id: "m".into(), reply_to_id: None, deleted: false, can_delete: false,
             reactions: vec![], sender: "Ada".into(), when: "14:06".into(), text: "hi".into(), mine: false, media: Default::default(),
         };

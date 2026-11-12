@@ -655,6 +655,7 @@ mod tests {
 
     fn message(id: &str, media: Content) -> crate::types::MessageRow {
         crate::types::MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: id.into(),

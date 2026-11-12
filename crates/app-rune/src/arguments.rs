@@ -20,6 +20,7 @@ impl Arguments {
         let mut input = input.into_iter();
         while let Some(flag) = input.next() {
             match flag.as_str() {
+                url if url.starts_with(crate::notifications::ACTIVATION_PREFIX) => {},
                 "--no-sso" => parsed.no_sso = true,
                 "--sso" => parsed.no_sso = false,
                 "--read-only" => parsed.read_only = true,
@@ -49,6 +50,12 @@ mod tests {
 
     fn parse(values: &[&str]) -> Result<Arguments, String> {
         Arguments::parse(values.iter().map(|value| (*value).to_owned()))
+    }
+
+    #[test]
+    fn notification_activation_is_left_for_runes_url_handler() {
+        assert_eq!(parse(&["rusty-teams-rune://notification/message?conversation_id=chat"]).unwrap(), parse(&[]).unwrap());
+        assert!(parse(&["unknown://notification/message"]).is_err());
     }
 
     #[test]

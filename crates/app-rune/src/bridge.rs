@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use scraper::{Html, Node};
@@ -45,6 +46,9 @@ pub(crate) struct Shared {
     foreground: Mutex<(Option<String>, bool)>,
     engine: Mutex<Option<Arc<Engine>>>,
     open: Mutex<Option<String>>,
+    open_generation: AtomicU64,
+    live_retry: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    calendar_nudge: Mutex<Option<tokio_mpsc::UnboundedSender<()>>>,
     updates: Sender<Update>,
     wake: Box<dyn Fn() + Send + Sync>,
     agent_stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -129,6 +133,9 @@ impl Shared {
                     .flatten()
                     .unwrap_or_default();
                 let rows = message_rows(&records, &me, Local::now());
+                let show_receipts = teams_core::stored_chat_settings(engine.store()).settings().read_receipts;
+                let states = records.iter().filter(|_| show_receipts).map(|record| (record.message_id.clone(), engine.receipt_state_for(record))).collect();
+                self.publish(Update::Receipts { conversation_id: conversation_id.to_owned(), states });
                 let edited = records.iter().filter(|record| record.edited_at.is_some() && !record.deleted).map(|record| record.message_id.clone()).collect();
                 self.publish_avatars(engine, records.iter().filter_map(|record| record.sender_id.clone()).collect());
                 self.publish(Update::Messages {
@@ -228,9 +235,18 @@ impl Bridge {
             foreground: Mutex::new((None, false)),
             engine: Mutex::new(None),
             open: Mutex::new(None),
+            open_generation: AtomicU64::new(0),
+            live_retry: Mutex::new(None),
+            calendar_nudge: Mutex::new(None),
             updates,
             wake: Box::new(wake),
         }});
+        let notification_shared = Arc::downgrade(&shared);
+        rune_notify::on_click(move |click| {
+            if let Some(shared) = notification_shared.upgrade() && let Some(update) = crate::notifications::clicked(&click) {
+                shared.publish(update);
+            }
+        });
         let database = database.unwrap_or_else(|| data_path(DATABASE_FILE));
         let store = Arc::new(open_store(&database));
         let transport = endpoint.map_or_else(|| transport(&database, no_sso), |endpoint| Arc::new(session::CdpTransport::new(&endpoint)) as Arc<dyn session::Transport>);
@@ -485,18 +501,51 @@ impl Actions for Bridge {
         app_backend::runtime::handle().spawn(async move {
             if let Err(error) = engine.soft_delete_message(&conversation_id, &message_id).await {
                 shared.publish(Update::Status(format!("Could not delete message: {error}")));
-            } else if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
+            } else {
+                shared.publish(Update::Deleted { conversation_id: conversation_id.clone(), message_id });
+                if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
+            }
         });
     }
-    fn edit_message(&self, conversation_id: &str, message_id: &str, text: &str) {
+    fn undo_delete_message(&self, conversation_id: &str, message_id: &str) {
         if self.shared.read_only { return; }
         let Some(engine) = self.shared.engine() else { return };
         let shared = self.shared.clone();
-        let (conversation_id, message_id, text) = (conversation_id.to_owned(), message_id.to_owned(), text.to_owned());
+        let (conversation_id, message_id) = (conversation_id.to_owned(), message_id.to_owned());
         app_backend::runtime::handle().spawn(async move {
-            if let Err(error) = engine.edit_message(&conversation_id, &message_id, &text).await {
-                shared.publish(Update::Status(format!("Could not edit message: {error}")));
-            } else if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
+            match engine.undo_soft_delete_message(&conversation_id, &message_id).await {
+                Ok(()) => {
+                    shared.publish(Update::Restored { conversation_id: conversation_id.clone(), message_id });
+                    if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
+                }
+                Err(error) => shared.publish(Update::Status(format!("Message restore failed. Please try again: {error}"))),
+            }
+        });
+    }
+    fn retry_live(&self) {
+        if let Some(retry) = &*self.shared.live_retry.lock().unwrap_or_else(PoisonError::into_inner) {
+            retry.notify_one();
+        }
+    }
+    fn edit_message(&self, conversation_id: &str, message_id: &str, html: &str) {
+        if self.shared.read_only { return; }
+        let Some(engine) = self.shared.engine() else {
+            self.shared.publish(Update::EditFinished { conversation_id: conversation_id.to_owned(), message_id: message_id.to_owned(), result: Err("Not connected yet".into()) });
+            return;
+        };
+        let shared = self.shared.clone();
+        let (conversation_id, message_id, html) = (conversation_id.to_owned(), message_id.to_owned(), html.to_owned());
+        app_backend::runtime::handle().spawn(async move {
+            let result: Result<(), String> = async {
+                let record = engine.store().messages_by_id(&conversation_id, std::slice::from_ref(&message_id))
+                    .map_err(|error| error.to_string())?.remove(&message_id)
+                    .ok_or_else(|| "Original message is not cached".to_owned())?;
+                let mentions = teams_core::user_mention_inputs(&record);
+                engine.edit_message_html(&conversation_id, &message_id, &html, &mentions).await.map_err(|error| error.to_string())
+            }.await;
+            let saved = result.is_ok();
+            shared.publish(Update::EditFinished { conversation_id: conversation_id.clone(), message_id, result });
+            if saved && shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
         });
     }
     fn pin_message(&self, conversation_id: &str, message_id: &str, pin: bool) {
@@ -513,16 +562,19 @@ impl Actions for Bridge {
             }
         });
     }
-    fn forward_message(&self, source_id: &str, target_id: &str, message_id: &str) {
+    fn forward_message(&self, source_id: &str, target_id: &str, message_id: &str, comment: &str) {
         if self.shared.read_only { return; }
-        let Some(engine) = self.shared.engine() else { return };
+        let Some(engine) = self.shared.engine() else {
+            self.shared.publish(Update::Forwarded { conversation_id: source_id.to_owned(), message_id: message_id.to_owned(), result: Err("Not connected yet".into()) });
+            return;
+        };
         let shared = self.shared.clone();
         let (source, target, id) = (source_id.to_owned(), target_id.to_owned(), message_id.to_owned());
+        let comment = comment.to_owned();
         app_backend::runtime::handle().spawn(async move {
-            match engine.forward_messages(&source, &target, &[id], "").await {
-                Ok(_) => shared.publish(Update::Status("Message forwarded".into())),
-                Err(error) => shared.publish(Update::Status(format!("Could not forward message: {error}"))),
-            }
+            let result = engine.forward_messages(&source, &target, std::slice::from_ref(&id), &comment).await
+                .map(|_| ()).map_err(|error| error.to_string());
+            shared.publish(Update::Forwarded { conversation_id: source, message_id: id, result });
         });
     }
     fn mark_unread_from(&self, conversation_id: &str, message_id: &str) {
@@ -561,7 +613,10 @@ impl Actions for Bridge {
         let ical_uid = ical_uid.map(str::to_owned);
         app_backend::runtime::handle().spawn(async move {
             match calls.respond_to_event(&id, ical_uid.as_deref(), reply, send_response).await {
-                Ok(()) => shared.publish(Update::CalendarRefresh),
+                Ok(()) => {
+                    if let Some(nudge) = &*shared.calendar_nudge.lock().unwrap_or_else(PoisonError::into_inner) { let _ = nudge.send(()); }
+                    shared.publish(Update::CalendarRefresh);
+                }
                 Err(error) => shared.publish(Update::Status(format!("Could not respond to event: {error}"))),
             }
         });
@@ -695,6 +750,9 @@ impl Actions for Bridge {
     }
 
     fn load_agenda(&self) {
+        if let Some(nudge) = &*self.shared.calendar_nudge.lock().unwrap_or_else(PoisonError::into_inner)
+            && nudge.send(()).is_ok()
+        { return; }
         let calls = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let Some(calls) = calls else {
             self.shared.publish(Update::Status("Calendar is not connected yet".into()));
@@ -730,6 +788,7 @@ impl Actions for Bridge {
     }
 
     fn open(&self, conversation_id: &str) {
+        let generation = self.shared.open_generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.shared.open_threads.lock().unwrap_or_else(PoisonError::into_inner).clear();
         *self.shared.message_limit.lock().unwrap_or_else(PoisonError::into_inner) = 50;
         *self
@@ -740,6 +799,10 @@ impl Actions for Bridge {
         let Some(engine) = self.shared.engine() else {
             return;
         };
+        // Capture the boundary before mark_read advances the stored horizon.
+        let first_unread = engine.first_unread_message_id(conversation_id);
+        let unread_chat = engine.store().chat(conversation_id).ok().flatten().filter(|chat| chat.unread);
+        self.shared.publish(Update::FirstUnread { conversation_id: conversation_id.to_owned(), message_id: first_unread.clone() });
         self.shared.publish_messages(&engine, conversation_id);
         {
             let shared = self.shared.clone();
@@ -750,6 +813,10 @@ impl Actions for Bridge {
                     shared.publish(Update::Status(format!("Could not mark conversation {conversation_id} read: {error}")));
                 }
                 refresh_pins(&shared, &engine, &conversation_id).await;
+                if let Err(error) = engine.refresh_receipts(&conversation_id).await {
+                    shared.publish(Update::Status(format!("Read receipts unavailable: {error}")));
+                }
+                if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
                 if let Ok(Some(chat)) = engine.store().chat(&conversation_id) {
                     let ids: Vec<_> = chat.members.iter().filter(|member| !member.is_bot()).filter_map(|member| member.user_id.clone()).collect();
                     if let Err(error) = engine.watch_presence(&ids).await { shared.publish(Update::Status(format!("Presence subscription unavailable: {error}"))); }
@@ -765,6 +832,13 @@ impl Actions for Bridge {
             match engine.fetch_newer(&conversation_id).await {
                 Ok(_) => {
                     if shared.is_open(&conversation_id) {
+                        if shared.open_generation.load(Ordering::Relaxed) == generation
+                            && first_unread.is_none() && let Some(chat) = unread_chat
+                        {
+                            let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
+                            let message_id = engine.store().first_message_after_from_others(&conversation_id, chat.last_read_at, &me).ok().flatten();
+                            shared.publish(Update::FirstUnread { conversation_id: conversation_id.clone(), message_id });
+                        }
                         shared.publish_messages(&engine, &conversation_id);
                     }
                 }
@@ -777,6 +851,16 @@ impl Actions for Bridge {
 
     fn send(&self, target: SendTarget, text: String, files: Vec<teams_core::FileReference>) {
         self.send_to(target, crate::types::Composed { text, ..Default::default() }, files);
+    }
+
+    fn send_typing(&self, target: SendTarget, active: bool) {
+        if self.shared.read_only { return; }
+        let Some(engine) = self.shared.engine() else { return };
+        app_backend::runtime::handle().spawn(async move {
+            if let Err(error) = engine.send_typing(&target.conversation_id, target.thread_root_id.as_deref(), active).await {
+                app_backend::diagnostics::record(format!("Could not send typing: {error}"));
+            }
+        });
     }
 
     fn send_composed(&self, target: SendTarget, composed: crate::types::Composed, files: Vec<teams_core::FileReference>) {
@@ -847,18 +931,19 @@ impl Actions for Bridge {
 
 impl Bridge {
     fn send_to(&self, target: SendTarget, composed: crate::types::Composed, files: Vec<teams_core::FileReference>) {
-        let crate::types::Composed { text, mentions, gifs } = composed;
+        let crate::types::Composed { text, mentions, gifs, reply } = composed;
         if text.trim().is_empty() && files.is_empty() && gifs.is_empty() {
             return;
         }
         if self.shared.read_only {
-            self.shared.publish(Update::SendFailed { target, text, files, error: "Read-only mode".into() });
+            self.shared.publish(Update::SendFailed { target, text, reply, files, error: "Read-only mode".into() });
             return;
         }
         let Some(engine) = self.shared.engine() else {
             self.shared.publish(Update::SendFailed {
                 target,
                 text,
+                reply,
                 files,
                 error: "Not connected yet".into(),
             });
@@ -869,7 +954,9 @@ impl Bridge {
             let conversation_id = &target.conversation_id;
             let extras = teams_core::MessageExtras { files: files.clone(), ..Default::default() };
             let html = crate::composed::html(&text, &gifs);
-            let result = if let Some(root) = &target.thread_root_id {
+            let result = if let Some(reply) = &reply {
+                engine.reply_to_with_extras(conversation_id, &reply.message_id, &html, &mentions, &extras).await
+            } else if let Some(root) = &target.thread_root_id {
                 engine.send_message_with_extras(conversation_id, &html, Some(root), &mentions, &extras).await
             } else if target.channel {
                 engine.post_to_channel_with_extras(conversation_id, &html, None, &mentions, &extras).await
@@ -881,6 +968,7 @@ impl Bridge {
                 Err(error) => shared.publish(Update::SendFailed {
                     target,
                     text,
+                    reply,
                     files,
                     error: error.to_string(),
                 }),
@@ -927,6 +1015,19 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
     let mut notifications = crate::notifications::Notifications::new();
     while let Some(event) = events.recv().await {
         match event {
+            BackendEvent::Live(state) => shared.publish(Update::Live(state)),
+            BackendEvent::LiveRetry(retry) => {
+                *shared.live_retry.lock().unwrap_or_else(PoisonError::into_inner) = Some(retry);
+                shared.publish(Update::LiveRetryReady);
+            }
+            BackendEvent::Synced(at) => shared.publish(Update::Synced(at)),
+            BackendEvent::Calendar(events) => {
+                shared.publish(Update::Agenda(events));
+                shared.publish(Update::CalendarRefresh);
+            }
+            BackendEvent::CalendarNudge(nudge) => {
+                *shared.calendar_nudge.lock().unwrap_or_else(PoisonError::into_inner) = Some(nudge);
+            }
             BackendEvent::Typing(event) => shared.publish(Update::Typing(event)),
             BackendEvent::Connection(state) => {
                 if state == ConnectionState::Online && let Some(engine) = shared.engine() {
@@ -943,6 +1044,8 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 // so set it here; later Connection events, sent after this one, still override it.
                 shared.publish_chats(&engine);
                 refresh_me(&shared, &engine);
+                let pending = shared.open.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if let Some(id) = pending { shared.publish(Update::OpenChat(id)); }
                 if let Some(activity) = teams_core::stored_activity_feed(engine.store()) { shared.publish(Update::Activity(activity)); }
                 shared.publish(Update::Appearance(app_backend::appearance::load(engine.store())));
                 let settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
@@ -989,6 +1092,9 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                     CoreEvent::PresenceStatusChanged(status) => shared.publish(Update::OwnStatus(status)),
                     CoreEvent::PinsChanged { conversation_id } => {
                         if shared.is_open(&conversation_id) { refresh_pins(&shared, &engine, &conversation_id).await; }
+                    }
+                    CoreEvent::ReceiptsChanged { conversation_id } => {
+                        if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
                     }
                     CoreEvent::MessagesStoredLate { conversation_id, message_ids } => {
                         notifications.mark_late(&conversation_id, message_ids);
@@ -1113,6 +1219,8 @@ pub fn message_rows(
             reply_to_id: record.reply_to_id.clone(),
             deleted: record.deleted,
             can_delete: teams_core::can_delete(record, my_id),
+            forwarded: teams_core::is_forwarded(record),
+            importance: if record.deleted { Default::default() } else { record.importance },
             reactions: teams_core::reaction_summaries(record, (!my_id.is_empty()).then_some(my_id)),
             sender: record
                 .sender_name
@@ -1272,6 +1380,22 @@ mod tests {
         record.body_html = "<p>Ready to ship</p>".into();
         assert!(channel_post(&record));
         assert_eq!(message_text(&record), "Release notes\nReady to ship");
+    }
+
+    #[test]
+    fn message_rows_keep_forward_and_importance_metadata_but_hide_it_for_deletes() {
+        let mut record = MessageRecord {
+            body_html: "<blockquote itemtype=\"http://schema.skype.com/Forward\">Forwarded</blockquote>".into(),
+            importance: store::MessageImportance::Urgent,
+            ..Default::default()
+        };
+        let rows = message_rows(std::slice::from_ref(&record), "me", Local::now());
+        assert!(rows[0].forwarded);
+        assert_eq!(rows[0].importance, store::MessageImportance::Urgent);
+        record.deleted = true;
+        let rows = message_rows(&[record], "me", Local::now());
+        assert!(!rows[0].forwarded);
+        assert_eq!(rows[0].importance, store::MessageImportance::Normal);
     }
 
     #[test]

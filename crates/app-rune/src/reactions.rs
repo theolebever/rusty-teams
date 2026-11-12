@@ -181,6 +181,7 @@ mod tests {
 
     fn msg(id: &str, reactions: Vec<ReactionSummary>) -> MessageRow {
         MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: id.into(),

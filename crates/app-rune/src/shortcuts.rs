@@ -313,6 +313,7 @@ mod tests {
 
     fn msg(i: usize, text: &str) -> MessageRow {
         MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: format!("m{i}"),

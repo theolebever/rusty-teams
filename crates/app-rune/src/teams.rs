@@ -74,6 +74,7 @@ mod tests {
 
     fn row(id: &str, reply_to: Option<&str>) -> MessageRow {
         MessageRow {
+            forwarded: false, importance: Default::default(),
             sender_id: None,
             system: false,
             id: id.into(),
