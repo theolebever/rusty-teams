@@ -16,6 +16,7 @@ mod sidebar_load;
 pub mod channel_filter;
 pub mod chat_filter;
 pub mod find_in_chat;
+pub mod host;
 pub mod forward_selection;
 pub mod chat_members;
 pub mod chat_settings_actions;
@@ -62,6 +63,7 @@ mod warm_chats;
 pub mod urgent_ack;
 
 pub use app_ui_kit::render;
+pub use host::{Host, StateHandle};
 pub use app_base::{
     APP_NAME, appearance, autostart, avatar_image, channel_files, crash_log, demo_cards, demo_chart_cards, demo_gifs,
     demo_input_cards, demo_library, demo_recap, diagnostics, downloads, format, frame_log, fuzzy,
