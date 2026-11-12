@@ -35,6 +35,23 @@ const QUICK: [(&str, &str); 3] = [
 /// The chip toggles and the collapsed sections. Lives on `UiState` between frames.
 #[derive(Default)]
 pub struct ChatListState {
+    pub team_details: std::collections::HashMap<String, crate::types::TeamDetails>,
+    pub channel_details: std::collections::HashMap<String, crate::types::ChannelDetails>,
+    pub pinned_channels: Vec<String>,
+    pub show_hidden_teams: bool,
+    pub team_menu: crate::team_menu::State,
+    pub copy_link: Option<String>,
+    pub folders: Vec<teams_core::ChatFolder>,
+    pub favorites: Vec<String>,
+    pub has_older: bool,
+    pub loading_older: bool,
+    pub new_section: bool,
+    pub section_name: TextEdit,
+    pub more: bool,
+    pub filter_open: bool,
+    pub filter: TextEdit,
+    pub quick_view: Option<crate::quick_views::QuickView>,
+    pub saved: Option<Result<Vec<teams_core::SavedMessage>, String>>,
     pub show_hidden_channels: Vec<String>,
     pub filters: Vec<Pill>,
     /// Section ids (`CHATS`, `TEAMS`, `QUICK_VIEWS`) folded shut.
@@ -48,6 +65,8 @@ pub enum Pill {
     Unread,
     Chats,
     Meetings,
+    Mentions,
+    Muted,
 }
 
 impl Pill {
@@ -58,6 +77,8 @@ impl Pill {
             Pill::Unread => "unread",
             Pill::Chats => "chats",
             Pill::Meetings => "meetings",
+            Pill::Mentions => "mentions",
+            Pill::Muted => "muted",
         }
     }
 
@@ -66,6 +87,8 @@ impl Pill {
             Pill::Unread => "Unread",
             Pill::Chats => "Chats",
             Pill::Meetings => "Meeting chats",
+            Pill::Mentions => "@Mentions",
+            Pill::Muted => "Muted",
         }
     }
 }
@@ -86,9 +109,34 @@ pub fn visible_chats(state: &ChatListState, chats: &[ChatRow]) -> Vec<usize> {
                 _ => true,
             };
             kind && (!on(Pill::Unread) || chat.unread)
+                && chat.title.to_lowercase().contains(&state.filter.text.trim().to_lowercase())
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+pub(crate) fn filtered_chats<A: Actions>(s: &UiState<A>) -> Vec<usize> {
+    visible_chats(&s.chatlist, &s.chats).into_iter().filter(|&i| {
+        let id = &s.chats[i].id;
+        (!s.chatlist.filters.contains(&Pill::Muted) || s.details.get(id).is_some_and(|d| d.muted))
+            && (!s.chatlist.filters.contains(&Pill::Mentions) || s.screens.activity.items.iter().any(|item| crate::quick_views::is_mention(&item.activity_type) && !s.screens.activity.is_read(item) && &item.source_thread_id == id))
+    }).collect()
+}
+
+pub(crate) fn open_filter<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
+    s.chatlist.filter_open = true;
+    tx.focus("chat-filter-input", false);
+}
+
+fn filter_field<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    s.chatlist.filter_open.then(|| row().w_full().px(16.0).pb(8.0).gap(6.0).center_y()
+        .child(text_input(&s.chatlist.filter, ts(13.0, 400.0)).key("chat-filter-input")
+            .label("Filter by person or chat name").placeholder("Filter by person or chat name", tone(active_palette().text_muted))
+            .color(tone(active_palette().foreground)).grow(1.0).min_w(0.0)
+            .on_edit(|s: &mut UiState<A>| &mut s.chatlist.filter))
+        .child(row().key("chat-filter-clear").size(24.0, 24.0).center().label("Clear filter text")
+            .on_press(|s: &mut UiState<A>| s.chatlist.filter.clear())
+            .child(sym("close", 14.0).color(tone(active_palette().text_muted)))))
 }
 
 fn is_meeting(id: &str) -> bool {
@@ -129,6 +177,7 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
         list = list
             .child(quick_views(s))
             .child(teams(s))
+            .child(folder_rows(s))
             .child(col().w_full().px(6.0).child(section_header(s, CHATS, "Chats", unread)))
             .child(chat_rows(s));
     }
@@ -141,8 +190,13 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
         .child(header::<A>())
         .child(status(s))
         .child(crate::search::search_box(s))
+        .children(filter_field(s))
         .child(filter_chips(s))
         .child(list)
+        .children(s.chatlist.has_older.then(|| crate::screens::button(
+            if s.chatlist.loading_older { "Loading…" } else { "Load older chats" }, "chats-load-older", |s: &mut UiState<A>, _| {
+                if !s.chatlist.loading_older { s.chatlist.loading_older = true; s.actions.load_older_chats(); }
+            })))
 }
 
 fn header<A: Actions + 'static>() -> El {
@@ -174,9 +228,16 @@ fn header<A: Actions + 'static>() -> El {
             .radius(8.0)
             .hover(tone(p.popup_hover))
             .child(sym(glyph, 16.0).color(tone(p.text_soft)));
-        if key == "chat-new" {
-            button = button.on_press(|s: &mut UiState<A>| crate::new_chat::open(s));
-        }
+        button = match key {
+            "chat-new" => button.label("New chat").help("New chat (Ctrl+N)").on_press(|s: &mut UiState<A>| crate::new_chat::open(s)),
+            "chat-more" => button.label("More options").help("More options").on_press(|s: &mut UiState<A>| s.chatlist.more = !s.chatlist.more),
+            _ => button.label("Filter chats").help("Filter chats (Ctrl+Shift+F)").on_press_tx(|s: &mut UiState<A>, tx| {
+                if s.chatlist.filter_open {
+                    s.chatlist.filter_open = false;
+                    s.chatlist.filter.clear();
+                } else { open_filter(s, tx); }
+            }),
+        };
         bar = bar.child(button);
     }
     bar
@@ -197,9 +258,13 @@ fn status<A: Actions>(s: &UiState<A>) -> El {
 }
 
 fn filter_chips<A: Actions + 'static>(s: &UiState<A>) -> El {
+    col().w_full().child(chips(s, &Pill::ALL)).children(s.chatlist.filter_open.then(|| chips(s, &[Pill::Mentions, Pill::Muted])))
+}
+
+fn chips<A: Actions + 'static>(s: &UiState<A>, pills: &[Pill]) -> El {
     let p = active_palette();
-    let mut bar = row().key("chat-filters").w_full().px(16.0).pb(8.0).gap(6.0);
-    for pill in Pill::ALL {
+    let mut bar = row().w_full().px(16.0).pb(8.0).gap(6.0);
+    for &pill in pills {
         let on = s.chatlist.filters.contains(&pill);
         bar = bar.child(
             row()
@@ -210,7 +275,14 @@ fn filter_chips<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .radius(999.0)
                 .fill(tone(if on { p.accent } else { p.surface_raised }))
                 .hover(tone(if on { p.accent } else { p.border_strong }))
-                .on_press(move |s: &mut UiState<A>| flip(&mut s.chatlist.filters, &pill))
+                .label(pill.label())
+                .on_press(move |s: &mut UiState<A>| {
+                    let excludes = match pill {
+                        Pill::Mentions => Some(Pill::Muted), Pill::Muted => Some(Pill::Mentions),
+                        Pill::Chats => Some(Pill::Meetings), Pill::Meetings => Some(Pill::Chats), _ => None,
+                    };
+                    if !excludes.is_some_and(|other| s.chatlist.filters.contains(&other)) { flip(&mut s.chatlist.filters, &pill); }
+                })
                 .child(
                     text(pill.label())
                         .font(ts(12.0, 400.0))
@@ -288,6 +360,19 @@ fn quick_views<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .center_y()
                 .radius(8.0)
                 .hover(tone(p.row_hover))
+                .on_press(move |s: &mut UiState<A>| {
+                    let view = match label {
+                        "Mentions" => crate::quick_views::QuickView::Mentions,
+                        "Drafts" => crate::quick_views::QuickView::Drafts,
+                        _ => crate::quick_views::QuickView::Saved,
+                    };
+                    crate::screens::navigate(s, crate::screens::Screen::Chat);
+                    s.chatlist.quick_view = Some(view);
+                    if view == crate::quick_views::QuickView::Saved {
+                        s.chatlist.saved = None;
+                        s.actions.load_saved();
+                    }
+                })
                 .child(sym(glyph, 18.0).color(tone(p.text_soft)))
                 .child(
                     text(label)
@@ -298,6 +383,78 @@ fn quick_views<A: Actions + 'static>(s: &UiState<A>) -> El {
         );
     }
     list
+}
+
+pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if !s.chatlist.more { return None; }
+    let p = active_palette();
+    let mut menu = col().key("chat-more-menu").w(200.0).padding(6.0).gap(4.0).radius(8.0)
+        .fill(tone(p.popup)).border(1.0, tone(p.border))
+        .anchored("chat-more", Side::Bottom, Align::End, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.chatlist.more = false);
+    if !s.read_only {
+        menu = menu.child(crate::screens::button("Mark all as read", "chats-read-all", |s: &mut UiState<A>, _| {
+            s.chatlist.more = false;
+            for chat in s.chats.iter().filter(|chat| chat.unread) { s.actions.set_chat_read(&chat.id, true); }
+        }));
+        menu = menu.child(crate::screens::button("New section", "chats-new-section", |s: &mut UiState<A>, _| s.chatlist.new_section = true));
+        if s.chatlist.new_section {
+            menu = menu.child(text_input(&s.chatlist.section_name, ts(13.0, 400.0)).key("section-name").label("Section name")
+                .placeholder("Section name", tone(p.text_muted)).color(tone(p.foreground)).w_full()
+                .on_edit(|s: &mut UiState<A>| &mut s.chatlist.section_name))
+                .child(crate::screens::button("Create", "section-create", |s: &mut UiState<A>, _| {
+                    let name = s.chatlist.section_name.text.trim().to_owned();
+                    if !name.is_empty() {
+                        s.actions.change_folders(teams_core::FolderChange::Create { name });
+                        s.chatlist.section_name.clear();
+                        s.chatlist.new_section = false;
+                        s.chatlist.more = false;
+                    }
+                }));
+        }
+    }
+    Some(menu.child(crate::screens::button("Collapse all", "chats-collapse-all", |s: &mut UiState<A>, _| {
+        s.chatlist.more = false;
+        s.chatlist.collapsed = [QUICK_VIEWS, TEAMS, CHATS].map(str::to_owned).to_vec();
+        s.expanded_teams.clear();
+        for folder in s.chatlist.folders.iter().filter(|folder| folder.expanded) { s.actions.set_folder_expanded(&folder.id, false); }
+    })))
+}
+
+fn folder_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let mut list = col().key("chat-sections").w_full().px(6.0);
+    let visible = filtered_chats(s);
+    for folder in s.chatlist.folders.iter().filter(|folder| matches!(folder.kind, teams_core::FolderKind::Favorites | teams_core::FolderKind::UserCreated)) {
+        let indices: Vec<_> = folder.conversation_ids.iter().filter_map(|id| visible.iter().copied().find(|&i| s.chats[i].id == *id)).collect();
+        let id = folder.id.clone();
+        let expanded = folder.expanded;
+        let label = if folder.kind == teams_core::FolderKind::Favorites { "Favorites" } else { &folder.name };
+        let mut section = col().key(format!("folder-{}", folder.id)).w_full()
+            .child(row().key(format!("section-folder-{}", folder.id)).w_full().h(SECTION_H).px(10.0).gap(6.0).center_y()
+                .label(label.to_owned()).hover(tone(active_palette().row_hover))
+                .on_press(move |s: &mut UiState<A>| s.actions.set_folder_expanded(&id, !expanded))
+                .child(sym(if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_right" }, 12.0).color(tone(active_palette().text_muted)))
+                .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(tone(active_palette().text_soft))));
+        if expanded {
+            for i in indices { section = section.child(col().key(format!("chat-{}", s.chats[i].id)).w_full().child(chat_row(s, i))); }
+        }
+        list = list.child(section);
+    }
+    if s.chatlist.folders.is_empty() && !s.chatlist.favorites.is_empty() {
+        list = list.child(section_header(s, "favorites", "Favorites", 0));
+        if !collapsed(s, "favorites") {
+            for &i in visible.iter().filter(|&&i| s.chatlist.favorites.contains(&s.chats[i].id)) {
+                list = list.child(col().key(format!("chat-{}", s.chats[i].id)).w_full().child(chat_row(s, i)));
+            }
+        }
+    }
+    list
+}
+
+fn in_section<A: Actions>(s: &UiState<A>, id: &str) -> bool {
+    if s.chatlist.folders.is_empty() { return s.chatlist.favorites.iter().any(|item| item == id); }
+    s.chatlist.folders.iter().filter(|folder| matches!(folder.kind, teams_core::FolderKind::Favorites | teams_core::FolderKind::UserCreated))
+        .any(|folder| folder.conversation_ids.iter().any(|item| item == id))
 }
 
 pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -313,7 +470,15 @@ pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
     if s.screens.screen != crate::screens::Screen::Teams && collapsed(s, TEAMS) {
         return list;
     }
-    for team in &s.teams {
+    if !s.chatlist.pinned_channels.is_empty() {
+        list = list.child(text("Pinned channels").font(ts(12.0, 600.0)).color(tone(p.text_soft)).padding(10.0));
+        for id in &s.chatlist.pinned_channels {
+            if let Some(channel) = s.teams.iter().flat_map(|team| &team.channels).find(|channel| &channel.id == id) {
+                list = list.child(col().key(format!("pinned-channel-{id}")).w_full().child(channel_row(s, channel)));
+            }
+        }
+    }
+    for team in s.teams.iter().filter(|team| s.chatlist.show_hidden_teams || !s.chatlist.team_details.get(&team.id).is_some_and(|details| details.hidden)) {
         let expanded = s.expanded_teams.contains(&team.id);
         let id = team.id.clone();
         list = list.child(
@@ -326,6 +491,7 @@ pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .center_y()
                 .radius(8.0)
                 .hover(tone(p.row_hover))
+                .on_secondary_press({ let id = team.id.clone(); move |s: &mut UiState<A>, at, _| crate::team_menu::open(s, &id, false, at.x, at.y) })
                 .on_press(move |s: &mut UiState<A>| flip(&mut s.expanded_teams, &id))
                 .child(
                     sym(if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_right" }, 12.0)
@@ -339,7 +505,8 @@ pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .truncate()
                         .grow(1.0)
                         .min_w(0.0),
-                ),
+                )
+                .child(crate::team_menu::more::<A>(&team.id, false)),
         );
         if expanded {
             let show_hidden = s.chatlist.show_hidden_channels.contains(&team.id);
@@ -355,6 +522,10 @@ pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .font(ts(12.0, 400.0)).color(tone(p.accent))));
             }
         }
+    }
+    if s.chatlist.team_details.values().any(|details| details.hidden) {
+        list = list.child(crate::screens::button(if s.chatlist.show_hidden_teams { "Hide hidden teams" } else { "See hidden teams" }, "teams-show-hidden",
+            |s: &mut UiState<A>, _| s.chatlist.show_hidden_teams = !s.chatlist.show_hidden_teams));
     }
     list
 }
@@ -372,7 +543,10 @@ fn channel_row<A: Actions + 'static>(s: &UiState<A>, channel: &ChannelRow) -> El
         .center_y()
         .radius(8.0)
         .hover(tone(p.row_hover))
+        .on_secondary_press({ let id = channel.id.clone(); move |s: &mut UiState<A>, at, _| crate::team_menu::open(s, &id, true, at.x, at.y) })
         .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| open_chat(s, &id, tx))
+        .children(s.chatlist.channel_details.get(&channel.id).filter(|details| details.private)
+            .map(|_| sym("lock", 12.0).color(tone(p.text_muted)).label("Private channel")))
         .child(
             text(format!("# {}", channel.name))
                 .font(ts(13.0, if channel.unread { 700.0 } else { 400.0 }))
@@ -381,6 +555,10 @@ fn channel_row<A: Actions + 'static>(s: &UiState<A>, channel: &ChannelRow) -> El
                 .grow(1.0)
                 .min_w(0.0),
         );
+    if let Some(details) = s.chatlist.channel_details.get(&channel.id).filter(|details| !details.mentions.is_empty()) {
+        r = r.child(count_pill(details.mentions.personal.saturating_add(details.mentions.channel).saturating_add(details.mentions.team)));
+    }
+    r = r.child(crate::team_menu::more::<A>(&channel.id, true));
     if selected {
         r = r.fill(tone(p.surface_raised));
     }
@@ -388,7 +566,7 @@ fn channel_row<A: Actions + 'static>(s: &UiState<A>, channel: &ChannelRow) -> El
 }
 
 fn chat_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let visible = Rc::new(visible_chats(&s.chatlist, &s.chats));
+    let visible = Rc::new(filtered_chats(s).into_iter().filter(|&i| !in_section(s, &s.chats[i].id)).collect::<Vec<_>>());
     let count = if collapsed(s, CHATS) { 0 } else { visible.len() };
     let fingerprint: Vec<String> = visible.iter().map(|&index| row_state(s, index)).collect();
     let keys = Rc::clone(&visible);
@@ -410,7 +588,15 @@ fn chat_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
 fn row_state<A: Actions>(s: &UiState<A>, index: usize) -> String {
     let chat = &s.chats[index];
     let selected = s.selected.as_deref() == Some(chat.id.as_str());
-    format!("{}|{}|{}|{}|{}|{selected}|{:?}", chat.id, chat.title, chat.preview, chat.unread, chat.when, s.details.get(&chat.id))
+    format!("{}|{}|{}|{}|{}|{selected}|{:?}|{}", chat.id, chat.title, chat.preview, chat.unread, chat.when, s.details.get(&chat.id), preview_text(s, &chat.id, &chat.preview))
+}
+
+fn preview_text<A: Actions>(s: &UiState<A>, id: &str, fallback: &str) -> String {
+    if s.chat_send_failed(id) { return "Not sent".into(); }
+    if let Some(draft) = s.chat_draft(id) { return format!("Draft: {draft}"); }
+    let names: Vec<_> = s.typing.values().filter(|event| event.conversation_id == id).map(|event| event.display_name.as_str()).collect();
+    if !names.is_empty() { return format!("{} is typing…", names.join(", ")); }
+    fallback.to_owned()
 }
 
 /// One chat: avatar, title and time, the preview, and an unread dot. Keyed by the caller.
@@ -441,7 +627,7 @@ pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
         .gap(8.0)
         .center_y()
         .child(
-            text(ch.preview.clone())
+            text(preview_text(s, &ch.id, &ch.preview))
                 .font(ts(12.5, 400.0))
                 .color(tone(preview_color))
                 .truncate()
@@ -450,6 +636,9 @@ pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
         );
     if ch.unread {
         preview = preview.child(el().size(8.0, 8.0).radius(4.0).fill(tone(p.accent)));
+    }
+    if let Some(details) = s.details.get(&ch.id).filter(|details| details.importance.is_marked()) {
+        preview = preview.child(sym("priority_high", 16.0).color(tone(p.red_soft)).label(format!("{:?}", details.importance)));
     }
     let lines = col().grow(1.0).min_w(0.0).gap(2.0).child(line).child(preview);
     let mut card = row()

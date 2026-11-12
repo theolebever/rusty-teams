@@ -26,6 +26,7 @@ enum Entry {
 
 #[derive(Default)]
 pub struct State {
+    history: Vec<(String, String)>,
     open: Option<(String, String)>,
     entries: HashMap<String, Entry>,
     /// A chat created for a person, waiting for the window loop to select it (it needs a `Tx`).
@@ -45,12 +46,28 @@ impl State {
 
 /// Opens the card for `user_id`; `name` is shown until the profile arrives.
 pub fn open<A: Actions>(s: &mut UiState<A>, user_id: &str, name: &str) {
+    s.profile.history.clear();
     s.profile.open = Some((user_id.to_owned(), name.to_owned()));
     s.profile.entries.entry(user_id.to_owned()).or_insert(Entry::Loading);
     if matches!(s.profile.entries.get(user_id), Some(Entry::Failed(_))) {
         s.profile.entries.insert(user_id.to_owned(), Entry::Loading);
     }
     s.actions.load_profile(user_id);
+}
+
+fn visit<A: Actions>(s: &mut UiState<A>, user_id: &str, name: &str) {
+    let previous = s.profile.open.clone();
+    let history = std::mem::take(&mut s.profile.history);
+    open(s, user_id, name);
+    s.profile.history = history;
+    if let Some(previous) = previous { s.profile.history.push(previous); }
+}
+
+fn back<A: Actions>(s: &mut UiState<A>) {
+    if let Some((id, name)) = s.profile.history.pop() {
+        s.profile.open = Some((id.clone(), name));
+        s.actions.load_profile(&id);
+    }
 }
 
 /// Makes `target` open the profile card of `user_id` when pressed; unchanged without an id.
@@ -140,6 +157,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .role("dialog")
         .label("Profile")
         .modal(true, |s: &mut UiState<A>| s.profile.open = None)
+        .children((!s.profile.history.is_empty()).then(|| button("profile-back", Some("keyboard_arrow_left"), "Back", false, |s: &mut UiState<A>, _| back(s))))
         .child(row().w_full().gap(14.0).center_y().child(person(s, &title, Some(user_id), 64.0, presence)).child(lines));
 
     let note = profile.and_then(|p| p.out_of_office.as_ref().map(|text| if text.trim().is_empty() { "Out of office".to_owned() } else { text.clone() }).or_else(|| p.status_message.clone()));
@@ -204,8 +222,16 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             card = card.child(field("Office", office));
         }
         if let Some(manager) = &p.manager {
-            card = card.child(field("Manager", manager.display_name.as_deref().unwrap_or_default()));
+            let (id, name) = (manager.id.clone(), manager.display_name.clone().unwrap_or_default());
+            card = card.child(button("profile-manager", None, &format!("Manager: {name}"), false, move |s: &mut UiState<A>, _| visit(s, &id, &name)));
         }
+        let mut reports = col().w_full().gap(4.0);
+        for (index, report) in p.direct_reports.iter().enumerate() {
+            let (id, name) = (report.id.clone(), report.display_name.clone().unwrap_or_default());
+            reports = reports.child(button(&format!("profile-report-{index}"), None, &name.clone(), false,
+                move |s: &mut UiState<A>, _| visit(s, &id, &name)));
+        }
+        if !p.direct_reports.is_empty() { card = card.child(col().w_full().max_h(168.0).scroll(ScrollSpec { stick_bottom: false }).child(reports)); }
         match p.direct_reports.len() {
             0 => {}
             1 => card = card.child(field("Organization", "1 direct report")),
@@ -218,6 +244,27 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Quiet;
+    impl Actions for Quiet {
+        fn open(&self, _: &str) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+    }
+
+    #[test]
+    fn organization_navigation_keeps_the_way_back_and_a_new_card_resets_it() {
+        let mut s = UiState::new(Quiet);
+        open(&mut s, "person", "Person");
+        visit(&mut s, "manager", "Manager");
+        visit(&mut s, "director", "Director");
+        back(&mut s);
+        assert_eq!(s.profile.open.as_ref().map(|(id, _)| id.as_str()), Some("manager"));
+        back(&mut s);
+        assert_eq!(s.profile.open.as_ref().map(|(id, _)| id.as_str()), Some("person"));
+        visit(&mut s, "manager", "Manager");
+        open(&mut s, "other", "Other");
+        assert!(s.profile.history.is_empty());
+    }
 
     #[test]
     fn a_failed_refresh_keeps_the_profile_already_loaded() {

@@ -44,9 +44,34 @@ pub enum ActivityFilter {
     Mentions,
     Unread,
     Replies,
+    Reactions,
+    MissedCalls,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CalendarView {
+    Day,
+    WorkWeek,
+    #[default]
+    Week,
+    Month,
+}
+
+impl CalendarView {
+    pub fn days(self) -> usize { match self { Self::Day => 1, Self::WorkWeek => 5, Self::Week => 7, Self::Month => 42 } }
+    fn start(self, date: NaiveDate) -> NaiveDate {
+        match self { Self::Day => date, Self::Month => monday(date.with_day(1).unwrap_or(date)), _ => monday(date) }
+    }
 }
 
 pub struct ScreenState {
+    pub calendar_view: CalendarView,
+    pub calendar_date: NaiveDate,
+    pub date_picker: bool,
+    pub picker_month: NaiveDate,
+    pub join_id_open: bool,
+    pub meeting_id: TextEdit,
+    pub meeting_passcode: TextEdit,
     pub selected_activity: Option<String>,
     pub activity_search: TextEdit,
     pub screen: Screen,
@@ -62,6 +87,13 @@ pub struct ScreenState {
 impl Default for ScreenState {
     fn default() -> Self {
         Self {
+            calendar_view: CalendarView::Week,
+            calendar_date: Local::now().date_naive(),
+            date_picker: false,
+            picker_month: Local::now().date_naive(),
+            join_id_open: false,
+            meeting_id: TextEdit::default(),
+            meeting_passcode: TextEdit::default(),
             selected_activity: None,
             activity_search: TextEdit::default(),
             screen: Screen::Chat,
@@ -80,8 +112,7 @@ fn monday(date: NaiveDate) -> NaiveDate {
     date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
 }
 
-#[cfg(test)]
-fn occurs_on(event: &CalendarRow, date: NaiveDate) -> bool {
+pub(crate) fn occurs_on(event: &CalendarRow, date: NaiveDate) -> bool {
     let start = event.start.with_timezone(&Local).date_naive();
     let end = (event.end - Duration::nanoseconds(1))
         .with_timezone(&Local)
@@ -90,6 +121,7 @@ fn occurs_on(event: &CalendarRow, date: NaiveDate) -> bool {
 }
 
 pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
+    s.chatlist.quick_view = None;
     if screen == Screen::Teams && s.selected.as_ref().is_some_and(|id| !s.teams.iter().flat_map(|t| &t.channels).any(|c| &c.id == id)) {
         ui::save_draft(s);
         s.selected = None;
@@ -98,7 +130,7 @@ pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
     }
     s.screens.screen = screen;
     if screen == Screen::Calendar {
-        s.actions.load_calendar(s.screens.week);
+        reload_calendar(s);
     }
     if screen == Screen::Calls {
         if !s.calls.state.as_ref().is_some_and(calling::CallState::is_active) && s.calls.ring.is_none() {
@@ -111,10 +143,24 @@ pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
 }
 
 fn shift_week<A: Actions>(s: &mut UiState<A>, days: i64) {
-    s.screens.week += Duration::days(days);
+    let date = s.screens.calendar_date;
+    let next = if s.screens.calendar_view == CalendarView::Month {
+        if days < 0 { date.checked_sub_months(chrono::Months::new(1)) } else { date.checked_add_months(chrono::Months::new(1)) }.unwrap_or(date)
+    } else { date + Duration::days(if s.screens.calendar_view == CalendarView::Day { days.signum() } else { days }) };
+    select_date(s, next);
+}
+
+pub(crate) fn reload_calendar<A: Actions>(s: &UiState<A>) {
+    s.actions.load_calendar_range(s.screens.week, s.screens.week + Duration::days(s.screens.calendar_view.days() as i64));
+}
+
+pub(crate) fn select_date<A: Actions>(s: &mut UiState<A>, date: NaiveDate) {
+    s.screens.calendar_date = date;
+    s.screens.week = s.screens.calendar_view.start(date);
     s.screens.calendar.clear();
     s.screens.selected_event = None;
-    s.actions.load_calendar(s.screens.week);
+    s.screens.date_picker = false;
+    reload_calendar(s);
 }
 
 pub(crate) fn color(hex: &str) -> Color {
@@ -181,9 +227,11 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
 
 fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
     let week = s.screens.week;
-    let header = row()
+    let mut header = row()
         .w_full()
-        .h(56.0)
+        .min_h(56.0)
+        .wrap()
+        .py(8.0)
         .px(20.0)
         .gap(8.0)
         .center_y()
@@ -193,9 +241,7 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .color(color("#242424")),
         )
         .child(button::<A>("Today", "calendar-today", |s, _| {
-            s.screens.week = monday(Local::now().date_naive());
-            s.screens.calendar.clear();
-            s.actions.load_calendar(s.screens.week);
+            select_date(s, Local::now().date_naive());
         }))
         .child(button::<A>("‹", "calendar-previous", |s, _| {
             shift_week(s, -7)
@@ -205,24 +251,29 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
             s.screens.screen = Screen::Agenda;
             s.actions.load_agenda();
         }))
-        .child(
-            text(format!(
-                "{} – {}",
-                week.format("%d %b"),
-                (week + Duration::days(6)).format("%d %b %Y")
-            ))
-            .font(style(14.0, 600.0))
-            .color(color("#242424")),
-        );
+        .child(button::<A>(&s.screens.calendar_date.format("%B %Y").to_string(), "calendar-date-picker", |s, _| {
+            s.screens.picker_month = s.screens.calendar_date.with_day(1).unwrap_or(s.screens.calendar_date);
+            s.screens.date_picker = !s.screens.date_picker;
+        }));
+    for (label, mode) in [("Day", CalendarView::Day), ("Work week", CalendarView::WorkWeek), ("Week", CalendarView::Week), ("Month", CalendarView::Month)] {
+        header = header.child(button::<A>(label, &format!("calendar-view-{mode:?}"), move |s, _| {
+            s.screens.calendar_view = mode;
+            select_date(s, s.screens.calendar_date);
+        }).fill(color(if s.screens.calendar_view == mode { "#E8EBFA" } else { "#F5F5F5" })));
+    }
+    if !s.read_only {
+        header = header.child(button::<A>("Join with an ID", "calendar-join-id", |s, _| s.screens.join_id_open = true))
+            .child(button::<A>("Meet now", "calendar-meet-now", |s, _| s.actions.meet_now("")));
+    }
     let mut body = row()
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(crate::calendar_grid::week(s));
+        .child(if s.screens.calendar_view == CalendarView::Month { crate::calendar_grid::month(s) } else { crate::calendar_grid::week(s) });
     if let Some(event) = s.screens.calendar.iter().find(|event| {
-        (0..7).any(|day| {
+        (0..s.screens.calendar_view.days()).any(|day| {
             s.screens.selected_event.as_deref()
-                == Some(format!("{}-{}", event.id, week + Duration::days(day)).as_str())
+                == Some(format!("{}-{}", event.id, week + Duration::days(day as i64)).as_str())
         })
     }) {
         body = body.child(
@@ -307,15 +358,15 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
             |s, _| s.screens.send_response = !s.screens.send_response,
         ));
         let mut choices = row().gap(8.0);
-        for (label, reply) in [
-            ("Accept", chatsvc::Reply::Accept),
-            ("Tentative", chatsvc::Reply::Tentative),
-            ("Decline", chatsvc::Reply::Decline),
+        for (label, reply, response) in [
+            ("Accept", chatsvc::Reply::Accept, chatsvc::ResponseType::Accepted),
+            ("Tentative", chatsvc::Reply::Tentative, chatsvc::ResponseType::Tentative),
+            ("Decline", chatsvc::Reply::Decline, chatsvc::ResponseType::Declined),
         ] {
             let id = event.id.clone();
             let uid = event.ical_uid.clone();
             choices = choices.child(button::<A>(
-                label,
+                &if event.response == response { format!("✓ {label}") } else { label.into() },
                 &format!("calendar-rsvp-{label}"),
                 move |s, _| {
                     s.actions
@@ -340,6 +391,8 @@ fn matches_filter(
         ActivityFilter::All => true,
         ActivityFilter::Unread => !snapshot.is_read(item),
         ActivityFilter::Replies => matches!(item.activity_type.as_str(), "reply" | "replyToReply" | "replyInChat" | "communityReply" | "communityReplyToReply"),
+        ActivityFilter::Reactions => matches!(item.activity_type.as_str(), "reaction" | "reactionInChat" | "like" | "likeInChat" | "reactionInCommunity" | "reactionInSubCommunity"),
+        ActivityFilter::MissedCalls => item.activity_type == "call" && item.activity_subtype == "missedCall",
         ActivityFilter::Mentions => matches!(
             item.activity_type.as_str(),
             "mention"
@@ -366,12 +419,14 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
             .on_press(|s: &mut UiState<A>| s.actions.mark_all_activity_read())
             .child(sym("done_all", 20.0).color(rgb(palette.text_muted))));
     }
-    let mut filters = row().w_full().px(16.0).gap(6.0).pb(12.0);
+    let mut filters = row().w_full().px(16.0).gap(6.0).pb(12.0).wrap();
     for (label, filter) in [
         ("All", ActivityFilter::All),
         ("Unread", ActivityFilter::Unread),
         ("@Mentions", ActivityFilter::Mentions),
         ("Replies", ActivityFilter::Replies),
+        ("Reactions", ActivityFilter::Reactions),
+        ("Missed calls", ActivityFilter::MissedCalls),
     ] {
         let selected = s.screens.filter == filter;
         filters = filters.child(row().key(format!("activity-filter-{label}")).h(28.0).px(9.0).center().radius(14.0)
@@ -435,6 +490,13 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .child(text(at.format("%H:%M").to_string()).font(style(11.0, 400.0)).color(rgb(palette.text_muted))))
                 .children((!context.is_empty()).then(|| text(context).font(style(12.0, 400.0)).color(rgb(palette.text_muted)).truncate()))
                 .child(text(teams_core::preview_text(&item.preview).unwrap_or_default()).font(style(12.0, 400.0)).color(rgb(palette.text_soft)).truncate()));
+        if unread && !s.read_only {
+            let read_id = id.clone();
+            notification = notification.child(row().key(format!("activity-read-{id}")).size(28.0, 28.0).center().radius(4.0)
+                .label("Mark as read").help("Mark as read").hover(rgb(palette.row_hover))
+                .on_press(move |s: &mut UiState<A>| s.actions.mark_activity_read(&read_id))
+                .child(sym("done_all", 16.0).color(rgb(palette.text_muted))));
+        }
         if !conversation.is_empty() {
             let root = item.source_reply_chain_id.clone();
             notification =
@@ -489,6 +551,34 @@ fn activity_headline(item: &ActivityItem) -> (String, &'static str) {
         "teamMembershipChange" => (format!("{actor} updated your team membership"), "group"),
         _ => (actor.to_owned(), "notifications"),
     }
+}
+
+pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
+    let mut layers = Vec::new();
+    if s.screens.date_picker && s.screens.screen == Screen::Calendar { layers.push(crate::calendar_grid::date_picker(s)); }
+    if s.screens.join_id_open {
+        let input = |edit: &TextEdit, key: &str, label: &str| text_input(edit, style(14.0, 400.0)).key(key.to_owned()).w_full().label(label.to_owned())
+            .placeholder(label.to_owned(), color("#616161")).color(color("#242424"));
+        let dialog = col().key("join-id-dialog").w(380.0).padding(20.0).gap(14.0).radius(10.0).fill(color("#FFFFFF"))
+            .role("dialog").label("Join with an ID").modal(true, |s: &mut UiState<A>| s.screens.join_id_open = false)
+            .child(text("Join with an ID").font(style(18.0, 600.0)).color(color("#242424")))
+            .child(input(&s.screens.meeting_id, "meeting-id", "Meeting ID").on_edit(|s: &mut UiState<A>| &mut s.screens.meeting_id))
+            .child(input(&s.screens.meeting_passcode, "meeting-passcode", "Passcode").on_edit(|s: &mut UiState<A>| &mut s.screens.meeting_passcode))
+            .child(row().gap(8.0).justify_end()
+                .child(button("Cancel", "join-id-cancel", |s: &mut UiState<A>, _| s.screens.join_id_open = false))
+                .child(button("Join meeting", "join-id-confirm", |s: &mut UiState<A>, _| {
+                    let Some(code) = teams_core::meeting_code_from_id(&s.screens.meeting_id.text, &s.screens.meeting_passcode.text) else {
+                        s.toast.show("Enter a valid meeting ID"); return;
+                    };
+                    s.calls.link = TextEdit::new(code.url);
+                    s.calls.prejoin_open = true;
+                    s.screens.screen = Screen::Calls;
+                    s.screens.join_id_open = false;
+                    s.screens.meeting_passcode.clear();
+                })));
+        layers.push(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().fill(Color::BLACK.alpha(0.2)).child(dialog));
+    }
+    layers
 }
 
 #[cfg(test)]

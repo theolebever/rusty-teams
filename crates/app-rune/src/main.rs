@@ -34,12 +34,14 @@ mod new_chat;
 mod voice;
 mod notifications;
 mod profile;
+mod quick_views;
 mod reactions;
 mod screens;
 mod search;
 mod settings;
 mod status_menu;
 mod teams;
+mod team_menu;
 mod theme;
 mod toast;
 mod types;
@@ -119,6 +121,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     }
     s.media.trim(now);
     chat_menu::drain(s, tx);
+    if let Some(link) = s.chatlist.copy_link.take() { tx.copy(link); s.toast.show("Link copied"); }
     // Direct writes to `status` (media errors) do not pass through `apply`.
     let status = s.status.clone();
     let noticed = s.toast.observe(&status);

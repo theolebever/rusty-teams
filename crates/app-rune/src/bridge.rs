@@ -33,6 +33,7 @@ pub struct Bridge {
 
 /// State shared by the view-facing calls and the event forwarder.
 pub(crate) struct Shared {
+    switcher_query: Mutex<(String, String)>,
     open_threads: Mutex<std::collections::HashSet<String>>,
     /// Ids whose photo was looked up and fetched this session. `AvatarsChanged` publishes later ones.
     avatars_requested: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -80,6 +81,15 @@ impl Shared {
     fn publish_chats(&self, engine: &Engine) -> bool {
         match engine.sidebar() {
             Ok(sidebar) => {
+                let teams = sidebar.teams.iter().map(|team| (team.team.id.clone(), crate::types::TeamDetails { hidden: team.hidden, rights: team.rights })).collect();
+                let channels = sidebar.teams.iter().flat_map(|team| team.channels.iter().map(|channel| (channel.id.clone(), crate::types::ChannelDetails {
+                    private: channel.membership_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("private")),
+                    mentions: team.channel_mentions(&channel.id), notifications: team.channel_notifications(&channel.id),
+                }))).collect();
+                match engine.pinned_channels() {
+                    Ok(pinned) => self.publish(Update::TeamMetadata { teams, channels, pinned }),
+                    Err(error) => self.publish(Update::Status(format!("Pinned channels unavailable: {error}"))),
+                }
                 let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
                 let pictures = sidebar.chats.iter().filter(|chat| chat.kind != "oneOnOne").map(|chat| teams_core::chat_picture_key(&chat.id));
                 self.publish_avatars(engine, sidebar.chats.iter().flat_map(|chat| &chat.members).filter_map(|member| member.user_id.clone()).chain(pictures).collect());
@@ -97,11 +107,16 @@ impl Shared {
                     let group = if one_on_one { vec![] } else {
                         chat.members.iter().filter(|m| !m.is_bot() && m.user_id.as_deref() != Some(&me)).take(2).cloned().collect()
                     };
-                    (chat.id.clone(), crate::types::ChatDetails { avatar_id, group, members: chat.members.clone(), muted: chat.muted, presence })
+                    (chat.id.clone(), crate::types::ChatDetails { importance: engine.unread_importance(&chat.id), desktop_notifications: engine.chat_desktop_notifications(&chat.id), avatar_id, group, members: chat.members.clone(), muted: chat.muted, presence })
                 }).collect();
                 self.publish(Update::Details(details));
                 self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now())));
                 self.publish(Update::Teams(team_rows(sidebar.teams)));
+                match engine.chat_folders() {
+                    Ok(folders) => self.publish(Update::Folders(folders)),
+                    Err(error) => self.publish(Update::Status(format!("Sections unavailable: {error}"))),
+                }
+                self.publish(Update::ChatPaging { more: engine.has_older_chats(), loading: engine.is_loading_older_chats() });
                 true
             }
             Err(error) => {
@@ -215,6 +230,7 @@ impl Bridge {
             let weak = weak.clone();
             let video_weak = weak.clone();
             Shared {
+            switcher_query: Mutex::default(),
             open_threads: Mutex::new(std::collections::HashSet::new()),
             avatars_requested: Arc::default(),
             warmed: Mutex::default(),
@@ -286,6 +302,117 @@ impl Bridge {
 }
 
 impl Actions for Bridge {
+    fn set_notification_pause(&self, until: Option<DateTime<Utc>>) {
+        let Some(engine) = self.shared.engine() else { return };
+        match engine.store().set_meta("notify_paused_until", &until.map(|time| time.to_rfc3339()).unwrap_or_default()) {
+            Ok(()) => self.shared.publish(Update::NotificationPause(until)),
+            Err(error) => self.shared.publish(Update::Status(format!("Could not pause notifications: {error}"))),
+        }
+    }
+    fn set_work_location(&self, location: Option<(teams_core::WorkLocationKind, DateTime<Utc>)>) {
+        self.chat_task("", "set work location", move |engine, _| async move { engine.set_own_work_location(location).await });
+    }
+    fn search_switcher(&self, session: teams_core::substrate_search::SearchSession, query: String) {
+        let Some(engine) = self.shared.engine() else { return };
+        let shared = self.shared.clone();
+        let session_id = session.correlation_id().to_owned();
+        *shared.switcher_query.lock().unwrap_or_else(PoisonError::into_inner) = (session_id.clone(), query.clone());
+        app_backend::runtime::handle().spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if *shared.switcher_query.lock().unwrap_or_else(PoisonError::into_inner) != (session_id.clone(), query.clone()) { return; }
+            let result = engine.server_suggestions(&session, &query).await.map_err(|error| error.to_string());
+            if let Ok(results) = &result { shared.publish_avatars(&engine, results.people.iter().filter_map(|person| person.user_id.clone()).collect()); }
+            shared.publish(Update::SwitcherSearch { session: session_id, query, result });
+        });
+    }
+    fn set_channel_pinned(&self, id: &str, pinned: bool) {
+        self.chat_task(id, "pin channel", move |engine, id| async move { engine.set_channel_pinned(&id, pinned).await });
+    }
+    fn set_channel_shown(&self, id: &str, shown: bool) {
+        self.chat_task(id, "change channel visibility", move |engine, id| async move { engine.set_channel_shown(&id, shown).await });
+    }
+    fn set_team_shown(&self, id: &str, shown: bool) {
+        self.chat_task(id, "change team visibility", move |engine, id| async move { engine.set_team_shown(&id, shown).await });
+    }
+    fn set_channel_notifications(&self, id: &str, notifications: store::ChannelNotifications) {
+        self.chat_task(id, "change channel notifications", move |engine, id| async move { engine.set_channel_notifications(&id, notifications).await });
+    }
+    fn create_channel(&self, team: &str, name: &str, description: &str, private: bool) {
+        let (name, description) = (name.to_owned(), description.to_owned());
+        self.chat_task(team, "create channel", move |engine, team| async move {
+            engine.create_channel(&team, &name, &description, if private { teams_core::ChannelPrivacy::Private } else { teams_core::ChannelPrivacy::Standard }).await
+        });
+    }
+    fn copy_team_link(&self, id: &str, channel: bool) {
+        let Some(engine) = self.shared.engine() else { return };
+        let (shared, id) = (self.shared.clone(), id.to_owned());
+        app_backend::runtime::handle().spawn(async move {
+            let result = if channel { engine.channel_link(&id).await } else { engine.team_link(&id).await };
+            shared.publish(Update::CopyLink(result.map_err(|error| error.to_string())));
+        });
+    }
+    fn change_folders(&self, change: teams_core::FolderChange) {
+        self.chat_task("", "change section", move |engine, _| async move { engine.change_folders(change).await });
+    }
+
+    fn move_to_folder(&self, id: &str, folder: &str) {
+        let folder = folder.to_owned();
+        self.chat_task(id, "move chat", move |engine, id| async move { engine.move_to_folder(&id, &folder, None).await });
+    }
+
+    fn remove_from_folder(&self, id: &str, folder: &str) {
+        let folder = folder.to_owned();
+        self.chat_task(id, "remove chat from section", move |engine, id| async move { engine.remove_from_folder(&id, &folder).await });
+    }
+
+    fn set_folder_expanded(&self, id: &str, expanded: bool) {
+        self.chat_task(id, "change section expansion", move |engine, id| async move {
+            engine.set_folder_expanded(&id, expanded).await?;
+            engine.store().set_folder_expanded(&id, expanded)?;
+            Ok(())
+        });
+    }
+
+    fn load_older_chats(&self) {
+        let Some(engine) = self.shared.engine() else { return };
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            if let Err(error) = engine.load_older_chats().await { shared.publish(Update::Status(format!("Could not load older chats: {error}"))); }
+            shared.publish_chats(&engine);
+        });
+    }
+
+    fn set_chat_notifications(&self, id: &str, mode: teams_core::ChatNotificationMode, desktop: teams_core::DesktopNotifications) {
+        self.chat_task(id, "change notifications", move |engine, id| async move { engine.set_chat_notifications(&id, mode, desktop).await });
+    }
+
+    fn remove_chat_history(&self, id: &str) {
+        self.chat_task(id, "remove chat history", move |engine, id| async move { engine.remove_chat_history(&id).await });
+    }
+
+    fn load_saved(&self) {
+        let Some(engine) = self.shared.engine() else {
+            self.shared.publish(Update::Saved(Err("Not connected yet".into())));
+            return;
+        };
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            shared.publish(Update::Saved(engine.list_saved().await.map_err(|error| error.to_string())));
+        });
+    }
+
+    fn unsave(&self, item: &teams_core::SavedMessage) {
+        if self.shared.read_only { return; }
+        let Some(engine) = self.shared.engine() else { return };
+        let (shared, item) = (self.shared.clone(), item.clone());
+        app_backend::runtime::handle().spawn(async move {
+            match engine.set_saved(&item.conversation_id, &item.message_id, Some(&item.root_id), false).await {
+                Ok(()) => shared.publish(Update::Saved(engine.list_saved().await.map_err(|error| error.to_string()))),
+                Err(error) => shared.publish(Update::Status(format!("Could not remove saved message: {error}"))),
+            }
+        });
+    }
+
     fn load_audio(&self, url: &str) {
         let Some(engine) = self.shared.engine() else { return };
         let shared = self.shared.clone();
@@ -443,25 +570,14 @@ impl Actions for Bridge {
 
     fn meet_now(&self, id: &str) {
         if self.shared.read_only { return; }
-        let Some(engine) = self.shared.engine() else { self.shared.publish(Update::Status("Not connected yet".into())); return };
-        match engine.store().chat(id) {
-            Ok(Some(chat)) => {
-                let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
-                if me.is_empty() || !(chat.kind.eq_ignore_ascii_case("oneOnOne") || chat.kind.eq_ignore_ascii_case("group")) {
-                    self.shared.publish(Update::Status("This chat is not available for calling".into()));
-                    return;
-                }
-                let callees = chat.members.iter().filter(|m| !m.is_bot()).filter_map(|m| {
-                    let user = m.user_id.as_deref().filter(|user| *user != me)?;
-                    Some(calling::Callee { mri: format!("8:orgid:{user}"), display_name: m.display_name.clone() })
-                }).collect::<Vec<_>>();
-                if callees.is_empty() || teams_core::is_notes_chat(id) {
-                    self.shared.publish(Update::Status("This chat has no callable participants".into()));
-                } else { self.shared.call_control.start(calling::CallSpec::People { callees, thread_id: id.to_owned() }); }
-            }
-            Ok(None) => self.shared.publish(Update::Status("Chat is not available yet".into())),
-            Err(error) => self.shared.publish(Update::Status(format!("Could not start call: {error}"))),
-        }
+        let launcher = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(launcher) = launcher else { self.shared.publish(Update::MeetingReady(Err("Not connected yet".into()))); return };
+        let subject = self.shared.engine().and_then(|engine| engine.store().chat(id).ok().flatten()).map(|chat| chat.title)
+            .filter(|title| !title.trim().is_empty()).unwrap_or_else(|| "Meeting".into());
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            shared.publish(Update::MeetingReady(launcher.create_meet_now(&subject).await));
+        });
     }
     fn open_thread(&self, conversation_id: &str, root: &str) {
         let Some(engine) = self.shared.engine() else { return };
@@ -674,17 +790,20 @@ impl Actions for Bridge {
     }
 
     fn load_calendar(&self, week: chrono::NaiveDate) {
+        self.load_calendar_range(week, week + chrono::Duration::days(7));
+    }
+    fn load_calendar_range(&self, week: chrono::NaiveDate, last: chrono::NaiveDate) {
         let calls = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let Some(calls) = calls else {
             self.shared.publish(Update::Status("Calendar is not connected yet".into()));
             return;
         };
         let Some(start) = week.and_hms_opt(0, 0, 0).and_then(|time| Local.from_local_datetime(&time).earliest()) else { return };
-        let Some(end) = (week + chrono::Duration::days(7)).and_hms_opt(0, 0, 0).and_then(|time| Local.from_local_datetime(&time).earliest()) else { return };
+        let Some(end) = last.and_hms_opt(0, 0, 0).and_then(|time| Local.from_local_datetime(&time).earliest()) else { return };
         let shared = self.shared.clone();
         app_backend::runtime::handle().spawn(async move {
             match calls.calendar_view(start.with_timezone(&Utc), end.with_timezone(&Utc)).await {
-                Ok(events) => shared.publish(Update::Calendar { week, rows: events.into_iter().map(|event| crate::screens::CalendarRow {
+                Ok(events) => shared.publish(Update::CalendarRange { start: week, end: last, rows: events.into_iter().map(|event| crate::screens::CalendarRow {
                     id: event.object_id, subject: event.subject, start: event.start, end: event.end,
                     cancelled: event.cancelled, all_day: event.all_day, organizer: event.organizer_name,
                     ical_uid: event.ical_uid, join_url: event.join_url, thread_id: event.thread_id, response: event.response,
@@ -927,6 +1046,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
     let mut notifications = crate::notifications::Notifications::new();
     while let Some(event) = events.recv().await {
         match event {
+            BackendEvent::Favorites(ids) => shared.publish(Update::Favorites(ids)),
             BackendEvent::Typing(event) => shared.publish(Update::Typing(event)),
             BackendEvent::Connection(state) => {
                 if state == ConnectionState::Online && let Some(engine) = shared.engine() {
@@ -945,6 +1065,9 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 refresh_me(&shared, &engine);
                 if let Some(activity) = teams_core::stored_activity_feed(engine.store()) { shared.publish(Update::Activity(activity)); }
                 shared.publish(Update::Appearance(app_backend::appearance::load(engine.store())));
+                let paused_until = engine.store().meta("notify_paused_until").ok().flatten()
+                    .and_then(|value| DateTime::parse_from_rfc3339(&value).ok()).map(|until| until.with_timezone(&Utc));
+                shared.publish(Update::NotificationPause(paused_until));
                 let settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
                     .and_then(|json| agents::AgentSettings::from_json(&json).ok()).unwrap_or_default();
                 shared.publish(Update::AgentSettings(settings));
@@ -982,7 +1105,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                     CoreEvent::ActivityChanged => {
                         if let Some(activity) = teams_core::stored_activity_feed(engine.store()) { shared.publish(Update::Activity(activity)); }
                     }
-                    CoreEvent::SidebarChanged => {
+                    CoreEvent::SidebarChanged | CoreEvent::FoldersChanged => {
                         shared.publish_chats(&engine);
                     }
                     CoreEvent::PresenceChanged => { shared.publish_chats(&engine); }
@@ -1067,7 +1190,6 @@ pub fn chat_rows(mut chats: Vec<ChatRecord>, now: DateTime<Local>) -> Vec<ChatRo
 fn team_rows(teams: Vec<SidebarTeam>) -> Vec<TeamRow> {
     teams
         .into_iter()
-        .filter(|team| !team.hidden)
         .map(|team| TeamRow {
             id: team.team.id,
             name: team.team.name,
