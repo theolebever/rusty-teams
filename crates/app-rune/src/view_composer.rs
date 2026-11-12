@@ -90,7 +90,19 @@ fn composer_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx) -> 
             return true;
         }
     }
-    crate::mentions::handle_key(s, key)
+    crate::mentions::handle_key(s, key) || enter_key(s, key)
+}
+
+/// Teams' "press Enter to start a new line": Enter breaks the line and Ctrl+Enter sends.
+fn enter_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent) -> bool {
+    if key.key != Key::Enter || s.settings.prefs.chat.settings().enter_key != teams_core::EnterKeyBehavior::NewLine { return false; }
+    match key.mods {
+        Mods { cmd: true, shift: false, alt: false, .. } => send(s),
+        mods if mods == Mods::default() => s.composer.insert("
+"),
+        _ => return false,
+    }
+    true
 }
 
 fn format_selection(edit: &mut TextEdit, before: &str, after: &str) {
@@ -366,6 +378,21 @@ mod tests {
         rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::MyFiles, result: Ok(vec![]) }));
         rt.frame(1.0 / 60.0);
         assert!(rt.find("cloud-error").is_none() && rt.find("cloud-empty").is_some());
+    }
+
+    #[test]
+    fn enter_breaks_the_line_and_ctrl_enter_sends_when_the_setting_says_so() {
+        let mut rt = rt();
+        rt.update(|s, _| { s.settings.prefs.chat.apply(teams_core::ChatSettingChange::EnterKey(teams_core::EnterKeyBehavior::NewLine)); });
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("one".into()));
+        press(&mut rt, Key::Enter);
+        press(&mut rt, Key::Text("two".into()));
+        assert_eq!(rt.state.composer.text, "one\ntwo");
+        assert!(calls(&rt).iter().all(|c| !c.starts_with("send")));
+        rt.key(KeyEvent { key: Key::Enter, mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
+        rt.frame(1.0 / 60.0);
+        assert!(calls(&rt).iter().any(|c| c.starts_with("send [one\ntwo]")), "{:?}", calls(&rt));
     }
 
     fn rt() -> Runtime<UiState<Quiet>> {
