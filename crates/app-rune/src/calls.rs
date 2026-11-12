@@ -400,6 +400,9 @@ impl CallView {
                 });
                 self.roster = roster;
             }
+            CallUpdate::VideoStopped(key) => {
+                self.surfaces.remove(&key);
+            }
             CallUpdate::ScreenShare(None) => {
                 self.surfaces.remove(&VideoKey::Screen);
             }
@@ -904,6 +907,17 @@ mod tests {
         assert_eq!(view.notice.as_deref(), Some("offline"));
         view.apply(CallUpdate::State(CallState::Connecting));
         assert!(view.muted && view.notice.is_none());
+    }
+
+    #[test]
+    fn stopped_video_removes_only_its_surface() {
+        let mut view = CallView::default();
+        let peer = VideoKey::Person("8:orgid:peer".into());
+        view.surfaces.insert(peer.clone(), NativeSurface::default());
+        view.surfaces.insert(VideoKey::LocalCamera, NativeSurface::default());
+        view.apply(CallUpdate::VideoStopped(peer.clone()));
+        assert!(!view.surfaces.contains_key(&peer));
+        assert!(view.surfaces.contains_key(&VideoKey::LocalCamera));
     }
 
     #[test]

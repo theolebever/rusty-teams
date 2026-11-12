@@ -1,7 +1,9 @@
+pub mod active_speakers;
 pub mod audio;
 pub mod audio_io;
 pub mod awake;
 pub mod background;
+pub mod band_meter;
 pub mod call;
 pub mod candidates;
 pub mod callee_gate;

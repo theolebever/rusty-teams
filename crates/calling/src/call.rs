@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, interval, sleep_until, timeout};
 
+use crate::active_speakers;
 use crate::audio::{SAMPLE_RATE, rms, tone_ratio, write_wav};
 use crate::audio_io::{AudioMode, AudioSetup};
 use crate::background::{BackgroundChoice, BackgroundPicture};
@@ -36,7 +37,7 @@ use crate::end::EndKind;
 use crate::engine::{CallEngine, EngineConfig, Inner};
 use crate::error::{Error, Result};
 use crate::health::{CallHealth, HealthCounters, HealthSampler, QualityTracker, TransportDetails, health_from_stats};
-use crate::hold::{HoldState, INACTIVE, MediaLine, accepted_modalities, direction_of, offer_modalities, is_hold, keep_media_running, rewrite_directions, stop_sending_on};
+use crate::hold::{HoldState, INACTIVE, MediaLine, accepted_modalities, direction_of, offer_modalities, is_hold, keep_media_running, offer_sends_video, rewrite_directions, stop_sending_on};
 use crate::mic_processing::MicSettings;
 use crate::mute::{MuteCommand, MuteEffect};
 use crate::push::CallNotification;
@@ -57,13 +58,13 @@ use crate::software_audio::{SoftwareAudio, SoftwareAudioPlan};
 use crate::state::{CallSignal, CallState};
 use crate::timeline::{Timeline, TimelineEntry};
 use crate::transfer::{Replacement, TransferEvent, TransferTarget};
-use crate::video_frame::VideoKey;
+use crate::video_frame::{VideoKey, VideoPicture};
 use crate::video_layout::{
     CAMERA_MID, MediaDescription, ONE_TO_ONE_SHARE_MID, SCREEN_STREAM, SendCapabilityReporter, SlotTable, VideoLines, VideoRouter, add_one_to_one_lines, add_share_line, add_video_lines, offer_plan, one_to_one_plan,
 };
 use crate::send_control::{RequestFilter, parse_request};
 use crate::video_send::{LocalVideo, SendSource, VideoMode};
-use crate::screen::{ShareKind, ShareSource, list_share_sources};
+use crate::screen::{ShareKind, ShareSource, list_share_sources, share_thumbnail};
 use crate::video_receive::{ReceiveChange, SourceRequester, VideoCounters, VideoReceive, spawn_video_pump};
 use crate::trouter_events::{
     CallEnd, CallEvent, CallbackLinks, ProgressStatus, callback_tag, classify, decode_body,
@@ -815,9 +816,15 @@ async fn drive(
     live.audio = Some(audio);
     let mut local_video = LocalVideo::new(&factory, options.video, control.video.clone(), control.updates());
     let mut camera_choice = options.camera.clone();
+    if options.start_camera {
+        match local_video.preview_camera(&camera_choice) {
+            Ok(()) => control.send(CallUpdate::Camera(true)),
+            Err(error) => timeline.record("camera preview failed", error.to_string()),
+        }
+    }
     let mut media_description_request = 1u32;
     refresh_cameras(control.updates(), options.video, timeline.clone());
-    refresh_share_sources(control.updates(), options.video);
+    refresh_share_sources(control.updates(), options.video, false);
 
     let wants_data_channel = options.data_channel && spec.as_ref().is_some_and(CallSpec::is_meeting);
     let mut current = open_peer(&factory, &grant, &options.relay_host, wants_data_channel)?;
@@ -1013,6 +1020,8 @@ async fn drive(
     }
 
     let mut stats_tick = interval(STATS_PERIOD);
+    let mut speaking_sources: Vec<u32> = Vec::new();
+    let mut speaker_sources_seen = false;
     let hard_deadline = options.hard_limit.map(|limit| call_started + limit);
     let mut leave_at = hard_deadline;
     let mut reconnect_deadline: Option<Instant> = None;
@@ -1029,6 +1038,7 @@ async fn drive(
     let mut capability = MeetingCapability::default();
     let mut previous_packets = 0u64;
     let mut ticks = 0u32;
+    let mut segmentation_model: Option<&'static str> = None;
     let mut health_sampler = HealthSampler::default();
     let mut quality_tracker = QualityTracker::default();
     let mut second = 0u32;
@@ -1394,6 +1404,13 @@ async fn drive(
                                             }
                                             remote_direct_share = answered.receiving_share_mid.clone();
                                             control.send(CallUpdate::ScreenShare(remote_direct_share.as_ref().and(peer_mri.clone())));
+                                        }
+                                        if layout == Layout::OneToOne
+                                            && !offer_sends_video(&renegotiation.sdp)
+                                            && let Some(key) = main_video_mid(&answered.remote).and_then(|mid| video.router().key_for(&mid))
+                                        {
+                                            control.video.forget(&key);
+                                            control.send(CallUpdate::VideoStopped(key));
                                         }
                                         let held = is_hold(&renegotiation.sdp).unwrap_or(false);
                                         if held != remote_hold {
@@ -1823,6 +1840,11 @@ async fn drive(
                     device_lists = devices::list_devices(&factory);
                     control.send(CallUpdate::Devices(device_lists.clone()));
                 }
+                Some(CallCommand::SetCamera(false)) if local_video.camera_previewing() => {
+                    start_camera_pending = false;
+                    local_video.stop_camera();
+                    control.send(CallUpdate::Camera(false));
+                }
                 Some(CallCommand::SetCamera(on)) => {
                     let direct = layout == Layout::OneToOne && negotiator.path() != MediaPath::Mixer;
                     if !remote_set || (on && !video_possible(remote_set, layout, negotiator.path())) {
@@ -1885,7 +1907,11 @@ async fn drive(
                 }
                 Some(CallCommand::SelectCamera(choice)) => {
                     camera_choice = choice;
-                    if local_video.camera_on()
+                    if local_video.camera_previewing()
+                        && let Err(error) = local_video.preview_camera(&camera_choice)
+                    {
+                        control.send(CallUpdate::Notice(format!("Camera could not start: {error}")));
+                    } else if local_video.camera_on()
                         && let Err(error) = local_video.start_camera(&camera_choice)
                     {
                         control.send(CallUpdate::Notice(format!("Camera could not start: {error}")));
@@ -1978,7 +2004,7 @@ async fn drive(
                     share_sound_wanted = on;
                     sync_software_audio(&factory, options, &input, muted, remote_audio.clone(), &current.peer, &track, software_wanted(mic_settings, share_sound_wanted, &local_video, live.audio.as_ref()), false, &mut software_audio, control, timeline);
                 }
-                Some(CallCommand::RefreshShareSources) => refresh_share_sources(control.updates(), options.video),
+                Some(CallCommand::RefreshShareSources) => refresh_share_sources(control.updates(), options.video, true),
                 Some(CallCommand::SetHand(true)) => match remote.signaling.raise_hand(&remote.conversation, &remote.participant).await {
                     Ok(receipt) => {
                         own_hand = receipt.state_id;
@@ -2274,6 +2300,22 @@ async fn drive(
                 }
             },
             _ = stats_tick.tick(), if remote_set => {
+                let speaking = active_speakers::speaking_sources(&active_speakers::audio_sources(&current.peer));
+                if speaking != speaking_sources {
+                    if speaking_sources.is_empty() && !speaker_sources_seen {
+                        speaker_sources_seen = true;
+                        timeline.record("active speakers", format!("{} source(s) from RTP", speaking.len()));
+                    }
+                    speaking_sources = speaking;
+                    let mut speakers = roster.mris_for_sources(&speaking_sources);
+                    if speakers.is_empty() && !speaking_sources.is_empty() && layout == Layout::OneToOne {
+                        speakers = roster.entries().into_iter().map(|entry| entry.mri).filter(|mri| *mri != own_mri).collect();
+                    }
+                    if video.note_speakers(&speakers) {
+                        send_receive_change(control, video.reselect(&roster));
+                    }
+                    control.send(CallUpdate::Speakers(speakers));
+                }
                 let snapshot = collect_stats(&current.peer, &layout_plan.screen_share_mids).await;
                 ticks += 1;
                 if caption_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -2314,6 +2356,10 @@ async fn drive(
                     && let Some(average_ms) = local_video.blur_average_ms()
                 {
                     control.send(CallUpdate::BlurTiming(average_ms));
+                    if let Some(model) = local_video.blur_model().filter(|model| Some(*model) != segmentation_model) {
+                        timeline.record("segmentation model", format!("{model}, effects {average_ms:.1} ms per frame"));
+                        segmentation_model = Some(model);
+                    }
                 }
                 if ticks.is_multiple_of(HEALTH_EVERY_TICKS) {
                     control.send(CallUpdate::Sample(StatsSample {
@@ -2384,11 +2430,11 @@ async fn drive(
                     timeline.record(
                         "stats",
                         format!(
-                            "in packets={} bytes={} level={:.3} rms={decoded_rms:.3} tone={ratio:.2} out packets={} mic={:.3} erle={:.1} dtls={} video in packets={} decoded={} {}x{} out packets={} encoded={} {}x{} mixer reports {} (rtt {:.0} ms) out bytes={} sources={:?}{}",
+                            "in packets={} bytes={} level={:.3} rms={decoded_rms:.3} tone={ratio:.2} out packets={} mic={:.3} erle={:.1} dtls={} video in packets={} decoded={} {}x{} out packets={} encoded={} {}x{} mixer reports {} (rtt {:.0} ms) out bytes={} sources={:?} video senders={:?}{}",
                             snapshot.inbound_packets, snapshot.inbound_bytes, snapshot.audio_level, snapshot.outbound_packets, snapshot.local_level, snapshot.echo_return_loss_enhancement, snapshot.dtls_state,
                             snapshot.video.inbound_packets, snapshot.video.inbound_frames_decoded, snapshot.video.inbound_width, snapshot.video.inbound_height,
                             snapshot.video.outbound_packets, snapshot.video.outbound_frames_encoded, snapshot.video.outbound_width, snapshot.video.outbound_height,
-                            snapshot.video.remote_reports, snapshot.video.remote_round_trip_ms, snapshot.outbound_bytes, snapshot.source_levels,
+                            snapshot.video.remote_reports, snapshot.video.remote_round_trip_ms, snapshot.outbound_bytes, snapshot.source_levels, snapshot.video_senders,
                             snapshot.share_receive.as_ref().filter(|_| snapshot.share_inbound_packets > 0).map(ShareReceive::summary).unwrap_or_default()
                         ),
                     );
@@ -2429,6 +2475,10 @@ async fn drive(
                     pending.session.peer.close();
                     negotiator.escalation_failed();
                     start_camera_pending = false;
+                    if local_video.camera_previewing() {
+                        local_video.stop_camera();
+                        control.send(CallUpdate::Camera(false));
+                    }
                     share_pending = None;
                     settle_failed_escalation(pending.offered.is_none(), layout, &mut negotiator, &mut deferred_changes, &mut local_video, control);
                     timeline.record("escalation failed", "no answer for the new peer connection in time");
@@ -2659,7 +2709,11 @@ fn refresh_cameras(updates: mpsc::UnboundedSender<CallUpdate>, mode: VideoMode, 
     });
 }
 
-fn refresh_share_sources(updates: mpsc::UnboundedSender<CallUpdate>, mode: VideoMode) {
+const SHARE_THUMBNAIL_WINDOWS: usize = 12;
+const SHARE_THUMBNAIL_WIDTH: u32 = 320;
+const SHARE_THUMBNAIL_HEIGHT: u32 = 180;
+
+fn refresh_share_sources(updates: mpsc::UnboundedSender<CallUpdate>, mode: VideoMode, with_thumbnails: bool) {
     tokio::spawn(async move {
         let sources = match mode {
             VideoMode::Pattern => vec![
@@ -2669,7 +2723,31 @@ fn refresh_share_sources(updates: mpsc::UnboundedSender<CallUpdate>, mode: Video
             VideoMode::Off => Vec::new(),
             VideoMode::Platform => tokio::task::spawn_blocking(list_share_sources).await.unwrap_or_default(),
         };
-        let _ = updates.send(CallUpdate::ShareSources(sources));
+        let _ = updates.send(CallUpdate::ShareSources(sources.clone()));
+        if !with_thumbnails {
+            return;
+        }
+        let wanted: Vec<ShareSource> = sources
+            .iter()
+            .filter(|source| source.kind == ShareKind::Screen)
+            .chain(sources.iter().filter(|source| source.kind == ShareKind::Window).take(SHARE_THUMBNAIL_WINDOWS))
+            .cloned()
+            .collect();
+        for source in wanted {
+            let picture = match mode {
+                VideoMode::Platform => {
+                    let wanted = source.clone();
+                    tokio::task::spawn_blocking(move || share_thumbnail(&wanted, SHARE_THUMBNAIL_WIDTH, SHARE_THUMBNAIL_HEIGHT)).await.ok().flatten()
+                }
+                VideoMode::Pattern => Some(VideoPicture::solid(SHARE_THUMBNAIL_WIDTH, SHARE_THUMBNAIL_HEIGHT, 120, 80, 40)),
+                VideoMode::Off => None,
+            };
+            if let Some(picture) = picture
+                && updates.send(CallUpdate::ShareThumbnail { source, picture: Arc::new(picture) }).is_err()
+            {
+                return;
+            }
+        }
     });
 }
 
@@ -3452,6 +3530,7 @@ struct StatsSnapshot {
     outbound_packets: u64,
     outbound_bytes: u64,
     source_levels: Vec<String>,
+    video_senders: Vec<String>,
     audio_level: f64,
     local_level: f64,
     echo_return_loss_enhancement: f64,
@@ -3541,6 +3620,18 @@ async fn collect_stats(peer: &PeerConnection, share_mids: &[String]) -> StatsSna
                     snapshot.share_outbound_packets += outbound.sent.packets_sent;
                 }
                 snapshot.video.outbound_frames_encoded += u64::from(outbound.outbound.frames_encoded);
+                snapshot.video_senders.push(format!(
+                    "mid {} packets={} key={} pli={} fir={} nack={} target={:.0}kbps limit={:?} active={}",
+                    outbound.outbound.mid,
+                    outbound.sent.packets_sent,
+                    outbound.outbound.key_frames_encoded,
+                    outbound.outbound.pli_count,
+                    outbound.outbound.fir_count,
+                    outbound.outbound.nack_count,
+                    outbound.outbound.target_bitrate / 1000.0,
+                    outbound.outbound.quality_limitation_reason,
+                    outbound.outbound.active
+                ));
                 snapshot.video.outbound_width = snapshot.video.outbound_width.max(outbound.outbound.frame_width);
                 snapshot.video.outbound_height = snapshot.video.outbound_height.max(outbound.outbound.frame_height);
             }

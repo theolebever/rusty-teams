@@ -18,7 +18,9 @@ use super::health::{HealthBanner, HealthState};
 use super::bubbles::ChatBubble;
 use super::fullscreen::FullscreenState;
 use super::pictures::CallPictures;
-use super::stage_layout::{FILMSTRIP_MAX, GALLERY_MAX, RECENT_SPEAKER, SPEAKER_HOLD, VisibleRotation, split_overflow};
+use super::stage_layout::{
+    FILMSTRIP_MAX, RECENT_SPEAKER, SPEAKER_HOLD, VisibleRotation, first_page_size, split_overflow,
+};
 use super::transcript::{Transcript, TranscriptEntry};
 use super::view_settings::{CallLayout, ViewSettings};
 use super::options_dialog::OptionsDialog;
@@ -296,6 +298,7 @@ pub struct CallModel {
     pub camera: DeviceChoice,
     pub local_share: Option<String>,
     pub share_sources: Vec<ShareSource>,
+    pub share_thumbnails: Vec<(ShareSource, Arc<gpui_kit::RenderImage>)>,
     pub last_sample: Option<StatsSample>,
     pub share_sound: bool,
     pub own_hand: Option<u64>,
@@ -328,6 +331,7 @@ pub struct CallModel {
     reaction_serial: u64,
     pub meeting_chat: Option<String>,
     pub view: ViewSettings,
+    pub gallery_page: usize,
     rotation: VisibleRotation,
     stage_speaker: Option<String>,
     recent_speakers: Vec<String>,
@@ -364,6 +368,7 @@ impl CallModel {
             camera: DeviceChoice::SystemDefault,
             local_share: None,
             share_sources: Vec::new(),
+            share_thumbnails: Vec::new(),
             last_sample: None,
             share_sound: false,
             own_hand: None,
@@ -396,6 +401,7 @@ impl CallModel {
             reaction_serial: 0,
             meeting_chat: None,
             view: ViewSettings::default(),
+            gallery_page: 0,
             rotation: VisibleRotation::default(),
             stage_speaker: None,
             recent_speakers: Vec::new(),
@@ -491,7 +497,7 @@ impl CallModel {
             CallUpdate::Lobby(lobby) => self.lobby = lobby,
             CallUpdate::OwnIdentity { mri } => self.own_mri = Some(mri),
             CallUpdate::ScreenShare(sharer) => self.screen_sharer = sharer,
-            CallUpdate::VideoReady | CallUpdate::Notice(_) => {}
+            CallUpdate::VideoReady | CallUpdate::VideoStopped(_) | CallUpdate::Notice(_) => {}
             CallUpdate::Camera(on) => self.camera_on = on,
             CallUpdate::Cameras(cameras) => self.cameras = cameras,
             CallUpdate::LocalShare(label) => {
@@ -500,7 +506,16 @@ impl CallModel {
                 }
                 self.local_share = label;
             }
-            CallUpdate::ShareSources(sources) => self.share_sources = sources,
+            CallUpdate::ShareSources(sources) => {
+                self.share_thumbnails.retain(|(source, _)| sources.contains(source));
+                self.share_sources = sources;
+            }
+            CallUpdate::ShareThumbnail { source, picture } => {
+                if let Some(image) = crate::pictures::render_image((*picture).clone()) {
+                    self.share_thumbnails.retain(|(known, _)| *known != source);
+                    self.share_thumbnails.push((source, image));
+                }
+            }
             CallUpdate::ShareSound(active) => self.share_sound = active,
             CallUpdate::OwnHand(rank) => self.own_hand = rank,
             CallUpdate::Reaction { mri, reaction } => {
@@ -980,7 +995,7 @@ impl CallModel {
         let cells = match self.effective_layout() {
             _ if self.has_content() => return others,
             CallLayout::Speaker => FILMSTRIP_MAX,
-            CallLayout::Gallery | CallLayout::Content => GALLERY_MAX,
+            CallLayout::Gallery | CallLayout::Content => return first_page_size(others, self.own_cells()),
         };
         split_overflow(others, self.own_cells(), cells).shown
     }
@@ -1189,6 +1204,13 @@ impl CallModel {
             .iter()
             .filter(|source| source.kind == ShareKind::Screen)
             .collect()
+    }
+
+    pub fn share_thumbnail(&self, source: &ShareSource) -> Option<Arc<gpui_kit::RenderImage>> {
+        self.share_thumbnails
+            .iter()
+            .find(|(known, _)| known == source)
+            .map(|(_, image)| image.clone())
     }
 
     pub fn windows(&self) -> Vec<&ShareSource> {
@@ -1658,8 +1680,8 @@ mod tests {
     #[test]
     fn a_pinned_person_outside_the_grid_moves_into_it() {
         let mut model = crowd(12);
-        let grid = split_overflow(12, 1, GALLERY_MAX).shown;
-        assert_eq!(grid, 7);
+        let grid = first_page_size(12, 1);
+        assert_eq!(grid, 8);
         assert!(!shown_mris(&model)[..grid].contains(&"8:orgid:p11".to_owned()));
         model.toggle_pin("8:orgid:p11");
         assert!(shown_mris(&model)[..grid].contains(&"8:orgid:p11".to_owned()));
@@ -1672,7 +1694,7 @@ mod tests {
         assert_eq!(model.own_cells(), 1);
         model.view.hide_me = true;
         assert_eq!(model.own_cells(), 0);
-        assert_eq!(split_overflow(12, model.own_cells(), GALLERY_MAX).shown, 8);
+        assert_eq!(first_page_size(12, model.own_cells()), 9);
     }
 
     #[test]

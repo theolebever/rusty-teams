@@ -1,3 +1,4 @@
+use crate::views::image_memory::bounded;
 use std::rc::Rc;
 
 use chrono::Local;
@@ -76,12 +77,15 @@ fn faces_width(count: usize) -> f32 {
 fn reaction_emoji(glyph: &str, label: &str, size: f32, directory: &Directory) -> AnyElement {
     let Some(image) = custom_emoji_image(glyph) else {
         return div()
+            .flex_none()
+            .h(px(size))
             .text_size(px(size))
+            .line_height(px(size))
             .child(label.to_owned())
             .into_any_element();
     };
     match directory.image(&image.url) {
-        Some(entry) => img(entry.path.clone())
+        Some(entry) => img(bounded(entry.path.clone()))
             .size(px(size))
             .object_fit(ObjectFit::Contain)
             .flex_none()

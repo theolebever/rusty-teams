@@ -474,6 +474,11 @@ impl AppState {
                 CallMedia::changed(&media, cx);
                 return;
             }
+            CallUpdate::VideoStopped(key) => {
+                call.pictures.forget(&key, cx);
+                CallMedia::changed(&media, cx);
+                return;
+            }
             CallUpdate::Stats { .. } => return,
             CallUpdate::Levels { local, remote } => {
                 let before = (call.model.local_speaking, call.model.remote_speaking);
@@ -1513,6 +1518,29 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_camera_the_peer_stops_leaves_the_tile_at_once(cx: &mut TestAppContext) {
+        let app = app_with_call(cx);
+        let key = calling::VideoKey::Person("8:orgid:peer".into());
+        let shown = |app: &Entity<AppState>, cx: &mut TestAppContext| {
+            cx.update(|cx| app.read(cx).call.as_ref().unwrap().pictures.live(&key, Instant::now()).is_some())
+        };
+        cx.update(|cx| {
+            app.update(cx, |state, cx| {
+                let hub = state.call.as_ref().unwrap().video.clone();
+                hub.publish(key.clone(), calling::VideoPicture::solid(4, 4, 10, 20, 30));
+                state.apply_call_update(7, CallUpdate::VideoReady, cx);
+            })
+        });
+        assert!(shown(&app, cx));
+        cx.update(|cx| {
+            app.update(cx, |state, cx| {
+                state.apply_call_update(7, CallUpdate::VideoStopped(key.clone()), cx)
+            })
+        });
+        assert!(!shown(&app, cx));
+    }
+
+    #[gpui_kit::test]
     fn the_computer_sound_switch_is_remembered_and_sent_to_the_call(cx: &mut TestAppContext) {
         let (app, mut control) = app_with_commands(cx, live_meeting(false), None);
         let store = cx.update(|cx| app.read(cx).store.clone());
@@ -2361,14 +2389,12 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn picking_another_chat_moves_the_call_to_the_mini_window(cx: &mut TestAppContext) {
+    fn picking_another_chat_keeps_the_call_window_showing_the_call(cx: &mut TestAppContext) {
         let app = app_with_call(cx);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
                 assert!(state.viewing_call());
                 state.select(Selection::Chat("c1".into()), cx);
-                assert!(!state.viewing_call());
-                state.show_call(true, cx);
                 assert!(state.viewing_call());
             })
         });

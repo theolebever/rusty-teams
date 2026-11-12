@@ -10,6 +10,7 @@ use libwebrtc::prelude::*;
 use tokio::task::JoinHandle;
 
 use crate::audio::{FRAME_SAMPLES, SAMPLE_RATE, SineGenerator};
+use crate::band_meter::HighBandMeter;
 use crate::audio_io::AudioMode;
 use crate::capture::Capture;
 use crate::devices::DeviceChoice;
@@ -24,6 +25,7 @@ use crate::wav_dump::StageDumps;
 const SOURCE_QUEUE_MS: u32 = 100;
 const FRAME_PERIOD: Duration = Duration::from_millis(10);
 const MAX_LAG: Duration = Duration::from_millis(100);
+const BAND_REPORT_PERIOD: Duration = Duration::from_secs(10);
 const SYSTEM_TONE_HZ: f32 = 660.0;
 const SYNTHETIC_AMPLITUDE: f32 = 0.3;
 
@@ -66,12 +68,18 @@ impl Feeder {
     fn run(mut self) {
         let mut chain = MicChain::new(self.processing, self.ml_noise, StageDumps::from_env());
         let mut due = Instant::now();
+        let mut last_capture = Duration::ZERO;
         while self.running.load(Ordering::SeqCst) {
             due += FRAME_PERIOD;
             let now = Instant::now();
             if due > now {
                 std::thread::sleep(due - now);
             } else if now - due > MAX_LAG {
+                eprintln!(
+                    "calls: audio feeder fell {} ms behind, last capture_frame took {} ms; echo canceller re-aligns",
+                    (now - due).as_millis(),
+                    last_capture.as_millis()
+                );
                 due = now;
             }
             let (mut far_end, has_far_end) = self.far_end.next_frame();
@@ -90,9 +98,11 @@ impl Feeder {
                 num_channels: 1,
                 samples_per_channel: FRAME_SAMPLES as u32,
             };
+            let capture_started = Instant::now();
             if self.runtime.block_on(self.source.capture_frame(&frame)).is_err() {
                 break;
             }
+            last_capture = capture_started.elapsed();
         }
     }
 }
@@ -231,8 +241,17 @@ impl Drop for SoftwareAudio {
 
 async fn feed_far_end(remote: RtcAudioTrack, queue: SampleQueue) {
     let mut stream = NativeAudioStream::new(remote, SAMPLE_RATE as i32, 1);
+    let mut band_meter = HighBandMeter::default();
+    let mut next_report = Instant::now() + BAND_REPORT_PERIOD;
     while let Some(frame) = stream.next().await {
         queue.push(&frame.data);
+        band_meter.add(&frame.data);
+        if Instant::now() >= next_report {
+            next_report += BAND_REPORT_PERIOD;
+            if let Some(share) = band_meter.take_share() {
+                eprintln!("calls: far-end audio energy above 8 kHz: {:.2}%", share * 100.);
+            }
+        }
     }
 }
 

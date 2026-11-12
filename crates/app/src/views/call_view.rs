@@ -16,8 +16,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::avatar::person_avatar;
-use super::call_control_fold::{
-    CONTROL_GAP, CONTROLS_PADDING, Foldable, FoldedControls, fixed_controls_width, folded_for_width,
+use super::call_control_fold::{Foldable, FoldedControls, fixed_controls_width, folded_for_width};
+use super::call_toolbar::{
+    GROUP_GAP, LEAVE_HEIGHT, SPLIT_CHEVRON_WIDTH, TOOL_GAP, tool_face, tool_trigger, split_chevron,
 };
 use super::call_extras::{
     CameraMenu, consent_overlay, consult_banner, hold_panel, recording_chip, return_button,
@@ -27,7 +28,7 @@ use super::call_health::{health_banner, health_indicator};
 use super::call_layouts::stage_region;
 use crate::call::measured_stage;
 use super::call_organizer::{
-    camera_menu_button, captions_hint_chip, captions_overlay, chevron_button, lobby_banner,
+    camera_menu_button, captions_hint_chip, captions_overlay, lobby_banner,
     more_button, pin_chip, spotlight_chip, with_tile_menu,
 };
 use super::call_people::{lock_banner, lock_chip, options_dialog, people_button, people_panel};
@@ -48,12 +49,14 @@ const RING_GAP: f32 = 4.;
 pub(super) const CONTROL_SIZE: f32 = 44.;
 const CONTROL_ICON: f32 = 20.;
 pub(super) const MENU_WIDTH: f32 = 280.;
+const SHARE_MENU_WIDTH: f32 = 360.;
 const PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 const BLINK_DIMMED_OPACITY: f32 = 0.45;
 pub(super) const DISABLED_OPACITY: f32 = 0.4;
 const TILE_RADIUS: f32 = 12.;
 const NAME_PLATE_BACKGROUND: f32 = 0.6;
+const COMPACT_PLATE_BELOW: f32 = 200.;
 pub const CHAT_PANEL_TAG: &str = "shell/islands/main/call-chat-panel";
 pub const NO_MICROPHONE_HINT: &str = "No microphone found";
 const AUDIO_OFF_HINT: &str = "Audio is off for this meeting";
@@ -62,10 +65,16 @@ pub const NO_SHARE_HINT: &str = "Sharing starts once the call is connected";
 pub const NO_WINDOWS_HINT: &str = "No windows found";
 pub(super) const BANNER_HEIGHT: f32 = 40.;
 const MAX_WINDOW_ITEMS: usize = 12;
+pub const SHARE_THUMBNAIL_TAG: &str = "call/share-menu/thumbnail";
+const SCREEN_THUMBNAIL: (f32, f32) = (128., 72.);
+const WINDOW_THUMBNAIL: (f32, f32) = (96., 54.);
+const THUMBNAIL_RADIUS: f32 = 6.;
+const THUMBNAIL_ICON: f32 = 22.;
 pub const LOBBY_TEXT: &str = "Waiting in the lobby...";
 pub(super) const CHAT_PANEL_WIDTH: f32 = 320.;
 pub(super) const OVERLAY_BELOW: f32 = 720.;
-const CONTROLS_HEIGHT: f32 = 2. * 16. + CONTROL_SIZE;
+const HEADER_END_PADDING: f32 = 8.;
+const LEAVE_RADIUS: f32 = 6.;
 const CHAT_HEADER_HEIGHT: f32 = 48.;
 const REACTION_RISE: f32 = 24.;
 const REACTION_FADE_FROM: f32 = 0.75;
@@ -231,6 +240,41 @@ fn mute_badge() -> Div {
         .child(icon(IconName::MicOff, 13., theme::white()))
 }
 
+struct NamePlate {
+    inset: f32,
+    padding_x: f32,
+    padding_y: f32,
+    radius: f32,
+    text_size: f32,
+    max_width_share: f32,
+}
+
+fn name_plate_metrics(size: TileSize) -> NamePlate {
+    if size.height < COMPACT_PLATE_BELOW {
+        NamePlate { inset: 4., padding_x: 6., padding_y: 2., radius: 4., text_size: 11., max_width_share: 0.6 }
+    } else {
+        NamePlate { inset: 8., padding_x: 8., padding_y: 4., radius: 6., text_size: 12., max_width_share: 1. }
+    }
+}
+
+fn name_plate(size: TileSize, name: &str) -> Div {
+    let plate = name_plate_metrics(size);
+    div()
+        .absolute()
+        .left(px(plate.inset))
+        .bottom(px(plate.inset))
+        .max_w(px(((size.width - 3. * plate.inset) * plate.max_width_share).max(0.)))
+        .truncate()
+        .px(px(plate.padding_x))
+        .py(px(plate.padding_y))
+        .rounded(px(plate.radius))
+        .bg(hsla(0., 0., 0., NAME_PLATE_BACKGROUND))
+        .text_size(px(plate.text_size))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::white())
+        .child(name.to_owned())
+}
+
 fn video_tile(
     size: TileSize,
     image: Arc<RenderImage>,
@@ -263,22 +307,7 @@ fn video_tile(
                 })
                 .rounded(px(TILE_RADIUS)),
         )
-        .child(
-            div()
-                .absolute()
-                .left(px(8.))
-                .bottom(px(8.))
-                .max_w(px(size.width - 24.))
-                .truncate()
-                .px(px(8.))
-                .py(px(4.))
-                .rounded(px(6.))
-                .bg(hsla(0., 0., 0., NAME_PLATE_BACKGROUND))
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::white())
-                .child(name.to_owned()),
-        )
+        .child(name_plate(size, name))
         .when(muted, |tile| tile.child(mute_badge()))
         .children(tile_overlays(extras))
 }
@@ -356,7 +385,19 @@ pub fn mute_button(
     } else {
         (IconName::Mic, theme::surface_raised(), theme::text())
     };
-    let button = round_control(id, glyph, background, foreground).size(px(size));
+    mic_action(round_control(id, glyph, background, foreground).size(px(size)), app, model)
+}
+
+fn toolbar_mic(app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
+    let glyph = if model.muted {
+        IconName::MicOff
+    } else {
+        IconName::Mic
+    };
+    mic_action(tool_face("call-mute", glyph, "Mic", false), app, model)
+}
+
+fn mic_action(button: Stateful<Div>, app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
     if !model.can_unmute() {
         let hint = if model.audio_off {
             AUDIO_OFF_HINT
@@ -389,8 +430,8 @@ pub fn leave_button(
     let app = app.clone();
     h_flex()
         .id(id)
-        .h(px(if compact { 28. } else { CONTROL_SIZE }))
-        .px(px(if compact { 10. } else { 20. }))
+        .h(px(if compact { 28. } else { LEAVE_HEIGHT }))
+        .px(px(if compact { 10. } else { 14. }))
         .gap(px(8.))
         .flex_none()
         .items_center()
@@ -398,13 +439,13 @@ pub fn leave_button(
         .rounded_full()
         .bg(theme::red())
         .text_color(theme::white())
-        .text_size(px(if compact { 12. } else { 14. }))
+        .text_size(px(if compact { 12. } else { 13. }))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
         .hover(|button| button.opacity(0.85))
         .child(icon(
             IconName::PhoneOff,
-            if compact { 14. } else { 18. },
+            if compact { 14. } else { 16. },
             theme::white(),
         ))
         .child(label)
@@ -427,7 +468,19 @@ pub(super) fn camera_button(app: &Entity<AppState>, model: &CallModel) -> Statef
     } else {
         (IconName::VideoOff, theme::surface_raised(), theme::text())
     };
-    let button = round_control("call-camera", glyph, background, foreground);
+    camera_action(round_control("call-camera", glyph, background, foreground), app, model)
+}
+
+fn toolbar_camera(app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
+    let glyph = if model.camera_on {
+        IconName::Video
+    } else {
+        IconName::VideoOff
+    };
+    camera_action(tool_face("call-camera", glyph, "Camera", false), app, model)
+}
+
+fn camera_action(button: Stateful<Div>, app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
     if !model.can_use_camera() {
         return button
             .opacity(DISABLED_OPACITY)
@@ -574,7 +627,7 @@ fn share_items(
     let screens = model.screens();
     let single_screen = screens.len() == 1;
     let mut popup = popup
-        .min_w(px(MENU_WIDTH))
+        .min_w(px(SHARE_MENU_WIDTH))
         .item(sound_switch_item(app, options.sound))
         .item(motion_switch_item(app, options.motion))
         .item(standout_switch_item(app, options.standout, model.camera_on))
@@ -585,11 +638,14 @@ fn share_items(
         } else {
             format!("Share screen {}", index + 1)
         };
+        let thumbnail = model.share_thumbnail(source);
         let source = source.clone();
         let app = app.clone();
-        popup = popup.item(PopupMenuItem::new(label).icon(IconName::Monitor).on_click(
-            move |_, _, cx| app.update(cx, |state, cx| state.start_call_share(source.clone(), cx)),
-        ));
+        popup = popup.item(
+            share_source_item(label, thumbnail, IconName::Monitor, SCREEN_THUMBNAIL).on_click(
+                move |_, _, cx| app.update(cx, |state, cx| state.start_call_share(source.clone(), cx)),
+            ),
+        );
     }
     popup = popup
         .separator()
@@ -600,17 +656,56 @@ fn share_items(
     }
     for source in windows.into_iter().take(MAX_WINDOW_ITEMS) {
         let label = source.label();
+        let thumbnail = model.share_thumbnail(source);
         let source = source.clone();
         let app = app.clone();
         popup = popup.item(
-            PopupMenuItem::new(label)
-                .icon(IconName::AppWindow)
-                .on_click(move |_, _, cx| {
-                    app.update(cx, |state, cx| state.start_call_share(source.clone(), cx))
-                }),
+            share_source_item(label, thumbnail, IconName::AppWindow, WINDOW_THUMBNAIL).on_click(
+                move |_, _, cx| app.update(cx, |state, cx| state.start_call_share(source.clone(), cx)),
+            ),
         );
     }
     popup
+}
+
+fn share_source_item(
+    label: String,
+    thumbnail: Option<Arc<RenderImage>>,
+    fallback: IconName,
+    (width, height): (f32, f32),
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        let preview = div()
+            .debug_selector(|| SHARE_THUMBNAIL_TAG.into())
+            .flex_none()
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(THUMBNAIL_RADIUS))
+            .bg(theme::popup_hover())
+            .flex()
+            .items_center()
+            .justify_center();
+        let preview = match &thumbnail {
+            Some(image) => preview.child(
+                img(ImageSource::Render(image.clone()))
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .rounded(px(THUMBNAIL_RADIUS)),
+            ),
+            None => preview.child(
+                gpui_kit::component::Icon::new(fallback.clone())
+                    .size(px(THUMBNAIL_ICON))
+                    .text_color(theme::text_muted()),
+            ),
+        };
+        h_flex()
+            .w_full()
+            .py(px(4.))
+            .gap(px(12.))
+            .items_center()
+            .child(preview)
+            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+    })
 }
 
 fn share_button(
@@ -621,12 +716,7 @@ fn share_button(
 ) -> AnyElement {
     if model.local_share.is_some() {
         let app = app.clone();
-        return round_control(
-            "call-share-stop",
-            IconName::ScreenShareOff,
-            theme::accent(),
-            theme::on_accent(),
-        )
+        return tool_face("call-share-stop", IconName::ScreenShareOff, "Stop", true)
         .tooltip(|window, cx| Tooltip::new("Stop sharing").build(window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -634,12 +724,7 @@ fn share_button(
         })
         .into_any_element();
     }
-    let face = round_control(
-        "call-share-face",
-        IconName::ScreenShare,
-        theme::surface_raised(),
-        theme::text(),
-    );
+    let face = tool_face("call-share-face", IconName::ScreenShare, "Share", false);
     if !model.can_share() {
         return face
             .opacity(DISABLED_OPACITY)
@@ -650,13 +735,8 @@ fn share_button(
     let app = app.clone();
     let open_app = app.clone();
     let model = model.clone();
-    Button::new("call-share")
-        .ghost()
-        .p_0()
-        .size(px(CONTROL_SIZE))
-        .rounded_full()
-        .child(face)
-        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |popup, _, _| {
+    tool_trigger("call-share", face)
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, _, _| {
             share_items(popup, &app, &model, options)
         })
         .open(menu_open)
@@ -729,12 +809,7 @@ fn sharing_banner(app: &Entity<AppState>, model: &CallModel, sound: bool) -> Opt
 
 fn chat_button(app: &Entity<AppState>, open: bool, unread: u32) -> Stateful<Div> {
     let app = app.clone();
-    let (background, foreground) = if open {
-        (theme::accent(), theme::on_accent())
-    } else {
-        (theme::surface_raised(), theme::text())
-    };
-    round_control("call-chat", IconName::MessageCircle, background, foreground)
+    tool_face("call-chat", IconName::MessageCircle, "Chat", open)
         .relative()
         .tooltip(move |window, cx| {
             Tooltip::new(if open {
@@ -752,21 +827,8 @@ fn chat_button(app: &Entity<AppState>, open: bool, unread: u32) -> Stateful<Div>
 
 fn hand_button(app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
     let raised = model.own_hand.is_some();
-    let background = if raised {
-        theme::accent()
-    } else {
-        theme::surface_raised()
-    };
-    let foreground = if raised {
-        theme::on_accent()
-    } else {
-        theme::text()
-    };
-    let button = control_shell("call-hand", background).child(icon(
-        IconName::Hand,
-        CONTROL_ICON,
-        foreground,
-    ));
+    let label = if raised { "Lower" } else { "Raise" };
+    let button = tool_face("call-hand", IconName::Hand, label, raised);
     let tooltip = if raised { "Lower hand" } else { "Raise hand" };
     let button = button.tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx));
     if !model.can_react() {
@@ -780,11 +842,7 @@ fn hand_button(app: &Entity<AppState>, model: &CallModel) -> Stateful<Div> {
 }
 
 fn reactions_button(app: &Entity<AppState>, model: &CallModel) -> AnyElement {
-    let face = control_shell("call-reactions-face", theme::surface_raised()).child(icon(
-        IconName::FaceSlightlySmiling,
-        CONTROL_ICON,
-        theme::text(),
-    ));
+    let face = tool_face("call-reactions-face", IconName::FaceSlightlySmiling, "React", false);
     if !model.can_react() {
         return face
             .opacity(DISABLED_OPACITY)
@@ -793,16 +851,9 @@ fn reactions_button(app: &Entity<AppState>, model: &CallModel) -> AnyElement {
     }
     let app = app.clone();
     Popover::new("call-reactions-popover")
-        .anchor(Anchor::BottomLeft)
-        .offset(px(10.))
-        .trigger(
-            Button::new("call-reactions")
-                .ghost()
-                .p_0()
-                .size(px(CONTROL_SIZE))
-                .rounded_full()
-                .child(face),
-        )
+        .anchor(Anchor::TopRight)
+        .offset(px(6.))
+        .trigger(tool_trigger("call-reactions", face))
         .content(move |_, _, cx| {
             let popover = cx.entity().downgrade();
             h_flex()
@@ -833,6 +884,21 @@ fn reactions_button(app: &Entity<AppState>, model: &CallModel) -> AnyElement {
         .into_any_element()
 }
 
+fn leave_group(app: &Entity<AppState>, model: &CallModel) -> AnyElement {
+    let leave = leave_button(app, model, "call-leave", false)
+        .rounded(px(LEAVE_RADIUS))
+        .debug_selector(|| "shell/islands/main/call-header/controls/leave".into());
+    if !has_leave_menu(model) {
+        return leave.into_any_element();
+    }
+    h_flex()
+        .flex_none()
+        .gap(px(1.))
+        .child(leave.rounded_r(px(0.)))
+        .child(leave_menu(app, model))
+        .into_any_element()
+}
+
 fn has_leave_menu(model: &CallModel) -> bool {
     model.kind == CallKind::Meeting
         && (model.can_end_meeting || (model.can_lower_hands() && model.any_hand_raised()))
@@ -846,15 +912,23 @@ fn leave_menu(app: &Entity<AppState>, model: &CallModel) -> impl IntoElement {
     Button::new("call-leave-menu")
         .ghost()
         .p_0()
-        .size(px(CONTROL_SIZE))
-        .rounded_full()
-        .child(round_control(
-            "call-leave-menu-face",
-            IconName::ChevronUp,
-            theme::surface_raised(),
-            theme::text(),
-        ))
-        .dropdown_menu_with_anchor(Anchor::BottomRight, move |popup, _, _| {
+        .w(px(SPLIT_CHEVRON_WIDTH + 4.))
+        .h(px(LEAVE_HEIGHT))
+        .rounded_r(px(LEAVE_RADIUS))
+        .child(
+            div()
+                .id("call-leave-menu-face")
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_r(px(LEAVE_RADIUS))
+                .bg(theme::red())
+                .cursor_pointer()
+                .hover(|face| face.opacity(0.85))
+                .child(icon(IconName::ChevronDown, 12., theme::white())),
+        )
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, _, _| {
             let end_app = end_app.clone();
             let lower_app = lower_app.clone();
             let popup = popup.min_w(px(MENU_WIDTH));
@@ -966,8 +1040,8 @@ fn devices_menu(
 fn mic_menu_button(app: &Entity<AppState>, model: &CallModel, mic: MicSettings) -> impl IntoElement {
     let app = app.clone();
     let model = model.clone();
-    chevron_button("call-mic-menu", "call-mic-menu-face")
-        .dropdown_menu_with_anchor(Anchor::BottomLeft, move |popup, _, _| {
+    split_chevron("call-mic-menu", "call-mic-menu-face")
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, _, _| {
             devices_menu(popup, &app, &model, mic)
         })
 }
@@ -1181,7 +1255,8 @@ pub fn render_call_view(
         .w_full()
         .h(px(HEADER_HEIGHT))
         .flex_none()
-        .px(px(20.))
+        .pl(px(20.))
+        .pr(px(HEADER_END_PADDING))
         .gap(px(12.))
         .items_center()
         .child(icon(IconName::Phone, 18., theme::accent_text()))
@@ -1212,39 +1287,17 @@ pub fn render_call_view(
     let region = stage_region(app, state, call, now, hold, share_stage);
 
     let folded = folded_controls(state, call, fullscreen);
-    let controls = h_flex()
-        .w_full()
-        .flex_none()
-        .py(px(16.))
-        .px(px(CONTROLS_PADDING))
-        .gap(px(CONTROL_GAP))
+    let panels_and_reactions = h_flex()
+        .gap(px(TOOL_GAP))
         .items_center()
-        .justify_center()
-        .child(
-            h_flex()
-                .debug_selector(|| "shell/islands/main/call-controls/mic".into())
-                .h(px(CONTROL_SIZE))
-                .items_center()
-                .rounded_full()
-                .bg(theme::surface_raised())
-                .child(mute_button(app, model, "call-mute", CONTROL_SIZE))
-                .child(mic_menu_button(app, model, state.call_mic)),
+        .when(
+            call.chat_thread().is_some() && !folded.folds(Foldable::Chat),
+            |row| row.child(chat_button(app, call.chat_open, state.call_chat_unread())),
         )
-        .child(
-            h_flex()
-                .h(px(CONTROL_SIZE))
-                .items_center()
-                .rounded_full()
-                .bg(theme::surface_raised())
-                .child(camera_button(app, model))
-                .children(camera_menu_button(app, model, CameraMenu::of(state))),
+        .when(
+            model.kind != CallKind::Test && !folded.folds(Foldable::People),
+            |row| row.child(people_button(app, call.people_open, model.raised_hands())),
         )
-        .child(share_button(
-            app,
-            model,
-            ShareOptions::of(state),
-            call.share_menu_open,
-        ))
         .when(
             model.has_reaction_controls() && !folded.folds(Foldable::RaiseHand),
             |row| row.child(hand_button(app, model)),
@@ -1256,20 +1309,38 @@ pub fn render_call_view(
         .when(!folded.folds(Foldable::View), |row| {
             row.child(view_button(app, model, fullscreen))
         })
-        .children(more_button(app, model, &folded))
-        .when(
-            model.kind != CallKind::Test && !folded.folds(Foldable::People),
-            |row| row.child(people_button(app, call.people_open, model.raised_hands())),
-        )
-        .when(
-            call.chat_thread().is_some() && !folded.folds(Foldable::Chat),
-            |row| row.child(chat_button(app, call.chat_open, state.call_chat_unread())),
+        .children(more_button(app, model, &folded));
+    let devices = h_flex()
+        .gap(px(TOOL_GAP))
+        .items_center()
+        .child(
+            h_flex()
+                .items_center()
+                .child(toolbar_camera(app, model))
+                .children(camera_menu_button(app, model, CameraMenu::of(state))),
         )
         .child(
-            leave_button(app, model, "call-leave", false)
-                .debug_selector(|| "shell/islands/main/call-controls/leave".into()),
+            h_flex()
+                .debug_selector(|| "shell/islands/main/call-header/controls/mic".into())
+                .items_center()
+                .child(toolbar_mic(app, model))
+                .child(mic_menu_button(app, model, state.call_mic)),
         )
-        .when(has_leave_menu(model), |row| row.child(leave_menu(app, model)));
+        .child(share_button(
+            app,
+            model,
+            ShareOptions::of(state),
+            call.share_menu_open,
+        ));
+    let controls = h_flex()
+        .debug_selector(|| "shell/islands/main/call-header/controls".into())
+        .flex_none()
+        .gap(px(GROUP_GAP))
+        .items_center()
+        .child(panels_and_reactions)
+        .child(devices)
+        .child(leave_group(app, model));
+    let header = header.child(controls);
 
     let top = v_flex()
         .w_full()
@@ -1300,14 +1371,10 @@ pub fn render_call_view(
             column.child(fullscreen_chrome("call-chrome-top", app, top))
         })
         .child(region)
-        .when(chrome_visible, |column| {
-            column.child(fullscreen_chrome("call-chrome-bottom", app, controls))
-        })
     } else {
         base.rounded(px(10.))
             .child(top.debug_selector(|| "shell/islands/main/call-header".into()))
             .child(region)
-            .child(controls.debug_selector(|| "shell/islands/main/call-controls".into()))
     }
     .children(captions_overlay(model, now))
     .children(captions_hint_chip(model))
@@ -1353,9 +1420,9 @@ fn side_panels(panels: Vec<AnyElement>, island_width: f32) -> Vec<AnyElement> {
     vec![
         h_flex()
             .absolute()
-            .top_0()
+            .top(px(HEADER_HEIGHT))
             .right_0()
-            .bottom(px(CONTROLS_HEIGHT))
+            .bottom_0()
             .gap(px(ISLAND_GAP))
             .w(px(panels_width.min(island_width)))
             .children(panels)
@@ -1435,4 +1502,18 @@ pub fn side_panel(
                 ),
         )
         .child(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TileSize, name_plate_metrics};
+
+    #[test]
+    fn small_strip_tiles_get_a_compact_name_plate() {
+        let strip = name_plate_metrics(TileSize { width: 216., height: 121.5, avatar: 48. });
+        assert_eq!((strip.text_size, strip.inset, strip.padding_y), (11., 4., 2.));
+        assert!(strip.max_width_share < 1.);
+        let stage = name_plate_metrics(TileSize { width: 640., height: 360., avatar: 96. });
+        assert_eq!((stage.text_size, stage.inset), (12., 8.));
+    }
 }

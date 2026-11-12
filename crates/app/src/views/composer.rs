@@ -23,6 +23,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use crate::views::title_bar::TITLE_BAR_HEIGHT;
 use teams_core::{
     Draft, DraftLine, Edit, EnterKeyBehavior, FileReference, FormatState, LineKind, LinkPreview,
     MarkKind, MentionCandidate, MentionInput, OBJECT_MARK, SizeStep, TABLE_MARK, TableEdit,
@@ -91,6 +92,9 @@ const MENTION_QUERY_MAX_CHARS: usize = 32;
 const MENTION_QUERY_MAX_WORDS: usize = 3;
 const POPUP_WIDTH: f32 = 380.;
 const POPUP_ROW_HEIGHT: f32 = 44.;
+const POPUP_PADDING: f32 = 6.;
+const POPUP_GAP: f32 = 6.;
+pub const MENTION_POPUP_TAG: &str = "composer/mention-popup";
 const DEMO_UPLOAD_STEPS: u8 = 10;
 const COMPOSER_PLACEHOLDER: &str = "Type a message";
 const SEND_DIVIDER_HEIGHT: f32 = 20.;
@@ -99,6 +103,8 @@ const COMPOSER_BUTTON_SIZE: f32 = 32.;
 const COMPOSER_BUTTON_INSET: f32 = 6.;
 pub const COMPOSER_BOX_TAG: &str = "composer";
 pub const COMPOSER_ACTIONS_TAG: &str = "composer/actions";
+pub const COMPOSER_STACKED_ACTIONS_TAG: &str = "composer/stacked-actions";
+const STACKED_ACTIONS_WIDTH: f32 = 400.;
 pub const COMPOSER_INPUT_TAG: &str = "composer/input";
 pub const COMPOSER_SEND_TAG: &str = "composer/send";
 pub const COMPOSER_FORMAT_TAG: &str = "composer/actions/format";
@@ -2499,11 +2505,17 @@ impl Composer {
         self.input.update(cx, |state, cx| state.focus(window, cx));
     }
 
-    fn render_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_popup(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let popup = self
             .popup
             .as_ref()
             .filter(|popup| !popup.candidates.is_empty())?;
+        let at_sign = popup.range.start..popup.range.start + 1;
+        let anchor = self.input.read(cx).range_to_bounds(&at_sign);
+        if anchor.is_none() {
+            window.request_animation_frame();
+        }
+        let popup_height = popup.candidates.len() as f32 * POPUP_ROW_HEIGHT + 2. * POPUP_PADDING;
         let directory = &self.app.read(cx).directory;
         let rows = popup
             .candidates
@@ -2556,20 +2568,42 @@ impl Composer {
                         this.accept_mention(window, cx);
                     }))
             });
+        let panel = v_flex()
+            .id("mention-popup")
+            .debug_selector(|| MENTION_POPUP_TAG.into())
+            .w(px(POPUP_WIDTH))
+            .py(px(POPUP_PADDING))
+            .rounded(px(10.))
+            .flyout_surface()
+            .occlude()
+            .children(rows);
+        let Some(anchor) = anchor else {
+            return Some(
+                div()
+                    .absolute()
+                    .bottom(relative(1.))
+                    .left_0()
+                    .mb(px(POPUP_GAP))
+                    .child(panel)
+                    .into_any_element(),
+            );
+        };
+        let room_above = f32::from(anchor.top()) - POPUP_GAP - TITLE_BAR_HEIGHT;
+        let (position, corner) = if room_above >= popup_height {
+            (point(anchor.left(), anchor.top() - px(POPUP_GAP)), Anchor::BottomLeft)
+        } else {
+            (point(anchor.left(), anchor.bottom() + px(POPUP_GAP)), Anchor::TopLeft)
+        };
         Some(
-            v_flex()
-                .id("mention-popup")
-                .absolute()
-                .bottom(relative(1.))
-                .left_0()
-                .mb(px(6.))
-                .w(px(POPUP_WIDTH))
-                .py(px(6.))
-                .rounded(px(10.))
-                .flyout_surface()
-                .occlude()
-                .children(rows)
-                .into_any_element(),
+            deferred(
+                anchored()
+                    .position(position)
+                    .anchor(corner)
+                    .snap_to_window_with_margin(px(POPUP_GAP))
+                    .child(panel),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
@@ -2993,10 +3027,18 @@ impl Render for Composer {
             .children(attach)
             .children(self.render_rewrite_button(cx))
             .children(self.render_plus_button(cx));
-        let (row_actions, post_footer) = if post_layout {
-            (None, Some(self.render_post_footer(actions, can_send, cx)))
+        let stacked = !post_layout
+            && self
+                .composer_bounds
+                .get()
+                .is_some_and(|bounds| f32::from(bounds.size.width) < STACKED_ACTIONS_WIDTH);
+        let mut send = Some(send);
+        let (row_actions, stacked_actions, post_footer) = if post_layout {
+            (None, None, Some(self.render_post_footer(actions, can_send, cx)))
+        } else if stacked {
+            (None, Some((actions, send.take())), None)
         } else {
-            (Some(actions.ml(px(COMPOSER_BUTTON_INSET))), None)
+            (Some(actions.ml(px(COMPOSER_BUTTON_INSET))), None, None)
         };
         let post_header = self.render_post_header(cx);
         let composer = cx.weak_entity();
@@ -3096,7 +3138,7 @@ impl Render for Composer {
         let (inset, top, bottom) = if self.inline {
             (0., 0., 0.)
         } else {
-            (20., 8., 16.)
+            (20., 0., 16.)
         };
         v_flex()
             .w_full()
@@ -3449,7 +3491,7 @@ impl Render for Composer {
                 div()
                     .relative()
                     .w_full()
-                    .children(self.render_popup(cx))
+                    .children(self.render_popup(window, cx))
                     .children(self.render_slash_popup(cx))
                     .children(self.render_emoji_popup(window, cx))
                     .children(self.render_toolbar(focused, cx))
@@ -3531,7 +3573,7 @@ impl Render for Composer {
                                             .child(input),
                                     )
                                     .children(row_actions)
-                                    .when(!post_layout, |row| {
+                                    .when_some(send.filter(|_| !post_layout), |row, send| {
                                         row.child(
                                             div()
                                                 .flex_none()
@@ -3543,6 +3585,17 @@ impl Render for Composer {
                                         .child(send)
                                     }),
                             )
+                            .children(stacked_actions.map(|(actions, send)| {
+                                h_flex()
+                                    .debug_selector(|| COMPOSER_STACKED_ACTIONS_TAG.into())
+                                    .w_full()
+                                    .items_center()
+                                    .px(px(COMPOSER_BUTTON_INSET))
+                                    .pb(px(COMPOSER_BUTTON_INSET))
+                                    .child(actions)
+                                    .child(div().flex_1())
+                                    .children(send)
+                            }))
                             .children(post_footer),
                     ),
             )

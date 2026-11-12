@@ -1,3 +1,4 @@
+use crate::views::image_memory::{bounded, preview};
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
@@ -66,8 +67,11 @@ fn declared_size(image: &ImageRef) -> Option<(u32, u32)> {
     image.width.zip(image.height)
 }
 
-pub fn image_size(image: &ImageRef, directory: &Directory) -> (f32, f32) {
-    let loaded = directory.image(&image.url).and_then(|entry| entry.size);
+fn image_size(image: &ImageRef, directory: &Directory, sent_preview: Option<&LocalImage>) -> (f32, f32) {
+    let loaded = directory
+        .image(&image.url)
+        .and_then(|entry| entry.size)
+        .or_else(|| sent_preview.and_then(|preview| preview.size));
     let max_height = if external_image_url(&image.url).is_some() {
         remote_image::MAX_HEIGHT as f32
     } else {
@@ -76,13 +80,33 @@ pub fn image_size(image: &ImageRef, directory: &Directory) -> (f32, f32) {
     fit_image_within(declared_size(image).or(loaded), max_height)
 }
 
+fn sent_preview<'a>(images: &[ImageRef], position: usize, sent_previews: &'a [LocalImage]) -> Option<&'a LocalImage> {
+    if external_image_url(&images[position].url).is_some() {
+        return None;
+    }
+    let uploaded_before = images[..position]
+        .iter()
+        .filter(|image| external_image_url(&image.url).is_none())
+        .count();
+    sent_previews.get(uploaded_before)
+}
+
+fn local_image(image: &LocalImage, id: ElementId) -> Stateful<Img> {
+    img(bounded(image.image.clone()))
+        .id(id)
+        .size_full()
+        .rounded(px(IMAGE_RADIUS))
+        .object_fit(ObjectFit::Cover)
+}
+
 fn image_view(
     image: &ImageRef,
     id: String,
     directory: &Directory,
     open_image: Option<&ImageActions>,
+    sent_preview: Option<&LocalImage>,
 ) -> AnyElement {
-    let (width, height) = image_size(image, directory);
+    let (width, height) = image_size(image, directory, sent_preview);
     let image_id = ElementId::Name(format!("{id}-image").into());
     let frame = div()
         .id(ElementId::Name(id.into()))
@@ -94,6 +118,9 @@ fn image_view(
         .rounded(px(IMAGE_RADIUS))
         .overflow_hidden();
     let Some(entry) = directory.image(&image.url) else {
+        if let Some(sent) = sent_preview {
+            return frame.child(local_image(sent, image_id)).into_any_element();
+        }
         return frame
             .flex()
             .flex_col()
@@ -116,11 +143,14 @@ fn image_view(
     let frame = frame
         .cursor_pointer()
         .child(
-            img(entry.path.clone())
-                .id(image_id)
+            img(preview(entry.path.clone()))
+                .id(image_id.clone())
                 .size_full()
                 .rounded(px(IMAGE_RADIUS))
-                .object_fit(ObjectFit::Cover),
+                .object_fit(ObjectFit::Cover)
+                .when_some(sent_preview.cloned(), |remote, sent| {
+                    remote.with_loading(move || local_image(&sent, image_id.clone()).into_any_element())
+                }),
         )
         .on_click({
             let path = path.clone();
@@ -199,13 +229,7 @@ fn local_image_view(image: &LocalImage, id: String) -> AnyElement {
         .flex_none()
         .rounded(px(IMAGE_RADIUS))
         .overflow_hidden()
-        .child(
-            img(image.image.clone())
-                .id(image_id)
-                .size_full()
-                .rounded(px(IMAGE_RADIUS))
-                .object_fit(ObjectFit::Cover),
-        )
+        .child(local_image(image, image_id))
         .into_any_element()
 }
 
@@ -266,8 +290,8 @@ fn file_preview(card: &FileCard, id: &str, directory: &Directory) -> Option<Stat
     let frame = match image {
         Some(path) if card.kind.is_document() && card.kind != FileKind::PowerPoint => frame
             .bg(theme::white())
-            .child(img(path).w_full().h(px(FILE_CARD_WIDTH * PORTRAIT_PAGE_RATIO)).object_fit(ObjectFit::Cover)),
-        Some(path) => frame.child(img(path).size_full().object_fit(match card.kind {
+            .child(img(bounded(path)).w_full().h(px(FILE_CARD_WIDTH * PORTRAIT_PAGE_RATIO)).object_fit(ObjectFit::Cover)),
+        Some(path) => frame.child(img(bounded(path)).size_full().object_fit(match card.kind {
             FileKind::Video | FileKind::PowerPoint => ObjectFit::Cover,
             _ => ObjectFit::Contain,
         })),
@@ -422,6 +446,7 @@ pub fn message_body(
     blocks: &[Block],
     images: &[ImageRef],
     local_images: &[LocalImage],
+    sent_previews: &[LocalImage],
     id: &str,
     own: bool,
     directory: &Directory,
@@ -446,6 +471,7 @@ pub fn message_body(
                 format!("{key}-image-{position}"),
                 directory,
                 open_image,
+                sent_preview(images, position, sent_previews),
             )),
             Placement::Local(position) => Some(local_image_view(
                 &local_images[position],
@@ -478,6 +504,7 @@ pub fn attachments_view(
     blocks: &[Block],
     images: &[ImageRef],
     local_images: &[LocalImage],
+    sent_previews: &[LocalImage],
     files: &[FileCard],
     id: &str,
     directory: &Directory,
@@ -503,7 +530,13 @@ pub fn attachments_view(
             .gap(px(6.))
             .items_start()
             .children(unplaced_images.into_iter().map(|(index, image)| {
-                image_view(image, format!("{id}-image-{index}"), directory, open_image)
+                image_view(
+                    image,
+                    format!("{id}-image-{index}"),
+                    directory,
+                    open_image,
+                    sent_preview(images, index, sent_previews),
+                )
             }))
             .children(
                 unplaced_local.into_iter().map(|(index, image)| {
@@ -526,8 +559,9 @@ pub fn attachments_view(
 mod tests {
     use super::{
         IMAGE_FALLBACK, Placement, file_subtitle, fit_image, fit_image_within, local_image_index,
-        placement, placements,
+        placement, placements, sent_preview,
     };
+    use crate::rows::LocalImage;
     use crate::render::{Block, TableCell};
     use teams_core::{FileCard, FileKind, ImageRef};
 
@@ -543,6 +577,20 @@ mod tests {
 
     fn image_block(url: &str) -> Block {
         Block::Image { url: url.into() }
+    }
+
+    #[test]
+    fn sent_previews_follow_the_uploaded_images_and_skip_gifs() {
+        let gif = "https://media.giphy.com/media/x/giphy.gif";
+        let images = [image_ref("hosted-a"), image_ref(gif), image_ref("hosted-b")];
+        let previews: Vec<LocalImage> = [(1, 1), (2, 2)]
+            .into_iter()
+            .map(|size| LocalImage { image: std::sync::Arc::new(gpui_kit::Image::empty()), size: Some(size) })
+            .collect();
+        let size_at = |position| sent_preview(&images, position, &previews).and_then(|preview| preview.size);
+        assert_eq!(size_at(0), Some((1, 1)));
+        assert_eq!(size_at(1), None);
+        assert_eq!(size_at(2), Some((2, 2)));
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod card_refresh;
 pub mod card_state;
 pub mod channel_menu;
 pub mod chat_actions;
+mod sidebar_load;
 pub mod channel_filter;
 pub mod chat_filter;
 pub mod find_in_chat;
@@ -57,6 +58,7 @@ pub mod task_dialog;
 pub mod team_admin;
 pub mod translation_actions;
 pub mod typing;
+mod warm_chats;
 pub mod urgent_ack;
 
 pub use app_ui_kit::render;

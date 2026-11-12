@@ -78,6 +78,11 @@ impl MessageScrollerState {
         self.list_state.logical_scroll_top().item_ix
     }
 
+    /// Window bounds of a row from the last layout, `None` when it was not rendered.
+    pub fn item_bounds(&self, index: usize) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.list_state.bounds_for_item(index)
+    }
+
     /// Return whether the list is actively following its tail.
     pub fn is_following_tail(&self) -> bool {
         self.list_state.is_following_tail()
@@ -237,6 +242,7 @@ pub struct MessageScroller {
     bottom_fade: Option<Hsla>,
     top_inset: gpui::Pixels,
     scrollbar: bool,
+    wheel_mask: bool,
     jump_button: bool,
     force_jump_button: bool,
     on_jump: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
@@ -270,6 +276,7 @@ impl MessageScroller {
             bottom_fade: None,
             top_inset: px(0.),
             scrollbar: true,
+            wheel_mask: true,
             jump_button: true,
             force_jump_button: false,
             on_jump: None,
@@ -280,6 +287,12 @@ impl MessageScroller {
     /// Enable or disable the virtual-list scrollbar.
     pub fn scrollbar(mut self, scrollbar: bool) -> Self {
         self.scrollbar = scrollbar;
+        self
+    }
+
+    /// Without the mask the wheel reaches scrollable rows (an inline editor) before the list; use it when no ancestor scrolls.
+    pub fn wheel_mask(mut self, wheel_mask: bool) -> Self {
+        self.wheel_mask = wheel_mask;
         self
     }
 
@@ -509,7 +522,9 @@ impl RenderOnce for MessageScroller {
             // scroller (like in Table): the mask consumes vertical-dominant
             // wheel events while the list can move and chains to the ancestor
             // only at the edges.
-            .child(ScrollableMask::new(Axis::Vertical, &list_state).id(root_id.clone()))
+            .when(self.wheel_mask, |this| {
+                this.child(ScrollableMask::new(Axis::Vertical, &list_state).id(root_id.clone()))
+            })
             .when(self.jump_button && jump_button_visibility > 0., |this| {
                 let state = self.state.clone();
                 let on_jump = self.on_jump.clone();

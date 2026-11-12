@@ -1,8 +1,9 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{Icon, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
+use std::rc::Rc;
 
 use super::adaptive_card::cards_view;
 use super::attachments::{FileActions, ImageActions, attachments_view, message_body};
@@ -10,6 +11,7 @@ use super::avatar::{bot_avatar, person_avatar};
 use super::call_card::{CallActions, call_card_row};
 use super::jumbo_emoji::jumbo_row;
 use super::link_preview::{link_preview_card, meeting_join_chip};
+use super::message_appear::{AppearKind, appear};
 use super::message_actions::{MessageMenu, ReactionAdder, message_toolbar};
 use super::profile_card::opens_profile;
 use super::reaction_picker::PickHandler;
@@ -64,6 +66,7 @@ const BUBBLE_PADDING_Y: f32 = 8.;
 const META_BOTTOM_INSET: f32 = 4.;
 const META_SIZE: f32 = 11.;
 const META_CHECK_SIZE: f32 = 15.;
+const TICK_BASELINE_DROP: f32 = 0.5;
 const SAVED_MARK_SIZE: f32 = 12.;
 const FORWARDED_SIZE: f32 = 11.;
 const IMPORTANCE_LABEL_SIZE: f32 = 12.;
@@ -105,6 +108,8 @@ pub struct RowActions {
     pub bot: Option<BotIdentity>,
     pub delivery: DeliveryActions,
     pub reply: RowAction,
+    pub open_context: Option<Rc<dyn Fn(Point<Pixels>, &mut App)>>,
+    pub context_menu: Option<AnyElement>,
     pub hovered: Option<HoverChange>,
     pub menu: Option<MessageMenu>,
     pub scheduled_menu: Option<ScheduledMenu>,
@@ -123,6 +128,7 @@ pub struct RowActions {
     pub reaction_proposal: Option<ReactionPill>,
     pub undo_delete: SharedRowAction,
     pub compact: bool,
+    pub appear: Option<AppearKind>,
 }
 
 pub fn row_spacing(has_previous: bool, compact: bool) -> f32 {
@@ -297,6 +303,7 @@ fn bubble(
         &row.blocks,
         &row.images,
         &row.local_images,
+        &row.sent_previews,
         &row.files,
         &format!("message-{index}"),
         directory,
@@ -321,6 +328,7 @@ fn bubble(
             padded_blocks.as_deref().unwrap_or(&row.blocks),
             &row.images,
             &row.local_images,
+            &row.sent_previews,
             &format!("message-{index}"),
             own,
             directory,
@@ -345,21 +353,20 @@ fn bubble(
     }));
     content = content.children(cards);
     if has_reactions {
+        let pills = reaction_pills(
+            &row.reactions,
+            index,
+            own,
+            directory,
+            extras.react.clone(),
+            extras.controls.as_ref(),
+        );
         content = content.child(
             h_flex()
                 .gap(px(8.))
                 .items_end()
-                .child(
-                    reaction_pills(
-                        &row.reactions,
-                        index,
-                        own,
-                        directory,
-                        extras.react.clone(),
-                        extras.controls.as_ref(),
-                    )
-                    .flex_auto(),
-                )
+                .when(jumbo.is_some() && own, |line| line.justify_end())
+                .child(if jumbo.is_some() { pills } else { pills.flex_auto() })
                 .child(
                     h_flex()
                         .flex_none()
@@ -489,7 +496,12 @@ fn bubble_meta(row: &MessageRow, own: bool, saved: bool) -> Div {
                     )
                     .into_any_element(),
                 };
-                let holder = div().id(ElementId::Name(format!("{}-receipt", row.key).into())).child(check);
+                // The tick glyph ends about half a pixel above the time baseline (measured at 100 % and 125 %).
+                let holder = div()
+                    .id(ElementId::Name(format!("{}-receipt", row.key).into()))
+                    .relative()
+                    .top(px(TICK_BASELINE_DROP))
+                    .child(check);
                 meta.child(match row.receipt_label.clone() {
                     Some(label) => holder.tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
@@ -788,6 +800,8 @@ pub fn render_message_row(
         bot,
         delivery,
         reply,
+        open_context,
+        context_menu,
         hovered,
         menu,
         scheduled_menu,
@@ -806,6 +820,7 @@ pub fn render_message_row(
         reaction_proposal,
         undo_delete,
         compact,
+        appear: appear_kind,
     } = actions;
     let extras = BubbleExtras {
         hover: hovered,
@@ -838,29 +853,35 @@ pub fn render_message_row(
     } else {
         others_row(row, index, directory, bot.as_ref(), delivery, extras, cx)
     };
+    let body = match appear_kind.filter(|_| !cx.reduce_motion()) {
+        Some(kind) => appear(body, &row.key, kind).into_any_element(),
+        None => body.into_any_element(),
+    };
     let checked = select.as_ref().is_some_and(|select| select.checked);
     let body = match select {
         Some(select) => selectable_body(select, index, body).into_any_element(),
-        None => body.into_any_element(),
+        None => body,
     };
     container
         .child(
             div()
                 .id(ElementId::Name(format!("row-{index}").into()))
-                .w_full()
+                .mx(px(-ROW_PADDING))
+                .px(px(ROW_PADDING))
                 .pt(spacing)
-                .when_some(reply, |element, reply| {
-                    element.on_mouse_down(MouseButton::Right, move |_, _, cx| reply(cx))
+                .when(checked && !highlighted, |element| {
+                    element.bg(theme::accent().opacity(SELECTED_TINT))
                 })
-                .child(
-                    div()
-                        .w_full()
-                        .rounded(px(10.))
-                        .when(checked && !highlighted, |element| {
-                            element.bg(theme::accent().opacity(SELECTED_TINT))
-                        })
-                        .child(body),
-                ),
+                .map(|element| match (open_context, reply) {
+                    (Some(open_context), _) => element.on_mouse_down(MouseButton::Right, move |event, _, cx| {
+                        cx.stop_propagation();
+                        open_context(event.position, cx)
+                    }),
+                    (None, Some(reply)) => element.on_mouse_down(MouseButton::Right, move |_, _, cx| reply(cx)),
+                    (None, None) => element,
+                })
+                .children(context_menu)
+                .child(body),
         )
         .into_any_element()
 }

@@ -243,6 +243,9 @@ async fn forward(
             }
             continue;
         }
+        if let CallUpdate::VideoStopped(key) = &update {
+            state.lock().expect("call state lock").frames.remove(key);
+        }
         let changed_roster = match &update {
             CallUpdate::OwnIdentity { mri } => {
                 own_mri.clone_from(mri);
@@ -320,6 +323,17 @@ mod tests {
             received.recv().await,
             Some(CallUpdate::Muted(false))
         ));
+        let peer = VideoKey::Person("8:orgid:peer".into());
+        state.lock().expect("call state lock").frames.insert(
+            peer.clone(),
+            Arc::new(VideoPicture::solid(2, 2, 1, 0, 0)),
+        );
+        control.send(CallUpdate::VideoStopped(peer.clone()));
+        assert!(matches!(
+            received.recv().await,
+            Some(CallUpdate::VideoStopped(key)) if key == peer
+        ));
+        assert!(state.lock().expect("call state lock").frames.is_empty());
         control.send(CallUpdate::State(CallState::Ended {
             reason: calling::EndReason::LocalHangup,
         }));
