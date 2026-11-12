@@ -143,6 +143,10 @@ pub enum Update {
     Mentioned(String),
     AgentSettings(agents::AgentSettings),
     AgentResult(String),
+    /// A tool step of the running agent.
+    AgentProgress(String),
+    /// The GPUI client's stored agent runs (`agent_panel::stored_runs`).
+    AgentRuns(Vec<crate::agent_panel::Run>),
     Details(std::collections::HashMap<String, ChatDetails>),
     Pinned { conversation_id: String, pin: Option<PinnedRow> },
     /// Ids of the edited messages of the open conversation (`message_menu.rs`).
@@ -238,7 +242,9 @@ pub trait Actions {
     fn load_audio(&self, _url: &str) {}
     fn call_back(&self, _entry: &chatsvc::CallLogEntry) {}
     fn load_call_history(&self) {}
-    fn run_agent(&self, _id: &str, _prompt: &str) {}
+    /// Runs agent `id` on `prompt` in `working_dir` (`~` when empty); progress arrives as
+    /// `Update::AgentProgress`, the end as `Update::AgentResult`.
+    fn run_agent(&self, _id: &str, _prompt: &str, _working_dir: &str) {}
     fn stop_agent(&self) {}
     fn rename_chat(&self, _id: &str, _title: &str) {}
     fn meet_now(&self, _conversation_id: &str) {}

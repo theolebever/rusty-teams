@@ -217,7 +217,9 @@ impl<A: Actions> UiState<A> {
                 }
             }
             Update::AgentSettings(settings) => self.agent.settings = settings,
-            Update::AgentResult(result) => { self.agent.output = result; self.agent.running = false; }
+            Update::AgentResult(result) => self.agent.finish(result),
+            Update::AgentProgress(step) => self.agent.steps.push(step),
+            Update::AgentRuns(runs) => self.agent.runs.extend(runs),
             Update::Details(details) => {
                 for (id, chat) in &details { self.member_counts.insert(id.clone(), chat.members.len()); }
                 self.details = details;

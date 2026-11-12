@@ -266,6 +266,7 @@ impl Bridge {
             store: store.clone(),
         }});
         shared.publish(Update::Preferences(Box::new(crate::settings_backend::load(&store))));
+        shared.publish(Update::AgentRuns(crate::agent_panel::stored_runs(&store)));
         let notification_shared = Arc::downgrade(&shared);
         rune_notify::on_click(move |click| {
             if let Some(shared) = notification_shared.upgrade() && let Some(update) = crate::notifications::clicked(&click) {
@@ -490,23 +491,27 @@ impl Actions for Bridge {
         if let Some(stop) = self.shared.agent_stop.lock().unwrap_or_else(PoisonError::into_inner).take() { let _ = stop.send(()); }
     }
 
-    fn run_agent(&self, id: &str, prompt: &str) {
+    fn run_agent(&self, id: &str, prompt: &str, working_dir: &str) {
         if self.shared.read_only || prompt.trim().is_empty() { return; }
         let Some(engine) = self.shared.engine() else {
             self.shared.publish(Update::AgentResult("Not connected yet".into()));
             return;
         };
-        let settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
+        let mut settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
             .and_then(|json| agents::AgentSettings::from_json(&json).ok()).unwrap_or_default();
         let Some(profile) = settings.agents.iter().find(|agent| agent.id == id).cloned() else {
             self.shared.publish(Update::AgentResult("Agent is no longer configured".into()));
             return;
         };
-        let action = agents::AgentAction { working_dir: "~".into(), ..Default::default() };
+        let working_dir = if working_dir.is_empty() { "~" } else { working_dir };
+        let action = agents::AgentAction { working_dir: working_dir.to_owned(), ..Default::default() };
         let plan = match agents::build_invocation(&profile, &action, prompt, &agents::new_session_id(), None, None) {
             Ok(plan) => plan,
             Err(error) => { self.shared.publish(Update::AgentResult(error.to_string())); return; }
         };
+        settings.remember_working_dir(id, working_dir);
+        let _ = engine.store().set_meta(agents::SETTINGS_KEY, &settings.to_json());
+        self.shared.publish(Update::AgentSettings(settings));
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let mut running = self.shared.agent_stop.lock().unwrap_or_else(PoisonError::into_inner);
         if running.is_some() { return; }
@@ -515,7 +520,12 @@ impl Actions for Bridge {
         let shared = self.shared.clone();
         app_backend::runtime::handle().spawn(async move {
             let (events, mut updates) = tokio_mpsc::unbounded_channel();
-            let drain = tokio::spawn(async move { while updates.recv().await.is_some() {} });
+            let progress = shared.clone();
+            let drain = tokio::spawn(async move {
+                while let Some(update) = updates.recv().await {
+                    if let agents::RunUpdate::Event(agents::RunEvent::Step(step)) = update { progress.publish(Update::AgentProgress(step)); }
+                }
+            });
             let result = agents::run(plan, profile.output, events, stopped).await;
             let _ = drain.await;
             shared.agent_stop.lock().unwrap_or_else(PoisonError::into_inner).take();
