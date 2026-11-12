@@ -1,10 +1,11 @@
 # Packages Rune on Linux, Windows and macOS. Tests live in test.yml.
 name: Build
 
-# Builds run for tags (the release assets); pushes are tested in test.yml.
+# Main pushes produce portable artifacts; tags also produce the Windows installer.
 # A `v*` tag also publishes a GitHub release; a tag with `-` (v0.2.0-rc.1) is a pre-release.
 on:
   push:
+    branches: [main]
     tags: ['*']
   workflow_dispatch:
 
