@@ -115,6 +115,15 @@ pub fn visible_chats(state: &ChatListState, chats: &[ChatRow]) -> Vec<usize> {
         .collect()
 }
 
+/// Turns a filter chip on or off; a chip whose opposite is on stays off.
+pub(crate) fn toggle_filter<A: Actions>(s: &mut UiState<A>, pill: Pill) {
+    let excludes = match pill {
+        Pill::Mentions => Some(Pill::Muted), Pill::Muted => Some(Pill::Mentions),
+        Pill::Chats => Some(Pill::Meetings), Pill::Meetings => Some(Pill::Chats), _ => None,
+    };
+    if !excludes.is_some_and(|other| s.chatlist.filters.contains(&other)) { flip(&mut s.chatlist.filters, &pill); }
+}
+
 pub(crate) fn filtered_chats<A: Actions>(s: &UiState<A>) -> Vec<usize> {
     visible_chats(&s.chatlist, &s.chats).into_iter().filter(|&i| {
         let id = &s.chats[i].id;
@@ -276,13 +285,7 @@ fn chips<A: Actions + 'static>(s: &UiState<A>, pills: &[Pill]) -> El {
                 .fill(tone(if on { p.accent } else { p.surface_raised }))
                 .hover(tone(if on { p.accent } else { p.border_strong }))
                 .label(pill.label())
-                .on_press(move |s: &mut UiState<A>| {
-                    let excludes = match pill {
-                        Pill::Mentions => Some(Pill::Muted), Pill::Muted => Some(Pill::Mentions),
-                        Pill::Chats => Some(Pill::Meetings), Pill::Meetings => Some(Pill::Chats), _ => None,
-                    };
-                    if !excludes.is_some_and(|other| s.chatlist.filters.contains(&other)) { flip(&mut s.chatlist.filters, &pill); }
-                })
+                .on_press(move |s: &mut UiState<A>| toggle_filter(s, pill))
                 .child(
                     text(pill.label())
                         .font(ts(12.0, 400.0))

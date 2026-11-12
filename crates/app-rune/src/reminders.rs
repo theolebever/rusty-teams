@@ -85,17 +85,22 @@ fn answer<A: Actions>(s: &mut UiState<A>, until: Option<DateTime<Utc>>) {
     s.actions.write_reminder(&reminder.event_id, until);
 }
 
+/// Opens the prejoin of the shown reminder's meeting; false when none shows.
+pub fn join<A: Actions>(s: &mut UiState<A>) -> bool {
+    if s.read_only { return false; }
+    // Joining hides the card here only; the Outlook reminder is left as it is.
+    let Some(reminder) = s.reminders.shown.take() else { return false };
+    s.calls.link = TextEdit::new(&reminder.join_url);
+    s.screens.screen = crate::screens::Screen::Calls;
+    s.reminders.quiet.insert(reminder.key, None);
+    true
+}
+
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let reminder = s.reminders.shown.as_ref()?;
-    let join_url = reminder.join_url.clone();
     let mut actions = row().gap(8.0);
     if !s.read_only {
-        actions = actions.child(button::<A>("Join", "reminder-join", move |s, _| {
-            s.calls.link = TextEdit::new(&join_url);
-            s.screens.screen = crate::screens::Screen::Calls;
-            // Joining hides the card here only; the Outlook reminder is left as it is.
-            if let Some(reminder) = s.reminders.shown.take() { s.reminders.quiet.insert(reminder.key, None); }
-        }));
+        actions = actions.child(button::<A>("Join", "reminder-join", |s, _| { join(s); }));
     }
     let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(10.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
         .role("alert").label(reminder.subject.clone())

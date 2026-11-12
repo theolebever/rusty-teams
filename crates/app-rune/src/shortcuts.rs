@@ -6,6 +6,8 @@ use rune::*;
 use crate::ui::{c, text, ts, HOVER, INK, LINE, MUTED, WHITE};
 
 use crate::screens::{navigate, Screen};
+use crate::view_chatlist::Pill;
+use teams_core::ForcedKind;
 use crate::types::Actions;
 use crate::ui::{open_chat, UiState};
 
@@ -76,6 +78,13 @@ enum Action {
     Compose,
     Find,
     JumpNewest,
+    Presence(teams_core::ForcedKind),
+    Saved,
+    /// `None` removes every filter.
+    Filter(Option<Pill>),
+    ReplyToLast,
+    ExpandCompose,
+    JoinReminder,
     Call(crate::calls::Shortcut),
 }
 
@@ -90,7 +99,8 @@ const fn sc(group: Group, label: &'static str, chord: &'static str, action: Acti
     Shortcut { group, label, chord, action }
 }
 
-// `mod` is Ctrl here and Cmd on macOS. Ctrl+4 (Saved) has no Rune screen.
+// `mod` is Ctrl here and Cmd on macOS. Left out: Alt+R (reply to the message under the
+// pointer; Rune tracks no hovered message) and Ctrl+Up (the composer edits on Up already).
 const SHORTCUTS: &[Shortcut] = &[
     sc(Group::General, "Zoom in", "mod+plus", Action::ZoomIn),
     sc(Group::General, "Zoom in", "mod+equal", Action::ZoomIn),
@@ -102,9 +112,15 @@ const SHORTCUTS: &[Shortcut] = &[
     sc(Group::General, "New chat", "mod+n", Action::NewChat),
     sc(Group::General, "Keyboard shortcuts", "mod+.", Action::Shortcuts),
     sc(Group::General, "Settings", "mod+comma", Action::Screen(Screen::Settings)),
+    sc(Group::General, "Set presence status to Available", "alt+shift+q", Action::Presence(ForcedKind::Available)),
+    sc(Group::General, "Set presence status to Busy", "alt+shift+y", Action::Presence(ForcedKind::Busy)),
+    sc(Group::General, "Set presence status to Do Not Disturb", "alt+shift+u", Action::Presence(ForcedKind::DoNotDisturb)),
+    sc(Group::General, "Set presence status to Be Right Back", "alt+shift+k", Action::Presence(ForcedKind::BeRightBack)),
+    sc(Group::General, "Set presence status to Away", "alt+shift+w", Action::Presence(ForcedKind::Away)),
     sc(Group::Navigation, "Open Activity", "mod+1", Action::Screen(Screen::Activity)),
     sc(Group::Navigation, "Show Chats", "mod+2", Action::Screen(Screen::Chat)),
     sc(Group::Navigation, "Show Teams", "mod+3", Action::Screen(Screen::Teams)),
+    sc(Group::Navigation, "Open Saved", "mod+4", Action::Saved),
     sc(Group::Navigation, "Open Calendar", "mod+shift+4", Action::Screen(Screen::Calendar)),
     sc(Group::Navigation, "Show Calls", "mod+5", Action::Screen(Screen::Calls)),
     sc(Group::Navigation, "Open Agents", "mod+6", Action::Screen(Screen::Agents)),
@@ -115,8 +131,16 @@ const SHORTCUTS: &[Shortcut] = &[
     sc(Group::Navigation, "Go to a specific chat or channel", "mod+g", Action::Switcher),
     sc(Group::Navigation, "Go to a specific chat or channel", "ctrl+tab", Action::Switcher),
     sc(Group::Navigation, "Go to compose box", "mod+r", Action::Compose),
+    sc(Group::Navigation, "Filter chat list by unread chats only", "ctrl+alt+u", Action::Filter(Some(Pill::Unread))),
+    sc(Group::Navigation, "Filter chat list by chats only", "ctrl+alt+c", Action::Filter(Some(Pill::Chats))),
+    sc(Group::Navigation, "Filter chat list by meeting chats only", "ctrl+alt+b", Action::Filter(Some(Pill::Meetings))),
+    sc(Group::Navigation, "Filter chat list by muted chats only", "ctrl+alt+q", Action::Filter(Some(Pill::Muted))),
+    sc(Group::Navigation, "Remove all filters in the chat list", "ctrl+alt+z", Action::Filter(None)),
     sc(Group::Messages, "Find in chat", "mod+f", Action::Find),
     sc(Group::Messages, "Jump to newest message", "mod+j", Action::JumpNewest),
+    sc(Group::Messages, "Reply to the last message", "alt+shift+r", Action::ReplyToLast),
+    sc(Group::Messages, "Expand compose box", "mod+shift+x", Action::ExpandCompose),
+    sc(Group::Calls, "Join the meeting from its reminder", "mod+shift+j", Action::JoinReminder),
     sc(Group::Calls, "Mute or unmute", "mod+shift+m", Action::Call(crate::calls::Shortcut::Mute)),
     sc(Group::Calls, "Turn camera on or off", "mod+shift+o", Action::Call(crate::calls::Shortcut::Camera)),
     sc(Group::Calls, "Hang up or leave", "mod+shift+h", Action::Call(crate::calls::Shortcut::Hangup)),
@@ -201,6 +225,36 @@ fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) ->
             crate::find::open(s, tx);
         }
         Action::JumpNewest => tx.scroll_to_bottom("messages"),
+        Action::Presence(kind) => {
+            if s.read_only { return false; }
+            crate::status_menu::set_forced(s, Some(teams_core::ForcedAvailability { kind, expires_at: None }));
+        }
+        Action::Saved => {
+            close_popups(s);
+            navigate(s, Screen::Chat);
+            s.chatlist.quick_view = Some(crate::quick_views::QuickView::Saved);
+            s.chatlist.saved = None;
+            s.actions.load_saved();
+        }
+        Action::Filter(pill) => {
+            navigate(s, Screen::Chat);
+            match pill {
+                Some(pill) => crate::view_chatlist::toggle_filter(s, pill),
+                None => s.chatlist.filters.clear(),
+            }
+        }
+        Action::ReplyToLast => {
+            let channel = crate::ui::active_target(s).is_some_and(|target| target.channel);
+            if channel || s.read_only { return false; }
+            let Some(last) = s.messages.iter().rev().find(|m| !m.system && !m.deleted) else { return false };
+            s.compose.reply = Some(crate::types::ReplyReference { message_id: last.id.clone(), sender: last.sender.clone(), text: last.text.clone() });
+            tx.focus("composer", false);
+        }
+        Action::ExpandCompose => {
+            if s.selected.is_none() || s.read_only { return false; }
+            s.format_open = !s.format_open;
+        }
+        Action::JoinReminder => return crate::reminders::join(s),
         Action::Call(action) => return crate::calls::shortcut(s, action),
     }
     true
@@ -423,6 +477,23 @@ mod tests {
         assert_eq!(rt.state.screens.screen, Screen::Activity);
         press(&mut rt, Key::Command('2'), ctrl());
         assert_eq!(rt.state.screens.screen, Screen::Chat);
+    }
+
+    #[test]
+    fn presence_saved_filter_and_reply_shortcuts() {
+        let mut rt = rt();
+        let alt_shift = Mods { alt: true, shift: true, ..Default::default() };
+        press(&mut rt, Key::Text("y".into()), alt_shift);
+        assert_eq!(rt.state.own.status.forced.map(|forced| forced.kind), Some(ForcedKind::Busy));
+        press(&mut rt, Key::Command('4'), ctrl());
+        assert!(rt.state.chatlist.quick_view == Some(crate::quick_views::QuickView::Saved));
+        let ctrl_alt = Mods { alt: true, ..ctrl() };
+        press(&mut rt, Key::Command('u'), ctrl_alt);
+        assert!(rt.state.chatlist.filters.contains(&Pill::Unread));
+        press(&mut rt, Key::Command('z'), ctrl_alt);
+        assert!(rt.state.chatlist.filters.is_empty());
+        press(&mut rt, Key::Text("r".into()), alt_shift);
+        assert_eq!(rt.state.compose.reply.as_ref().map(|reply| reply.message_id.as_str()), Some("m79"));
     }
 
     #[test]

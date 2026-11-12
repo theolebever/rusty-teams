@@ -152,7 +152,7 @@ fn duration_target(status: &PresenceStatus) -> Option<ForcedKind> {
     status.forced.map(|forced| forced.kind).filter(|kind| *kind != ForcedKind::Available)
 }
 
-fn set_forced<A: Actions>(s: &mut UiState<A>, forced: Option<ForcedAvailability>) {
+pub(crate) fn set_forced<A: Actions>(s: &mut UiState<A>, forced: Option<ForcedAvailability>) {
     let status = &mut s.own.status;
     status.forced = forced;
     if let Some(forced) = forced {
