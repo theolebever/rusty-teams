@@ -299,18 +299,29 @@ pub fn confirm_record_action(app: &Entity<AppState>, action: RecordAction, windo
     });
 }
 
+/// Views of call panels. State only records whether each one is open.
+#[derive(Default)]
+pub struct CallPanels {
+    pub transfer_picker: Option<AnyView>,
+    pub transcript: Option<AnyView>,
+}
+
+impl Global for CallPanels {}
+
 pub fn open_transfer_picker(app: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     let candidates = app.read(cx).transfer_candidates();
     let picker_app = app.clone();
     let picker = cx.new(|cx| TransferPicker::new(picker_app, candidates, PickerMode::Transfer, window, cx));
-    app.update(cx, |state, cx| state.open_transfer_picker(picker.into(), cx));
+    cx.default_global::<CallPanels>().transfer_picker = Some(picker.into());
+    app.update(cx, |state, cx| state.open_transfer_picker(cx));
 }
 
 pub fn open_invite_picker(app: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     let candidates = app.read(cx).invite_candidates();
     let picker_app = app.clone();
     let picker = cx.new(|cx| TransferPicker::new(picker_app, candidates, PickerMode::Invite, window, cx));
-    app.update(cx, |state, cx| state.open_invite_picker(picker.into(), cx));
+    cx.default_global::<CallPanels>().transfer_picker = Some(picker.into());
+    app.update(cx, |state, cx| state.open_invite_picker(cx));
 }
 
 #[derive(Clone)]

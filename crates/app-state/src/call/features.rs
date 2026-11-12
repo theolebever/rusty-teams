@@ -1,7 +1,6 @@
 use calling::{
     CallCommand, CallSpec, Callee, EndKind, EndReason, HoldState,
 };
-use gpui_kit::*;
 
 use super::background::BackgroundPick;
 use super::demo::DemoCall;
@@ -58,12 +57,7 @@ impl AppState {
         self.send_call_command(command);
     }
 
-    pub fn open_call_transcript(&mut self, panel: AnyView, cx: &mut dyn Host) {
-        self.transcript_panel = Some(panel);
-        self.show_call_transcript(cx);
-    }
-
-    pub(super) fn show_call_transcript(&mut self, cx: &mut dyn Host) {
+    pub fn open_call_transcript(&mut self, cx: &mut dyn Host) {
         let Some(call) = self
             .call
             .as_mut()
@@ -86,7 +80,6 @@ impl AppState {
         if let Some(call) = self.call.as_mut() {
             call.transcript_open = false;
         }
-        self.transcript_panel = None;
         cx.emit(AppEvent::Call);
         cx.notify();
     }
@@ -209,15 +202,15 @@ impl AppState {
             && self.held_call.is_none()
     }
 
-    pub fn open_transfer_picker(&mut self, picker: AnyView, cx: &mut dyn Host) {
+    pub fn open_transfer_picker(&mut self, cx: &mut dyn Host) {
         if self.can_transfer_call() {
-            self.transfer_picker = Some(picker);
+            self.transfer_picker_open = true;
             cx.notify();
         }
     }
 
     pub fn close_transfer_picker(&mut self, cx: &mut dyn Host) {
-        if self.transfer_picker.take().is_some() {
+        if std::mem::take(&mut self.transfer_picker_open) {
             cx.notify();
         }
     }

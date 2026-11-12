@@ -21,6 +21,7 @@ use super::call_toolbar::{
     GROUP_GAP, LEAVE_HEIGHT, SPLIT_CHEVRON_WIDTH, TOOL_GAP, tool_face, tool_trigger, split_chevron,
 };
 use super::call_extras::{
+    CallPanels,
     CameraMenu, consent_overlay, consult_banner, hold_panel, recording_chip, return_button,
     room_chip, whiteboard_stage,
 };
@@ -1242,6 +1243,7 @@ fn folded_controls(state: &AppState, call: &ActiveCall, fullscreen: bool) -> Fol
 pub fn render_call_view(
     app: &Entity<AppState>,
     state: &AppState,
+    panels: Option<&CallPanels>,
     chat: Option<AnyView>,
     people_scroll: &ScrollHandle,
     fullscreen: bool,
@@ -1379,7 +1381,12 @@ pub fn render_call_view(
     .children(captions_overlay(model, now))
     .children(captions_hint_chip(model))
     .children(push_to_talk_chip(call))
-    .children(state.transfer_picker.clone())
+    .children(
+        state
+            .transfer_picker_open
+            .then(|| panels.and_then(|panels| panels.transfer_picker.clone()))
+            .flatten(),
+    )
     .children(options_dialog(app, call))
     .children(consent_overlay(app, model));
     let panels: Vec<AnyElement> = chat
@@ -1387,7 +1394,7 @@ pub fn render_call_view(
         .into_iter()
         .chain(
             call.transcript_open
-                .then(|| state.transcript_panel.clone())
+                .then(|| panels.and_then(|panels| panels.transcript.clone()))
                 .flatten()
                 .map(IntoElement::into_any_element),
         )

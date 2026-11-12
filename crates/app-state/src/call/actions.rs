@@ -626,7 +626,6 @@ impl AppState {
             )));
         }
         self.call = None;
-        self.transcript_panel = None;
         if back_to_held {
             self.call = self.held_call.take();
         }
@@ -781,7 +780,6 @@ impl AppState {
         let chat_state = if call.chat_open { "open" } else { "close" };
         if call.chat_open {
             call.transcript_open = false;
-            self.transcript_panel = None;
             call.people_open = false;
         }
         self.note_call_feature("chat", chat_state.to_owned());
@@ -2018,7 +2016,7 @@ mod tests {
             app.update(cx, |state, cx| {
                 state.apply_call_update(7, CallUpdate::MeetingChat("19:meeting_x@thread.v2".into()), cx);
                 state.toggle_call_chat(cx);
-                state.show_call_transcript(cx);
+                state.open_call_transcript(cx);
             })
         });
         let (chat_open, transcript_open) = cx.update(|cx| {
@@ -2030,7 +2028,7 @@ mod tests {
         cx.update(|cx| {
             app.update(cx, |state, cx| {
                 state.apply_call_update(7, CallUpdate::Captions(calling::CaptionState::On), cx);
-                state.show_call_transcript(cx);
+                state.open_call_transcript(cx);
                 state.toggle_call_chat(cx);
             })
         });

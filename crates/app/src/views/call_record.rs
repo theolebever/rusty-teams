@@ -130,7 +130,8 @@ pub fn transcript_and_settings_items(popup: PopupMenu, app: &Entity<AppState>) -
 fn open_transcript(app: &Entity<AppState>, window: &mut Window, cx: &mut App) {
     let panel_app = app.clone();
     let panel = cx.new(|cx| TranscriptPanel::new(panel_app, window, cx));
-    app.update(cx, |state, cx| state.open_call_transcript(panel.into(), cx));
+    cx.default_global::<super::call_extras::CallPanels>().transcript = Some(panel.into());
+    app.update(cx, |state, cx| state.open_call_transcript(cx));
 }
 
 fn choice_chip(

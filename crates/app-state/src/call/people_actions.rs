@@ -21,7 +21,6 @@ impl AppState {
         if call.people_open {
             call.chat_open = false;
             call.transcript_open = false;
-            self.transcript_panel = None;
         }
         cx.emit(AppEvent::Call);
         cx.notify();
@@ -149,13 +148,13 @@ impl AppState {
             .collect()
     }
 
-    pub fn open_invite_picker(&mut self, picker: AnyView, cx: &mut dyn Host) {
+    pub fn open_invite_picker(&mut self, cx: &mut dyn Host) {
         if self
             .call
             .as_ref()
             .is_some_and(|call| call.model.can_invite())
         {
-            self.transfer_picker = Some(picker);
+            self.transfer_picker_open = true;
             cx.notify();
         }
     }

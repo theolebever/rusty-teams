@@ -214,8 +214,8 @@ pub struct AppState {
     pub demo_meetings: Vec<chatsvc::CalendarEvent>,
     pub calendar_week: crate::call::week::CalendarWeek,
     pub call_backgrounds: crate::call::BackgroundLibrary,
-    pub transfer_picker: Option<AnyView>,
-    pub transcript_panel: Option<AnyView>,
+    /// The transfer or invite picker is open; its view lives on the UI side.
+    pub transfer_picker_open: bool,
     pub rings: Rings,
     pub live_meetings: HashMap<String, LiveMeeting>,
     pub live_refreshing: HashSet<String>,
@@ -388,8 +388,7 @@ impl AppState {
             } else {
                 crate::call::BackgroundLibrary::new(crate::call::default_cache_directory())
             },
-            transfer_picker: None,
-            transcript_panel: None,
+            transfer_picker_open: false,
             rings: Rings::default(),
             live_meetings: HashMap::new(),
             live_refreshing: HashSet::new(),

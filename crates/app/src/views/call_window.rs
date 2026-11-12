@@ -168,7 +168,7 @@ impl Render for CallWindowView {
         }
         let fullscreen = state.call_fullscreen();
         let open_dialogs = [
-            state.transfer_picker.is_some(),
+            state.transfer_picker_open,
             state.call.as_ref().is_some_and(|call| call.options_dialog.is_some()),
             state.call.as_ref().is_some_and(|call| call.model.consent_required),
         ]
@@ -180,7 +180,7 @@ impl Render for CallWindowView {
         let window_width = f32::from(window.viewport_size().width);
         let stage_width = window_width - 2. * ISLAND_GAP;
         let chat_panel = self.call_chat.as_ref().map(|(_, view)| view.clone().into());
-        let stage = render_call_view(&self.app, state, chat_panel, &self.people_scroll.1, fullscreen, stage_width)
+        let stage = render_call_view(&self.app, state, cx.try_global(), chat_panel, &self.people_scroll.1, fullscreen, stage_width)
             .or_else(|| render_call_end(&self.app, state));
         let stage_overlay = render_stage_overlay(&self.app, state);
         elevation::set_app_modal_layers(window, open_dialogs, cx);

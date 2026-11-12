@@ -947,7 +947,8 @@ mod frames {
                                 call.transcript_open = true;
                                 state.call = Some(call);
                                 let app_entity = cx.entity();
-                                state.transcript_panel = Some(cx.new(|cx| TranscriptPanel::new(app_entity, window, cx)).into());
+                                let panel = cx.new(|cx| TranscriptPanel::new(app_entity, window, cx));
+                                cx.default_global::<crate::views::call_extras::CallPanels>().transcript = Some(panel.into());
                                 cx.notify();
                             })
                         });
