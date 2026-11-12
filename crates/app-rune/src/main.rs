@@ -176,11 +176,16 @@ fn main() {
             scenes: &[
                 ("calendar", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Calendar),
                 ("activity", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Activity),
+                ("call-active", demo_call),
+                ("call-sharing", |s: &mut UiState<DemoActions>| {
+                    demo_call(s);
+                    s.calls.apply_video(vec![(calling::VideoKey::Screen, std::sync::Arc::new(calling::VideoPicture::solid(1280, 720, 75, 55, 45)))]);
+                }),
                 ("calls", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Calls),
                 ("settings", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Settings),
             ],
             on_key: Some(shortcuts::on_key::<DemoActions>),
-            ..AppSpec::new(TITLE, SIZE, demo_init, ui::view::<DemoActions>)
+            ..AppSpec::new(TITLE, SIZE, demo_init, demo_view)
         })
         .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
         .on_window(window_icon::install)
@@ -324,4 +329,21 @@ fn demo_init() -> UiState<DemoActions> {
         rows,
     });
     s
+}
+
+fn demo_view(s: &UiState<DemoActions>, cx: &mut Cx<UiState<DemoActions>>) -> El {
+    if s.calls.state.as_ref().is_some_and(calling::CallState::is_active) {
+        col().w_full().h_full()
+            .child(el().w_full().h(view_chrome::TITLE_BAR_HEIGHT).fill(avatar::rgb(0x292929)))
+            .child(call_window::view(s, cx).grow(1.0).min_h(0.0))
+    } else {
+        ui::view(s, cx)
+    }
+}
+
+fn demo_call(s: &mut UiState<DemoActions>) {
+    s.calls.apply(calling::CallUpdate::State(calling::CallState::Connected { since: std::time::Instant::now() }));
+    s.calls.apply(calling::CallUpdate::Roster([("ada", "Ada Example"), ("linus", "Linus Example"), ("grace", "Grace Example")]
+        .into_iter().map(|(mri, name)| calling::RosterEntry { mri: mri.into(), display_name: name.into(), muted: true, ..Default::default() }).collect()));
+    s.calls.apply(calling::CallUpdate::Camera(true));
 }

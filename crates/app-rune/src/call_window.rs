@@ -151,6 +151,83 @@ mod tests {
     }
 
     #[test]
+    fn gallery_and_toolbar_fit_the_window_with_cameras_off() {
+        for size in [(1180.0, 760.0), (560.0, 420.0)] {
+            let mut state = UiState::new(Fake::default());
+            state.calls.apply(CallUpdate::State(CallState::Connecting));
+            state
+                .calls
+                .apply(CallUpdate::Roster(vec![calling::RosterEntry {
+                    mri: "ada".into(),
+                    display_name: "Ada Example".into(),
+                    muted: true,
+                    ..Default::default()
+                }]));
+            let mut rt = Runtime::new(
+                state,
+                view::<Fake>,
+                size,
+                Env {
+                    system_dark: false,
+                    scale: 1.0,
+                },
+            );
+            rt.frame(1.0);
+            let ([_, y, width, height], _) = rt
+                .presented("call-person-ada")
+                .expect("camera-off participant tile");
+            assert!(
+                width > 200.0 && height > 180.0,
+                "tile at {size:?}: {width}x{height}"
+            );
+            assert!(y >= 72.0);
+            for key in ["call-mute", "call-camera", "call-leave", "call-people"] {
+                let ([x, y, w, h], _) = rt.presented(key).unwrap();
+                assert!(
+                    x >= 0.0 && x + w <= size.0 && y + h <= 72.0,
+                    "{key} at {size:?}: {x},{y},{w},{h}"
+                );
+            }
+            let (x, y) = rt.find("call-people").unwrap();
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(2.0);
+            assert!(rt.find("call-panel").is_some());
+        }
+    }
+
+    #[test]
+    fn screen_share_keeps_its_stage_when_the_participant_panel_opens() {
+        let mut state = UiState::new(Fake::default());
+        state.calls.apply(CallUpdate::State(CallState::Connecting));
+        state.calls.apply(CallUpdate::Camera(true));
+        state.calls.apply_video(vec![(
+            calling::VideoKey::Screen,
+            std::sync::Arc::new(calling::VideoPicture::solid(1280, 720, 0, 0, 0)),
+        )]);
+        let mut rt = Runtime::new(
+            state,
+            view::<Fake>,
+            (1180.0, 760.0),
+            Env {
+                system_dark: false,
+                scale: 1.0,
+            },
+        );
+        rt.frame(1.0);
+        let ([_, _, width, height], _) = rt.presented("call-presentation").unwrap();
+        assert!(width > 800.0 && height > 400.0);
+        let ([x, y, w, h], _) = rt.presented("call-self").unwrap();
+        assert!(w >= 180.0 && h >= 120.0 && x + w <= 1180.0 && y + h <= 760.0);
+        let (x, y) = rt.find("call-people").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(2.0);
+        assert!(rt.find("call-presentation").is_some());
+        assert!(rt.find("call-panel").is_some());
+    }
+
+    #[test]
     fn accepting_an_incoming_call_keeps_its_window_open() {
         let mut call = CallView::default();
         call.apply_ring(calling::EngineEvent::Incoming(calling::IncomingRing {

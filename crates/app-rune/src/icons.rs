@@ -9,6 +9,10 @@ use std::sync::OnceLock;
 use rune::*;
 
 const SOURCES: &[(&str, &str)] = &[
+    ("mic", include_str!("../../app/assets/symbols/mic.svg")),
+    ("mic_off", include_str!("../../app/assets/symbols/mic_off.svg")),
+    ("share", include_str!("../../app/assets/symbols/share.svg")),
+    ("back_hand", include_str!("../../app/assets/symbols/back_hand.svg")),
     ("add", include_str!("../assets/fluent/add.svg")),
     ("alternate_email", include_str!("../assets/fluent/alternate_email.svg")),
     ("attach_file", include_str!("../assets/fluent/attach_file.svg")),
