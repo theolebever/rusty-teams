@@ -29,6 +29,7 @@ mod message_menu;
 mod find;
 mod shortcuts;
 mod switcher;
+mod taskbar;
 mod chat_menu;
 mod members;
 mod new_chat;
@@ -37,6 +38,7 @@ mod notifications;
 mod profile;
 mod quick_views;
 mod reactions;
+mod reminders;
 mod screens;
 mod search;
 mod settings;
@@ -134,7 +136,10 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let opened = notifications::open_pending(s, tx);
     if opened { rune_notify::bring_to_front(); }
     let call_changed = calls::poll(s, _now, tx);
-    changed || noticed || ticked || opened || call_changed
+    let reminded = reminders::poll(s, chrono::Utc::now());
+    notifications::ring(s);
+    taskbar::set_badge(notifications::badge_count(s));
+    changed || noticed || ticked || opened || call_changed || reminded
 }
 
 fn main() {
@@ -211,7 +216,10 @@ fn main() {
         ..AppSpec::new(TITLE, SIZE, init, ui::view::<Bridge>)
     })
     .titlebar(Titlebar::new(view_chrome::TITLE_BAR_HEIGHT))
-    .on_window(window_icon::install)
+    .on_window(|window| {
+        window_icon::install(window);
+        taskbar::remember(window);
+    })
     .on_focus(|state, focused, _| {
         state.window_focused = focused;
         if !focused { view_composer::stop_typing(state); }

@@ -27,8 +27,21 @@ async fn load(file_name: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Stops the sound it started when dropped (a ringtone loops until then).
+pub struct Handle(Arc<AtomicBool>);
+
+impl Drop for Handle {
+    fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+}
+
 pub fn play(file_name: &'static str) {
     spawn(file_name, false, Arc::default());
+}
+
+pub fn start(file_name: &'static str, looped: bool) -> Handle {
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn(file_name, looped, stop.clone());
+    Handle(stop)
 }
 
 fn spawn(file_name: &'static str, looped: bool, flag: Arc<AtomicBool>) {

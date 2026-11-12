@@ -262,6 +262,8 @@ pub trait Actions {
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     /// Saves one settings edit where GPUI keeps it; a failure republishes `Update::Preferences`.
     fn save_setting(&self, _change: crate::settings::Change) {}
+    /// Snoozes the Outlook reminder of a meeting until a time, or dismisses it (`None`).
+    fn write_reminder(&self, _event_id: &str, _snooze_until: Option<chrono::DateTime<chrono::Utc>>) {}
     /// Lists audio devices and cameras, answered with `Update::Call(Devices | Cameras)`.
     fn load_devices(&self) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}

@@ -579,6 +579,7 @@ pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
                 })));
         layers.push(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).center().fill(Color::BLACK.alpha(0.2)).child(dialog));
     }
+    layers.extend(crate::reminders::view(s));
     layers
 }
 

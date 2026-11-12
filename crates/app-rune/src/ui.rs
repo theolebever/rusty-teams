@@ -76,6 +76,9 @@ pub struct UiState<A: Actions> {
     pub(crate) compose: crate::view_composer::Compose,
     pub agent: crate::agent_panel::State,
     pub settings: crate::settings::State,
+    pub reminders: crate::reminders::State,
+    /// The incoming call ringtone, stopped when dropped (`notifications::ring`).
+    pub(crate) ringtone: Option<crate::sound::Handle>,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
     pub nav: crate::shortcuts::NavState,
     pub global_search: crate::search::SearchState,
@@ -101,6 +104,8 @@ impl<A: Actions> UiState<A> {
             actions,
             agent: Default::default(),
             settings: Default::default(),
+            reminders: Default::default(),
+            ringtone: None,
             nav: Default::default(),
             details: HashMap::new(),
             typing: HashMap::new(),

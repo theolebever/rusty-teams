@@ -777,6 +777,18 @@ impl Actions for Bridge {
         app_backend::appearance::save(&self.shared.store, &settings);
     }
     fn save_setting(&self, change: crate::settings::Change) { crate::settings_backend::save(&self.shared, change); }
+    fn write_reminder(&self, event_id: &str, snooze_until: Option<DateTime<Utc>>) {
+        if self.shared.read_only { return; }
+        let Some(launcher) = self.shared.launcher() else { return };
+        let event_id = event_id.to_owned();
+        app_backend::runtime::handle().spawn(async move {
+            let written = match snooze_until {
+                Some(until) => launcher.snooze_reminder(&event_id, until).await,
+                None => launcher.dismiss_reminder(&event_id).await,
+            };
+            if let Err(error) = written { app_backend::diagnostics::record(format!("Rune: Outlook reminder not saved: {error}")); }
+        });
+    }
     fn load_devices(&self) { crate::settings_backend::list_devices(self.shared.clone()); }
     fn accept_call(&self, ring_id: u64, video: bool) { self.shared.call_control.accept(ring_id, video); }
     fn decline_call(&self, ring_id: u64) { self.shared.call_control.decline(ring_id); }

@@ -46,14 +46,36 @@ fn system_quiet() -> bool {
 #[cfg(not(windows))]
 fn system_quiet() -> bool { false }
 
+/// What the taskbar button counts: unread chats and the Activity bell, as GPUI's badge.
+pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize {
+    let activity = &s.screens.activity;
+    s.chats.iter().filter(|chat| chat.unread).count() + activity.items.iter().filter(|item| activity.counts_for_bell(item)).count()
+}
+
+/// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts.
+pub fn ring<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>) {
+    let ringing = s.calls.ring.is_some();
+    if ringing == s.ringtone.is_some() { return; }
+    s.ringtone = None;
+    if !ringing { return; }
+    let settings = &s.settings.prefs.notify;
+    let in_call = s.calls.state.as_ref().is_some_and(calling::CallState::is_active);
+    let busy = matches!(s.own.status.availability.as_str(), "Busy" | "DoNotDisturb");
+    if let Some(tone) = rules::ringtone_for(settings, in_call, busy).filter(|_| !settings.do_not_disturb) {
+        s.ringtone = Some(crate::sound::start(tone.file_name(), true));
+    }
+    if !rune_notify::app_focused() { crate::taskbar::flash(); }
+}
+
 pub struct Notifications {
     tracker: IncomingTracker,
     late: LateArrivals,
+    throttle: rules::SoundThrottle,
 }
 
 impl Notifications {
     pub fn new() -> Self {
-        Self { tracker: IncomingTracker::new(Utc::now()), late: LateArrivals::default() }
+        Self { tracker: IncomingTracker::new(Utc::now()), late: LateArrivals::default(), throttle: rules::SoundThrottle::default() }
     }
 
     pub fn mark_late(&mut self, conversation_id: &str, message_ids: Vec<String>) {
@@ -68,7 +90,13 @@ impl Notifications {
         settings.account = teams_core::stored_chat_settings(store).settings().notifications;
         for mut incoming in self.tracker.collect(store, &sidebar, me.as_deref(), &self.late, conversation_id) {
             incoming.chat.desktop = engine.chat_desktop_notifications(conversation_id);
-            if !rules::decide(&settings, &incoming, environment).toast { continue; }
+            let decision = rules::decide(&settings, &incoming, environment);
+            if !decision.toast { continue; }
+            if decision.sound && self.throttle.allow(conversation_id, std::time::Instant::now()) {
+                let sounds = &settings.sounds;
+                crate::sound::play(if decision.urgent_sound { sounds.urgent_sound_type } else { sounds.notification_sound_type }.file_name());
+            }
+            if rules::should_flash(&settings, true, rune_notify::app_focused()) { crate::taskbar::flash(); }
             let body = if !rules::shows_preview(&settings) {
                 String::new()
             } else {

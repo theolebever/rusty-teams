@@ -418,6 +418,7 @@ dependencies = [
  "directories",
  "graph",
  "log",
+ "resvg 0.46.0",
  "serde_json",
  "session",
  "store",

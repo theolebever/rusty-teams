@@ -1,3 +1,4 @@
+pub mod badge;
 pub mod incoming;
 pub mod rules;
 pub mod settings;
