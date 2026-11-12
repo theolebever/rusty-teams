@@ -11,7 +11,8 @@ use teams_core::SavedMessage;
 use super::avatar::person_avatar;
 use super::scroll_edge::with_top_edge;
 use super::widgets::icon;
-use crate::activity::{ActivityCenter, Entry, Kind};
+use crate::activity::{Entry, Kind};
+use crate::activity_center::ActivityCenter;
 use store::Sidebar;
 
 use crate::app_state::{AppState, QuickView, selection_for, selection_title};

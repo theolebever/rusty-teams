@@ -15,7 +15,8 @@ use super::avatar::person_avatar;
 use super::scroll_edge::{scroll_offset, with_top_edge};
 use super::sidebar::SIDEBAR_SCROLL_DIVIDER;
 use super::widgets::{Corner, corner_badge, dot, icon, symbol};
-use crate::activity::{ActivityCenter, Entry, Filter, Kind};
+use crate::activity::{Entry, Filter, Kind};
+use crate::activity_center::ActivityCenter;
 use crate::agent_api::{
     self,
     pending::{PendingKind, PendingProposal, conversation_label as proposal_conversation_label},
@@ -938,7 +939,8 @@ mod tests {
         ActivityPanel, ROW_HEIGHT, VIEWPORT_MARGIN, VisibleSlots, detail, headline, location_line,
         visible_slots,
     };
-    use crate::activity::{ActivityCenter, Actor, Entry, Filter, Kind};
+    use crate::activity::{Actor, Entry, Filter, Kind};
+    use crate::activity_center::ActivityCenter;
     use crate::app_state::{AppState, Mode};
 
     fn entry(kind: Kind, count: u32) -> Entry {

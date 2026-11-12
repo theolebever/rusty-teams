@@ -28,7 +28,7 @@ use super::text::describe;
 use super::toast::{PillView, ToastView};
 use super::urgent_repeat::UrgentRepeats;
 use crate::active_appearance::{self, ActiveAppearance};
-use crate::activity::ActivityCenter;
+use crate::activity_center::ActivityCenter;
 use crate::agent_api::{self, pending::PendingProposal};
 use crate::agents::{AgentRun, AgentRunsEvent, RunState};
 use crate::app_state::{AppEvent, AppState, selection_for};

@@ -6,7 +6,7 @@ use gpui_kit::*;
 use super::shortcuts::keys_for_label;
 use super::sidebar::{SidebarTab, SidebarView};
 use super::widgets::{RAIL_BADGE, badge_pill, filled_icon, icon};
-use crate::activity::ActivityCenter;
+use crate::activity_center::ActivityCenter;
 use crate::agents::{AgentRuns, runs_handle};
 use crate::app_state::AppState;
 use crate::sidebar_model::{any_unread_channel, unread_chat_count};

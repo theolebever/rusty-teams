@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod activity_center;
 mod active_appearance;
 pub mod agents;
 pub mod call;

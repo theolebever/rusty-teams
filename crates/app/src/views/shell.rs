@@ -41,7 +41,7 @@ use super::status_menu::{own_status_button, settings_more_button};
 use super::status_message_dialog::{StatusMessageDialog, StatusMessageDialogEvent};
 use super::switcher::{Switcher, SwitcherEvent, candidates_from};
 use super::title_bar::{mode_label, render_title_bar, update_button};
-use crate::activity::ActivityCenter;
+use crate::activity_center::ActivityCenter;
 use crate::agents::{AgentRunsEvent, StartDialog, StartDialogEvent, StartRequest};
 use crate::app_state::{AppEvent, AppState, QuickView, Selection, selection_for};
 use crate::call::{CallWindows, ZoomStep};

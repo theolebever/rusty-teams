@@ -4,7 +4,7 @@ pub mod server;
 pub mod service;
 
 pub use feed::{Actor, Entry, Filter, Kind};
-pub use service::ActivityCenter;
+pub use service::ActivityModel;
 
 use crate::notify::Preview;
 
