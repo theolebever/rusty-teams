@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use calling::ShareKind;
-use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -57,14 +56,14 @@ fn hwnd(handle: NativeHandle) -> HWND {
     HWND(handle as *mut c_void)
 }
 
-pub fn native_handle(window: &Window) -> Option<NativeHandle> {
+pub fn native_handle(window: &impl HasWindowHandle) -> Option<NativeHandle> {
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => None,
     }
 }
 
-pub fn window_transparency_available(_window: &Window) -> bool {
+pub fn window_transparency_available(_window: &impl HasWindowHandle) -> bool {
     // GPUI then renders into an opaque hwnd swap chain without alpha.
     !std::env::var("GPUI_DISABLE_DIRECT_COMPOSITION")
         .is_ok_and(|value| value == "true" || value == "1")
@@ -280,7 +279,7 @@ pub fn include_in_capture(handle: NativeHandle) {
     }
 }
 
-pub fn make_window_click_through(window: &Window) {
+pub fn make_window_click_through(window: &impl HasWindowHandle) {
     if let Some(handle) = native_handle(window) {
         make_click_through(handle);
     }
@@ -536,7 +535,7 @@ unsafe fn icon_from_bgra(pixels: &[u8], size: u32) -> Option<HICON> {
     }
 }
 
-pub fn set_window_icon(window: &Window, png: &[u8]) {
+pub fn set_window_icon(window: &impl HasWindowHandle, png: &[u8]) {
     let Some(handle) = native_handle(window) else {
         return;
     };

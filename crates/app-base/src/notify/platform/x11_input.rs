@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
@@ -10,7 +9,7 @@ use x11rb::wrapper::ConnectionExt as _;
 
 const WINDOW_ICON_SIZES: [u32; 3] = [32, 64, 128];
 
-fn x11_window_id(window: &Window) -> Option<u32> {
+fn x11_window_id(window: &impl HasWindowHandle) -> Option<u32> {
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
         RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
@@ -26,7 +25,7 @@ pub fn empty_input_region(display: Option<&str>, window: u32) -> Result<(), Box<
     Ok(())
 }
 
-pub fn make_input_transparent(window: &Window) {
+pub fn make_input_transparent(window: &impl HasWindowHandle) {
     if let Some(id) = x11_window_id(window) {
         let _ = empty_input_region(None, id);
     }
@@ -40,7 +39,7 @@ pub fn compositor_running(display: Option<&str>) -> Result<bool, Box<dyn std::er
     Ok(owner != x11rb::NONE)
 }
 
-pub fn window_transparency_available(window: &Window) -> bool {
+pub fn window_transparency_available(window: &impl HasWindowHandle) -> bool {
     static COMPOSITED: OnceLock<bool> = OnceLock::new();
     match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
         Ok(RawWindowHandle::Xcb(_) | RawWindowHandle::Xlib(_)) => {
@@ -80,7 +79,7 @@ pub fn write_window_icon(
     Ok(())
 }
 
-pub fn set_window_icon(window: &Window, png: &[u8]) {
+pub fn set_window_icon(window: &impl HasWindowHandle, png: &[u8]) {
     if let (Some(id), Some(property)) = (x11_window_id(window), window_icon_property(png)) {
         let _ = write_window_icon(None, id, &property);
     }

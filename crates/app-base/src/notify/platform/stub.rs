@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use gpui_kit::Window;
+use raw_window_handle::HasWindowHandle;
 
 use calling::ShareKind;
 
 use super::{NativeHandle, ScreenRect, ShareGeometry, TrayCommand, WorkArea};
 use crate::notify::badge::Badge;
 
-pub fn native_handle(_window: &Window) -> Option<NativeHandle> {
+pub fn native_handle(_window: &impl HasWindowHandle) -> Option<NativeHandle> {
     None
 }
 
@@ -37,30 +37,30 @@ pub fn exclude_from_capture(_handle: NativeHandle) {}
 pub fn include_in_capture(_handle: NativeHandle) {}
 
 #[cfg(target_os = "linux")]
-pub fn make_window_click_through(window: &Window) {
+pub fn make_window_click_through(window: &impl HasWindowHandle) {
     super::x11_input::make_input_transparent(window);
 }
 
 #[cfg(target_os = "linux")]
-pub fn window_transparency_available(window: &Window) -> bool {
+pub fn window_transparency_available(window: &impl HasWindowHandle) -> bool {
     super::x11_input::window_transparency_available(window)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn window_transparency_available(_window: &Window) -> bool {
+pub fn window_transparency_available(_window: &impl HasWindowHandle) -> bool {
     true
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn make_window_click_through(_window: &Window) {}
+pub fn make_window_click_through(_window: &impl HasWindowHandle) {}
 
 #[cfg(target_os = "linux")]
-pub fn set_window_icon(window: &Window, png: &[u8]) {
+pub fn set_window_icon(window: &impl HasWindowHandle, png: &[u8]) {
     super::x11_input::set_window_icon(window, png);
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn set_window_icon(_window: &Window, _png: &[u8]) {}
+pub fn set_window_icon(_window: &impl HasWindowHandle, _png: &[u8]) {}
 
 pub fn window_minimized(_handle: NativeHandle) -> bool {
     false
