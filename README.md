@@ -1,183 +1,172 @@
 <div align="center">
 
-<img src="crates/app/assets/icon/teams-fast-256.png" alt="Rusty Teams logo" width="112">
+<img src="crates/app/assets/icon/teams-fast-256.png" alt="Logo Rusty Teams" width="112">
 
-# Rusty Teams
+# Rusty Teams · fork Rune
 
-**A fast, native Microsoft Teams chat client. Written in Rust, rendered on the GPU. No admin approval needed.**
+Client Microsoft Teams natif en Rust. Ce fork développe Rune comme interface principale et conserve le client GPUI du projet original.
 
 [![Rust](https://img.shields.io/badge/Rust-2024-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![GPUI](https://img.shields.io/badge/UI-GPUI-c4642d)](https://www.gpui.rs/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-3b3b3b)](#status)
-[![License: MIT](https://img.shields.io/badge/license-MIT-2ea043)](LICENSE)
+[![Tests](https://github.com/theolebever/rusty-teams/actions/workflows/test.yml/badge.svg)](https://github.com/theolebever/rusty-teams/actions/workflows/test.yml)
+[![Build](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml/badge.svg)](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml)
+[![Licence MIT](https://img.shields.io/badge/licence-MIT-2ea043)](LICENSE)
 
-[Features](#features) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](ROADMAP.md)
-
-<img src=".github/app-demo.png" alt="Rusty Teams with demo data" width="900">
+[État du fork](#état-du-fork) · [Démarrer](#démarrer) · [Architecture](#architecture) · [Projet original](https://github.com/danieldaeschle/rusty-teams)
 
 </div>
 
-> [!NOTE]
-> Unofficial. Not affiliated with or endorsed by Microsoft. It uses the same web APIs as the Teams web app, which can change at any time.
+Projet non officiel, sans affiliation avec Microsoft. La connexion utilise Teams sur le web, sans enregistrement d’application ni consentement administrateur supplémentaire. Les API utilisées restent soumises aux autorisations du compte et aux politiques du tenant.
 
-## Why
+## État du fork
 
-| | Rusty Teams |
+Ce dépôt est le fork [theolebever/rusty-teams](https://github.com/theolebever/rusty-teams) du projet de [Daniel Daeschle](https://github.com/danieldaeschle/rusty-teams). Le client original fournit la base : synchronisation Teams, stockage local, appels natifs et interface GPUI.
+
+La direction de ce fork est de porter l’interface sur [Rune](https://github.com/anomalyco/rune), en partageant le backend avec GPUI. Rune est l’interface principale du développement du fork ; son portage reste en cours et la parité fonctionnelle avec GPUI est incomplète.
+
+| Interface | Code et exécutable | Situation actuelle |
+|---|---|---|
+| Rune | `crates/app-rune`, `rusty-teams-rune` | Interface principale du fork, à compiler depuis les sources. Connectée au backend Teams réel, avec un mode démo indépendant du compte. |
+| GPUI | `crates/app`, `teams` | Interface historique conservée et enrichie par les intégrations du projet original. Les workflows de distribution construisent encore cette interface. |
+
+Dernière intégration amont documentée : [`53a311d`](https://github.com/danieldaeschle/rusty-teams/commit/53a311dd86ad10c6cb8c1b9e3194549a8d55a58f), fusionnée dans `main` par [`ac43e65`](https://github.com/theolebever/rusty-teams/commit/ac43e65df66d251db6758857e9bfb5c70d5141ed) le 12 novembre 2026. Les commits amont suivants doivent être examinés lors des prochaines intégrations. [Comparer les branches actuelles](https://github.com/danieldaeschle/rusty-teams/compare/main...theolebever:rusty-teams:main).
+
+### Différences avec le projet original
+
+- Une interface Rune pour les conversations, les canaux, le calendrier et les appels.
+- Un crate `app-backend` commun aux deux interfaces, sans dépendance à GPUI, qui regroupe la connexion, le lancement des appels, les notifications et les préférences partagées.
+- Des adaptations de connexion : option `--no-sso` pour choisir un autre compte Windows et User-Agent mobile appliqué à la page Teams avant sa première navigation.
+- Des optimisations du chargement des conversations, des avatars et des réactions. Rune précharge les conversations récentes sans cache et réduit les aperçus d’images hors du thread d’interface.
+- Une distribution Windows GPUI avec exécutable portable et installateur par utilisateur. Ces builds démarrent avec le comportement `--no-sso`.
+
+Les transports HTTP et Trouter natifs, la mise en veille des WebViews et de nombreux correctifs d’appels sont désormais partagés avec l’amont. Leur présence dans ce dépôt ne signifie pas qu’ils sont propres au fork.
+
+### Ce qui est présent dans Rune
+
+Le portage comprend les fonctions suivantes ; leur présence dans le code ne garantit pas encore tous les comportements du client GPUI :
+
+- Liste des conversations, équipes et canaux, historique paginé, fils de discussion, recherche locale et navigation rapide.
+- Composition de messages avec mise en forme, mentions, réactions, GIFs et pièces jointes. Le sélecteur OneDrive propose les fichiers récents, les dossiers et les fichiers partagés.
+- Menus contextuels, indicateurs de saisie, messages animés, images, fichiers et lecture des messages vocaux.
+- Calendrier, agenda, présence, profils et notifications natives.
+- Appels audio et vidéo sur le moteur WebRTC commun, appels entrants, partage d’écran et commandes d’appel.
+- Thèmes partagés, suivi du thème système et panneau d’exécution d’agents CLI.
+
+GPUI conserve une interface de réglages plus complète et l’intégration du serveur MCP avec ses permissions et ses propositions à valider. Les réglages Rune couvrent actuellement l’apparence ; le panneau d’agents CLI de Rune ne remplace pas cette intégration MCP.
+
+Windows est la plateforme de travail principale du fork. Les parcours Rune sous Linux et macOS restent à valider. Le client GPUI conserve les chemins de connexion et les scripts de compilation multiplateformes du projet original.
+
+## Démarrer
+
+Les commandes suivantes se lancent à la racine du dépôt avec un outil Rust récent compatible avec l’édition 2024.
+
+```bash
+git clone https://github.com/theolebever/rusty-teams.git
+cd rusty-teams
+```
+
+### Rune, interface principale
+
+Pour essayer l’interface avec des données de démonstration, sans compte :
+
+```bash
+cargo run -p app-rune -- --demo
+```
+
+Pour se connecter à Teams sous Windows en choisissant le compte :
+
+```bash
+cargo run -p app-rune -- --no-sso
+```
+
+Sans `--no-sso`, WebView2 peut utiliser le compte Windows. La connexion interactive demande le runtime WebView2.
+
+| Usage | Commande |
 |---|---|
-| 🏢 Works in company tenants | No app registration, no admin consent: it runs on the Teams web app your account is already allowed to use |
-| ⚡ Starts instantly | Renders from a local SQLite cache before the network answers |
-| 🔒 No tokens stored | Signs in through a real Teams web page; tokens are never written to disk |
-| 📡 Live, no polling | Realtime socket pushes every change |
-| 🔎 Offline search | Full-text index over your chats, `Ctrl+K` switcher |
+| Compiler Rune | `cargo build -p app-rune --release` |
+| Consulter les options | `cargo run -p app-rune -- --help` |
+| Désactiver les actions sur le compte depuis l’interface | `cargo run -p app-rune -- --read-only` |
+| Utiliser un cache et un profil WebView2 séparés | `cargo run -p app-rune -- --database ./data-rune/cache.sqlite3 --no-sso` |
+| Se connecter à un navigateur existant via CDP | `cargo run -p app-rune -- --endpoint http://127.0.0.1:9222` |
 
-## Features
+Le profil WebView2 se trouve à côté de la base choisie avec `--database`. Pour le mode CDP, le navigateur doit être démarré avec `--remote-debugging-port=9222` et connecté à Teams ; certains tenants nécessitent aussi un onglet Outlook pour les autorisations de messagerie.
 
-**Chats and channels**
-- Teams pin order, chat folders, hidden teams, Muted and Meeting chats sections
-- Channel posts like Teams: one card per post, newest activity on top, last 3 replies, inline reply, new post with a subject, full conversation view
-- Channel tabs and the Shared tab (library and files from posts), per-channel notifications
-- Chat menu: pin, move to folder, mark as unread, mute, hide, leave
-- Read receipts, typing indicator with faces, presence, unread jump
-- Own status, status message and work location from the avatar menu; profile cards with org chart
-- Activity bell: new messages, @mentions and reactions, kept for 14 days
-
-**Messages**
-- Send, edit, delete, react, quote-reply, @mentions
-- Forward, copy link, save (Saved panel), pin to the chat banner, mark unread from here
-- Inline images, file cards, link previews
-- Adaptive Cards like Teams: tables, code blocks, badges, charts, date and time pickers, live refresh, task dialogs
-- GIFs and stickers in messages
-- Select and copy message text
-
-**Composer**
-- Rich text: format bar on selection, `Ctrl+B` / `Ctrl+I` / `Ctrl+U`, lists, quotes, code
-- Markdown converts as you type or paste
-- Picker with Emoji, GIF and Sticker tabs
-- `:thumbsup:` and `:)` convert as you type, German aliases included
-- Schedule send: right-click send or `Ctrl+Shift+Enter`
-- Drafts and unsent messages survive a restart
-- Keyboard like Teams: `Ctrl+1`..`4` panels and tabs, `Alt+Up` / `Alt+Down` next chat, call keys on `Ctrl+Shift+A/D/H/O/E/M/J`, `Ctrl+.` lists them all
-
-**Calls**
-- Test call to the Teams Echo bot from the avatar menu: native WebRTC audio, mute (`Ctrl+Shift+M`), device switching, mini window while you read other chats
-- Phone button in 1:1 and group chat headers: callee tiles show Calling and Ringing, Cancel while ringing, notices like "Bea declined" or "No answer"
-- Video and screen sharing: H264 tiles, shared screen on a stage (double click for full window, Esc back), camera and screen share buttons with a "You are sharing" banner. Linux needs glib at run time
-- Incoming calls: topmost ring toast with Decline and Accept, ring tone, missed calls in Activity
-- Join a running meeting from its chat (audio): roster tiles, speaking ring, lobby state, Leave or End meeting for the organizer
-- After every call a pseudonymized test report (JSON and Markdown, newest 30) is saved to the app data folder `call-reports`; toast "Test report saved" with Open folder, Settings > Devices switch
-- Organizer controls: lobby banner with Admit and Deny, tile menu (pin, spotlight, mute, remove), Mute all, live captions overlay, camera background blur
-
-**Agents (MCP)**
-- Local MCP server at `http://127.0.0.1:40615/mcp`, off by default: Settings > MCP
-- Agents read allowed chats, channels, meetings and transcripts (images, reactions, files and cards included, newest messages across chats), and propose replies with @mentions and images, or an emoji reaction
-- A reply shows as a card above the composer: Send, Edit or Discard. A reaction shows as a note under the message: Accept or Discard. Agents never send
-- One-click install for Claude Code, Codex CLI, Copilot CLI, VS Code and Cursor, Windows and WSL. WSL needs `networkingMode=mirrored`
-- Delegate a message to a coding-agent CLI (Claude Code, Copilot, any CLI) from the hover toolbar: progress chip, Agents page, toast when it finishes, Open session
-
-**App**
-- Dark theme, opens instantly from the cache
-- Self-update from an update folder
-- Single instance: a second start brings the window to the front
-
-## Status
-
-| Platform | State |
-|---|---|
-| 🪟 Windows | Main target. Login through an embedded WebView2 |
-| 🐧 Linux | Connects to a Chrome started with `--remote-debugging-port=9222` and signed in to Teams on the web. The app opens an Outlook on the web tab next to it when missing (some tenants grant chat scopes only to Outlook). Built-in login is planned |
-| 🍎 macOS | Experimental. Universal arm64 + x86_64 binary, connects to a Chrome like Linux |
-
-The remaining gaps are planned, see [ROADMAP.md](ROADMAP.md).
-
-## Quick start
-
-Try it with demo data, no account needed:
+### GPUI, interface historique
 
 ```bash
 cargo run -p app -- --demo
 ```
 
-| Task | Command |
-|---|---|
-| Linux build needs clang 21+ (libwebrtc's hermetic libc++) + mold (set in `.cargo/config.toml`); sccache shares compiled deps across worktrees | `sudo apt install clang mold sccache`, clang from [apt.llvm.org](https://apt.llvm.org) if the distro one is older than 21 |
-| Against Chrome on a debug port | `cargo run -p app -- --endpoint http://127.0.0.1:9222` |
-| Windows exe from WSL/Linux | `scripts/build-windows.sh crates/app teams` |
-| macOS .app (universal arm64 + x86_64), Xcode CLT only | `scripts/build-macos.sh crates/app teams` |
-| Tests | `cargo test` |
-| Headless screenshot (Xvfb, xdotool, xclip, mesa-vulkan-drivers) | `cargo build -p app && scripts/headless-shot.sh shot.png -- "mousemove 450 740" "click 1" "type hello"` |
-| Layout sweep before every UI deploy: 8 screens at 640x480 and 1920x1080, PNGs in `target/layout-sweep` (look at each) | `cargo build -p app && scripts/layout-sweep.sh` |
-| Layout guard: no overlapping or clipped elements, no negative offsets outside `widgets::corner_badge` | `cargo test -p app layout_guard` |
+Pour une connexion réelle sous Windows avec choix du compte :
 
-## How it works
-
-Rusty Teams never sees your password and never stores a token.
-It signs you in through a real Teams web page and lets that page make the API calls.
-
-```
-+--------------------------- Rusty Teams (Rust) ---------------------------+
-|  app      GPUI window: sidebar, chat view, composer, Ctrl+K              |
-|  core     sync engine, actions, mapping to view models                   |
-|  store    SQLite cache + FTS5 search index                               |
-|  graph    Microsoft Graph: chats, channels, messages, people, sending    |
-|  chatsvc  Teams chat service: realtime, pins, folders, read receipts     |
-|  session  runs requests inside the Teams page, one Transport trait       |
-|  mcp      local MCP server for agents, permissions, config install       |
-+------------------------------------|-------------------------------------+
-                                     | DevTools protocol (CDP)
-+------------------------------------v-------------------------------------+
-|  Hidden browser page on teams.cloud.microsoft, own profile               |
-|  webview: WebView2 (Windows)   or   browser: Chrome with a debug port    |
-+------------------------------------|-------------------------------------+
-                                     | HTTPS with the page's own MSAL tokens
-               Graph  |  chat service (ic3)  |  presence  |  Trouter socket
+```bash
+cargo run -p app -- --no-sso
 ```
 
-<details>
-<summary><b>Sign-in and tokens</b></summary>
-
-1. A hidden browser page loads Teams web with its own profile. On Windows this is WebView2, so single sign-on with the Windows account usually just works.
-2. If Teams asks for a login, the login window shows itself. After that the page stays parked in the background.
-3. Every API call is sent to that page over CDP. A small script (`crates/session/assets/fetch.js`) picks the matching token from the page's MSAL cache, refreshes it when needed, and runs the `fetch`.
-4. The page only hands out access tokens. Rust sends the requests itself and keeps each token in memory until shortly before it expires, never stored or logged. Websocket exchanges and calls that need the app's cookies still run inside the page. `TEAMS_PAGE_FETCH=1` sends everything through the page again.
-5. The Trouter socket is opened from Rust too, so the page can park even during a call.
-
-</details>
-
-<details>
-<summary><b>Data flow</b></summary>
-
-| Step | What happens |
+| Usage | Commande |
 |---|---|
-| Start | The UI renders from the SQLite cache right away. A chat still syncing shows a progress line in its header. Skeleton bubbles only when the cache has no messages yet |
-| Sync | `core` fetches chats and channels from Graph with delta queries, pins and folders from the chat service |
-| Live | `chatsvc` keeps the Trouter WebSocket open. An event only says "something changed", the content is then fetched fresh |
-| Write | Sends, edits and reactions go out through Graph or the chat service, then the cache updates |
-| Search | Local FTS5 index over cached messages, no server round trip |
+| Compiler GPUI | `cargo build -p app --release` |
+| Connexion via CDP | `cargo run -p app -- --endpoint http://127.0.0.1:9222` |
+| Compilation Windows depuis WSL/Linux | `scripts/build-windows.sh crates/app teams` |
+| Application macOS universelle, avec les outils Xcode CLT | `scripts/build-macos.sh crates/app teams` |
+| Capture GPUI sous Linux | `cargo build -p app && scripts/headless-shot.sh shot.png` |
+| Vérification des dispositions GPUI | `cargo build -p app && scripts/layout-sweep.sh` |
 
-</details>
+Sous Linux, la compilation GPUI nécessite notamment clang 21 ou plus récent pour libwebrtc et mold, configuré dans `.cargo/config.toml`. Voir [apt.llvm.org](https://apt.llvm.org) si la version de clang fournie par la distribution est trop ancienne. Les appels nécessitent aussi glib à l’exécution. Sous Windows, les builds natifs utilisent les outils C++ de Visual Studio et le SDK Windows ; la préparation complète des artefacts est décrite dans [l’action de compilation Windows](.github/actions/setup-windows/action.yml).
 
-<details>
-<summary><b>Crates</b></summary>
+### Binaires et CI
 
-| Crate | Job |
+Les artefacts sont disponibles dans les exécutions du workflow [Build de ce fork](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml). Ils contiennent le client **GPUI** : `teams.exe`, son installateur Windows, le binaire Linux et l’archive macOS. Rune doit encore être compilé depuis les sources.
+
+| Workflow | Déclenchement | Contenu |
+|---|---|---|
+| [Test](.github/workflows/test.yml) | Push sur `main` ou lancement manuel | Tests du workspace, dont Rune, sous Linux et Windows. |
+| [Build](.github/workflows/build.yml) | Push d’un tag ou lancement manuel | Compilation et empaquetage GPUI sous Linux, Windows et macOS. Publication d’une release pour les tags commençant par `v`. |
+
+Le mécanisme de recherche de mises à jour GPUI référence encore les releases du dépôt original. Il reste à adapter à la distribution de ce fork.
+
+## Architecture
+
+Les deux interfaces utilisent le même stockage et les mêmes services Teams. Le backend partagé permet de faire évoluer Rune tout en conservant le client GPUI.
+
+| Crate | Rôle |
 |---|---|
-| `app` | GPUI desktop app, binary `teams` |
-| `core` | Sync engine, actions, people ranking, markdown and card rendering |
-| `store` | SQLite cache, migrations, search, image file cache |
-| `graph` | Typed Microsoft Graph client with batching and paging |
-| `chatsvc` | Teams chat service: Trouter realtime, pins, folders, receipts |
-| `calling` | Native calls: Teams signaling, SDP translation, libwebrtc audio and video |
-| `session` | `Transport` trait, CDP session, in-page fetch |
-| `webview` | Hidden WebView2 host (Windows only) |
-| `browser` | Chrome lifecycle and watchdog for the CDP transport |
-| `cli` | `teams-probe`, a read-only end-to-end check |
+| `app-rune` | Interface Rune et binaire `rusty-teams-rune`. |
+| `app` | Interface GPUI et binaire `teams`. |
+| `app-backend` | Runtime, connexion, lancement des appels, notifications et préférences communs. |
+| `app-state`, `app-call-model`, `app-ui-kit`, `app-base` | État, modèles et composants utilisés par GPUI. |
+| `core` | Synchronisation, actions Teams et transformation des données. |
+| `store` | Cache SQLite, migrations et recherche locale FTS5. |
+| `graph`, `chatsvc` | Clients Microsoft Graph et services Teams : messages, canaux, présence et événements temps réel. |
+| `calling` | Signalisation Teams, traduction SDP et audio/vidéo natifs via libwebrtc. |
+| `session` | Sessions, acquisition des jetons et transport HTTP natif, avec repli sur les requêtes dans la page. |
+| `webview`, `browser` | Hôte WebView2 Windows ou gestion d’un Chrome accessible via CDP. |
+| `agents`, `mcp` | Exécution d’agents CLI et serveur MCP. Leur intégration dépend de l’interface. |
+| `cli` | Outil de diagnostic `teams-probe`. |
 
-</details>
+L’authentification passe par une vraie page Teams. Rust obtient les jetons d’accès depuis cette page et les conserve en mémoire pour envoyer les requêtes HTTP natives. Le code Rust ne les écrit pas sur disque et ne les journalise pas ; le navigateur gère son propre profil et son cache d’authentification.
 
-## Roadmap
+Le WebSocket Trouter peut également fonctionner depuis Rust. Les échanges qui nécessitent les cookies de la page continuent de passer par le navigateur. `TEAMS_PAGE_FETCH=1` force les requêtes HTTP à repasser par la page. Les WebViews peuvent être mises en veille lorsqu’elles ne sont plus nécessaires.
 
-Open and finished features by priority: [ROADMAP.md](ROADMAP.md)
+## Validation et limites
 
-## License
+```bash
+cargo test --workspace --no-fail-fast
+```
 
-[MIT](LICENSE)
+La validation locale Windows de la fusion `ac43e65` a couvert 3 772 tests, avec 2 tests ignorés. La suite HTTP MCP a dû être relancée en séquentiel : le test de rejet d’une requête surdimensionnée échouait en parallèle avec une connexion interrompue sous Windows. Les 39 tests de cette suite passent avec :
+
+```bash
+cargo test -p mcp --test http -- --test-threads=1
+```
+
+Ces résultats concernent les tests automatisés locaux. Ils ne constituent pas une validation complète des parcours sur un compte Teams réel ni des trois plateformes. Les badges en tête de page donnent accès à l’état de la CI du fork.
+
+Les budgets d’images de Rune limitent la rétention des images de messages avec un délai de grâce pour les images récemment affichées. Ils ne constituent pas une limite stricte de la mémoire totale : les avatars et certains coûts d’animation restent en dehors de ce budget.
+
+Le fichier [ROADMAP.md](ROADMAP.md) conserve la feuille de route héritée du projet original. Pour le fork, les écarts actuels comprennent la parité Rune/GPUI, la distribution de Rune et sa validation multiplateforme.
+
+## Crédits et licence
+
+Le projet original et l’essentiel du client Teams sont développés dans [danieldaeschle/rusty-teams](https://github.com/danieldaeschle/rusty-teams). Les modifications de ce fork sont suivies dans [theolebever/rusty-teams](https://github.com/theolebever/rusty-teams).
+
+[Licence MIT](LICENSE).

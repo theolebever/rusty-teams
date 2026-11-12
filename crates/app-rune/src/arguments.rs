@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub const HELP: &str = "Rusty Teams (Rune)\n\nOptions:\n  --database <path>  Cache database; its directory also holds the WebView2 profile\n  --no-sso           Choose an account instead of using the Windows account\n  --read-only        Disable account actions from the interface\n  --endpoint <url>   Use an existing browser's CDP endpoint\n  --demo             Use sample data without connecting to an account\n  --help             Show this help\n";
+pub const HELP: &str = "Rusty Teams (Rune)\n\nOptions:\n  --database <path>  Cache database; its directory also holds the WebView2 profile\n  --no-sso           Choose an account instead of using the Windows account (default)\n  --sso              Use the Windows account for single sign-on\n  --read-only        Disable account actions from the interface\n  --endpoint <url>   Use an existing browser's CDP endpoint\n  --demo             Use sample data without connecting to an account\n  --help             Show this help\n";
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Arguments {
@@ -16,11 +16,12 @@ pub struct Arguments {
 
 impl Arguments {
     pub fn parse(input: impl IntoIterator<Item = String>) -> Result<Self, String> {
-        let mut parsed = Self::default();
+        let mut parsed = Self { no_sso: true, ..Self::default() };
         let mut input = input.into_iter();
         while let Some(flag) = input.next() {
             match flag.as_str() {
                 "--no-sso" => parsed.no_sso = true,
+                "--sso" => parsed.no_sso = false,
                 "--read-only" => parsed.read_only = true,
                 "--demo" => parsed.demo = true,
                 "--help" | "-h" => parsed.help = true,
@@ -48,6 +49,15 @@ mod tests {
 
     fn parse(values: &[&str]) -> Result<Arguments, String> {
         Arguments::parse(values.iter().map(|value| (*value).to_owned()))
+    }
+
+    #[test]
+    fn account_choice_is_the_default_and_sso_is_explicit() {
+        assert!(parse(&[]).unwrap().no_sso);
+        assert!(parse(&["--database", "other/cache.db"]).unwrap().no_sso);
+        assert!(!parse(&["--sso"]).unwrap().no_sso);
+        assert!(parse(&["--sso", "--no-sso"]).unwrap().no_sso);
+        assert!(!parse(&["--no-sso", "--sso"]).unwrap().no_sso);
     }
 
     #[test]

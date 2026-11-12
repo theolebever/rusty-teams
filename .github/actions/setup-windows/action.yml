@@ -4,6 +4,10 @@ description: >-
   scripts/gpui-windows-patches and builds the onnxruntime.dll that ships
   embedded in the app. Exports GPUI_PRE_WINDOWS_PATCHED and
   CALLING_ONNXRUNTIME_DLL for the cargo steps that follow.
+inputs:
+  gpui-patches:
+    description: Stage the GPUI Windows patches for builds that use GPUI.
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -12,6 +16,7 @@ runs:
     # build.rs rewrite of that script is left out: it only exists so a Linux host can
     # cross-compile, and it would hide fxc.exe from a native Windows build.
     - name: Stage the patched gpui-pre-windows
+      if: inputs.gpui-patches == 'true'
       shell: bash
       run: |
         set -euo pipefail

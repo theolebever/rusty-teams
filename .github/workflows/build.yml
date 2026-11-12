@@ -1,6 +1,4 @@
-# Builds per README "Quick start": `cargo build -p app`, plus the universal macOS
-# binary from scripts/build-macos.sh. Tests live in test.yml; this file only
-# packages the artifacts.
+# Packages Rune on Linux, Windows and macOS. Tests live in test.yml.
 name: Build
 
 # Builds run for tags (the release assets); pushes are tested in test.yml.
@@ -46,13 +44,14 @@ jobs:
           key: build
 
       - name: Build
-        run: cargo build -p app --release
+        run: cargo build -p app-rune --release --locked
 
       # The runner is x86_64; the artifact name carries the architecture.
       - uses: actions/upload-artifact@v7
         with:
           name: teams-linux-amd64
-          path: target/release/teams
+          path: target/release/rusty-teams-rune
+          if-no-files-found: error
 
   windows:
     name: Windows
@@ -70,39 +69,42 @@ jobs:
         with:
           key: build
 
-      # After the toolchain: staging runs `cargo metadata`.
       - uses: ./.github/actions/setup-windows
+        with:
+          gpui-patches: 'false'
 
-      # fxc.exe comes from the Windows SDK, gpui-pre-windows finds it through the registry.
-      # TEAMS_NO_SSO makes the shipped exe default to --no-sso (see parse_arguments in crates/app).
       - name: Build
-        env:
-          TEAMS_NO_SSO: '1'
-        run: cargo build -p app --release --config "patch.crates-io.gpui-pre-windows.path=\"$GPUI_PRE_WINDOWS_PATCHED\""
+        run: cargo build -p app-rune --release --locked
 
-      # Same exe wrapped in a per-user Inno Setup installer. choco is a no-op when the
-      # runner image already has Inno Setup.
+      - name: Upload portable executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: teams-windows-amd64-portable
+          path: target/release/rusty-teams-rune.exe
+          if-no-files-found: error
+
       - name: Installer
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           choco install innosetup -y --no-progress
-          version="${GITHUB_REF_NAME#v}"
-          [ "$GITHUB_REF_TYPE" = tag ] || version="0.0.0-${GITHUB_SHA::7}"
-          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
-            "/DAppVersion=$version" \
-            "/DSourceExe=$(cygpath -w "$GITHUB_WORKSPACE/target/release/teams.exe")" \
-            "/O$(cygpath -w "$GITHUB_WORKSPACE/target/installer")" \
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          & "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe" `
+            "/DAppVersion=$version" `
+            "/DSourceExe=$env:GITHUB_WORKSPACE/target/release/rusty-teams-rune.exe" `
+            "/O$env:GITHUB_WORKSPACE/target/installer" `
             scripts/windows-installer.iss
 
-      # The runner is x86_64; the artifact name carries the architecture.
-      - uses: actions/upload-artifact@v7
-        with:
-          name: teams-windows-amd64
-          path: target/release/teams.exe
-
-      - uses: actions/upload-artifact@v7
+      - name: Upload installer
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
         with:
           name: teams-windows-amd64-setup
           path: target/installer/rusty-teams-setup.exe
+          if-no-files-found: error
 
   macos:
     name: macOS
@@ -117,16 +119,15 @@ jobs:
         with:
           key: build
 
-      # scripts/build-macos.sh builds the arm64 and x86_64 slices, lipos them into
-      # one universal binary and wraps it in a .app with the icon (README "Quick
-      # start"); it installs the x86_64 rustup target itself and needs Xcode CLT only.
+      # The script builds both architectures and wraps the universal binary in a .app.
       - name: Build
-        run: scripts/build-macos.sh crates/app teams
+        run: scripts/build-macos.sh crates/app-rune rusty-teams-rune
 
       - uses: actions/upload-artifact@v7
         with:
           name: teams-macos
           path: target/universal/release/teams-macos.zip
+          if-no-files-found: error
 
   release:
     name: Release
@@ -146,9 +147,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           mkdir release
-          chmod +x dist/teams-linux-amd64/teams
-          tar -czf "release/rusty-teams-$TAG-linux-amd64.tar.gz" -C dist/teams-linux-amd64 teams
-          cp dist/teams-windows-amd64/teams.exe "release/rusty-teams-$TAG-windows-amd64-portable.exe"
+          chmod +x dist/teams-linux-amd64/rusty-teams-rune
+          tar -czf "release/rusty-teams-$TAG-linux-amd64.tar.gz" -C dist/teams-linux-amd64 rusty-teams-rune
+          cp dist/teams-windows-amd64-portable/rusty-teams-rune.exe "release/rusty-teams-$TAG-windows-amd64-portable.exe"
           cp dist/teams-windows-amd64-setup/rusty-teams-setup.exe "release/rusty-teams-$TAG-windows-amd64-setup.exe"
           cp dist/teams-macos/teams-macos.zip "release/rusty-teams-$TAG-macos-universal.zip"
 
