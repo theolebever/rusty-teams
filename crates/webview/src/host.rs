@@ -26,6 +26,7 @@ use crate::cdp_failure::{CallContext, failure_reason, tab_state};
 use crate::fanout::Subscribers;
 use crate::host_dialog::{self, Dialog};
 use crate::park::{ParkDecision, ParkGate};
+use crate::login::LoginPrompt;
 use crate::sleep::{Activity, CallTally, Sleep, blocker, call_label};
 use crate::transport::{HostState, UiRequest, WebViewTransport};
 use crate::{BROWSER_ARGUMENTS, FORWARDED_EVENTS};
@@ -40,7 +41,6 @@ const PARK_DELAY_MS: u32 = 60_000;
 const SLEEP_TIMER: usize = 3;
 const SLEEP_CHECK_MS: u32 = 60_000;
 const BUSY_REPORT_EVERY: u32 = 10;
-const LOGIN_PROMPT_INTERVAL: Duration = Duration::from_secs(600);
 const WINDOW_WIDTH: i32 = 1100;
 const WINDOW_HEIGHT: i32 = 800;
 
@@ -67,7 +67,7 @@ pub(crate) struct Shared {
     state: watch::Sender<HostState>,
     requests: mpsc::Receiver<UiRequest>,
     restarting: Cell<bool>,
-    last_login_prompt: Cell<Option<Instant>>,
+    login_prompt: RefCell<LoginPrompt>,
     sleep: RefCell<Sleep<TabCommand>>,
     sleep_blocker: Cell<Option<&'static str>>,
     calls: RefCell<CallTally>,
@@ -132,7 +132,7 @@ fn run(
         state,
         requests,
         restarting: Cell::new(false),
-        last_login_prompt: Cell::new(None),
+        login_prompt: RefCell::new(LoginPrompt::default()),
         sleep: RefCell::new(Sleep::default()),
         sleep_blocker: Cell::new(None),
         calls: RefCell::new(CallTally::default()),
@@ -470,7 +470,20 @@ fn on_source_changed(shared: &Shared, app: App, url: String) {
             SetTimer(Some(window), LOGIN_TIMER, LOGIN_SHOW_DELAY_MS, None);
         } else if on_app {
             let _ = KillTimer(Some(window), LOGIN_TIMER);
+            let was_visible = IsWindowVisible(window).as_bool();
             let _ = ShowWindow(window, SW_HIDE);
+            if was_visible {
+                shared.login_prompt.borrow_mut().completed();
+                // Retry the other app with the account cookies acquired by this login.
+                for other in App::ALL {
+                    if other != app && is_login_url(&current_url(shared, other))
+                        && let Some(webview) = webview_of(shared, other)
+                    {
+                        let _ = KillTimer(Some(shared.windows[&other]), LOGIN_TIMER);
+                        let _ = webview.Navigate(&HSTRING::from(other.start_url()));
+                    }
+                }
+            }
         }
     }
 }
@@ -602,13 +615,9 @@ fn wake(shared: &Rc<Shared>, app: App) {
 }
 
 fn prompt_login(shared: &Shared, app: App) {
-    let recently = shared
-        .last_login_prompt
-        .get()
-        .is_some_and(|shown| shown.elapsed() < LOGIN_PROMPT_INTERVAL);
-    let visible = unsafe { IsWindowVisible(shared.windows[&app]) }.as_bool();
-    if !recently && !visible {
-        shared.last_login_prompt.set(Some(Instant::now()));
+    let any_visible = shared.windows.values().any(|&window| unsafe { IsWindowVisible(window).as_bool() });
+    let claimed = shared.login_prompt.borrow_mut().claim(Instant::now(), any_visible);
+    if claimed {
         show(shared, app);
     }
 }
@@ -754,8 +763,7 @@ extern "system" fn window_procedure(
             if let Some(app) = app_of(&shared, window)
                 && is_login_url(&current_url(&shared, app))
             {
-                show(&shared, app);
-                shared.last_login_prompt.set(Some(Instant::now()));
+                prompt_login(&shared, app);
             }
         }
         WM_TIMER if wparam.0 == SLEEP_TIMER => maybe_sleep(&shared),

@@ -9,6 +9,9 @@ publish.workspace = true
 name = "rusty-teams-rune"
 path = "src/main.rs"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 agents.workspace = true
 app-backend.workspace = true

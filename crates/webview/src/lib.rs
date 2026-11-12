@@ -7,6 +7,8 @@ mod embed;
 #[cfg(windows)]
 mod fanout;
 mod geometry;
+#[cfg(any(windows, test))]
+mod login;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]

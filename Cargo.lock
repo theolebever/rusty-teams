@@ -498,6 +498,7 @@ dependencies = [
  "chatsvc",
  "chrono",
  "directories",
+ "embed-resource",
  "image",
  "rodio",
  "rune",

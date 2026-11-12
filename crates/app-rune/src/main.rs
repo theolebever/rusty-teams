@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! Rusty Teams on Rune: chat list, conversation and composer on the real backend.
 //! Run with `--help` for account, browser and demo options.
 
