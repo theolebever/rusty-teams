@@ -81,6 +81,7 @@ fn init() -> UiState<Bridge> {
         }
     });
     let mut state = UiState::new(bridge);
+    state.launch_command = arguments.command.clone();
     // The stored preferences are queued already; startup reads them (tray, close to tray).
     for update in state.actions.poll() { state.apply(update); }
     state.apply(Update::Status("Connecting…".into()));
@@ -134,6 +135,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let status = s.status.clone();
     let noticed = s.toast.observe(&status);
     let ticked = s.toast.tick(now);
+    if let Some(command) = s.launch_command.take() { command.run(s, tx); }
     let opened = notifications::open_pending(s, tx);
     if opened { rune_notify::bring_to_front(); }
     let call_changed = calls::poll(s, _now, tx);
@@ -163,6 +165,13 @@ fn main() {
         return;
     }
     if !arguments.demo && arguments.database.is_none() && !rune::single_instance("rusty-teams-rune") {
+        // ponytail: the running instance only takes links, so a command relaunches this exe
+        // with its link (one short-lived extra process per forwarded command).
+        if let Some(command) = &arguments.command
+            && let Err(error) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg(command.link()).spawn())
+        {
+            eprintln!("Could not forward {command:?}: {error}");
+        }
         return;
     }
     let demo = arguments.demo;
@@ -226,9 +235,11 @@ fn main() {
         state.window_focused = focused;
         if !focused { view_composer::stop_typing(state); }
     })
-    .on_open_url(|state, url, _| {
+    .on_open_url(|state, url, tx| {
         if let Some(click) = rune_notify::click_from_url(url) && let Some(update) = notifications::clicked(&click) {
             state.apply(update);
+        } else if let Some(command) = arguments::Command::from_link(url) {
+            command.run(state, tx);
         }
     })
     .on_close(|state, tx| {

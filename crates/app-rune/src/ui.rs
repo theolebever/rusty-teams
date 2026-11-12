@@ -78,6 +78,8 @@ pub struct UiState<A: Actions> {
     pub settings: crate::settings::State,
     pub reminders: crate::reminders::State,
     pub tray: crate::tray::State,
+    /// The launch option of the first process, run at the first poll (`arguments::Command`).
+    pub(crate) launch_command: Option<crate::arguments::Command>,
     /// The incoming call ringtone, stopped when dropped (`notifications::ring`).
     pub(crate) ringtone: Option<crate::sound::Handle>,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
@@ -107,6 +109,7 @@ impl<A: Actions> UiState<A> {
             settings: Default::default(),
             reminders: Default::default(),
             tray: Default::default(),
+            launch_command: None,
             ringtone: None,
             nav: Default::default(),
             details: HashMap::new(),
