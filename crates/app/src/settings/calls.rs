@@ -34,7 +34,7 @@ fn ringtone_row(
                     center.update_settings(cx, |settings| {
                         settings.sounds.ringtones.set(call_type, ringtone)
                     });
-                    center.preview_sound(ringtone.file_name(), cx);
+                    center.preview_sound(ringtone.file_name());
                 })
             })
         })
@@ -50,8 +50,8 @@ fn ringtone_row(
             .child(select(id, current.label(), false, choices))
             .child(
                 text_button(preview_id, "Preview").on_click(move |_, _, cx| {
-                    preview_center.update(cx, |center, cx| {
-                        center.preview_sound(current.file_name(), cx)
+                    preview_center.update(cx, |center, _| {
+                        center.preview_sound(current.file_name())
                     })
                 }),
             ),

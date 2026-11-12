@@ -146,8 +146,7 @@ fn watch_releases(running_tag: &'static str, cx: &mut App) {
             let Some(paths) = updater::current_paths() else {
                 return;
             };
-            let fetch = cx.update(|cx| release_feed::fetch_update(running_tag, paths, cx));
-            match fetch.await {
+            match release_feed::fetch_update(running_tag, paths).await {
                 Ok(Some(tag)) => log::info!("release {tag} downloaded for the next restart"),
                 Ok(None) => {}
                 Err(error) => log::warn!("release check failed: {error}"),

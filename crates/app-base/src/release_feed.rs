@@ -4,8 +4,6 @@ use std::cmp::Ordering;
 use std::fs;
 use std::time::Duration;
 
-use futures_util::AsyncReadExt as _;
-use gpui_kit::{App, Task};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -161,45 +159,48 @@ fn stage(paths: &UpdatePaths, tag: &str, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Downloads a newer GitHub release into the update folder; the regular update poll installs it.
-pub fn fetch_update(
+pub async fn fetch_update(
     running_tag: &'static str,
     paths: UpdatePaths,
-    cx: &App,
-) -> Task<Result<Option<String>, String>> {
-    let client = cx.http_client();
-    cx.background_executor().spawn(async move {
-        let get = |url: String| {
-            let client = client.clone();
-            async move {
-                let mut response = client
-                    .get(&url, ().into(), true)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let mut body = Vec::new();
-                response
-                    .body_mut()
-                    .read_to_end(&mut body)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !response.status().is_success() {
-                    return Err(format!("status {}", response.status()));
-                }
-                Ok::<_, String>(body)
+) -> Result<Option<String>, String> {
+    crate::runtime::spawn(download_update(running_tag, paths))
+        .await
+        .map_err(|_| "cancelled".to_owned())?
+}
+
+/// Runs on the network runtime: reqwest needs tokio.
+async fn download_update(
+    running_tag: &'static str,
+    paths: UpdatePaths,
+) -> Result<Option<String>, String> {
+    // GitHub's API refuses requests without a user agent.
+    let client = reqwest::Client::builder()
+        .user_agent(crate::APP_NAME)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let get = |url: String| {
+        let client = client.clone();
+        async move {
+            let response = client.get(&url).send().await.map_err(|error| error.to_string())?;
+            if !response.status().is_success() {
+                return Err(format!("status {}", response.status()));
             }
-        };
-        let releases: Vec<Release> = serde_json::from_slice(&get(RELEASES_URL.to_owned()).await?)
-            .map_err(|error| error.to_string())?;
-        let Some((release, asset)) = newest_update(running_tag, &releases) else {
-            return Ok(None);
-        };
-        if already_staged(&paths, &release.tag_name) {
-            return Ok(None);
+            let body = response.bytes().await.map_err(|error| error.to_string())?;
+            Ok::<_, String>(body.to_vec())
         }
-        let bytes = get(asset.browser_download_url.clone()).await?;
-        verify_download(asset, &bytes)?;
-        stage(&paths, &release.tag_name, &bytes)?;
-        Ok(Some(release.tag_name.clone()))
-    })
+    };
+    let releases: Vec<Release> = serde_json::from_slice(&get(RELEASES_URL.to_owned()).await?)
+        .map_err(|error| error.to_string())?;
+    let Some((release, asset)) = newest_update(running_tag, &releases) else {
+        return Ok(None);
+    };
+    if already_staged(&paths, &release.tag_name) {
+        return Ok(None);
+    }
+    let bytes = get(asset.browser_download_url.clone()).await?;
+    verify_download(asset, &bytes)?;
+    stage(&paths, &release.tag_name, &bytes)?;
+    Ok(Some(release.tag_name.clone()))
 }
 
 #[cfg(test)]

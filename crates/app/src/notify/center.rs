@@ -193,7 +193,7 @@ impl NotificationCenter {
         })
         .detach();
         if !center.demo_mode {
-            center.prefetch_sounds(cx);
+            center.prefetch_sounds();
         }
         if center.app.read(cx).mode.demo {
             if demo_scene().is_none() {
@@ -323,7 +323,7 @@ impl NotificationCenter {
             self.app.update(cx, |state, cx| {
                 state.save_sound_settings(previous, updated, cx)
             });
-            self.prefetch_sounds(cx);
+            self.prefetch_sounds();
         }
         cx.notify();
     }
@@ -344,12 +344,12 @@ impl NotificationCenter {
         settings::save(&self.app.read(cx).store, &self.settings);
         self.sync_tray();
         if !self.demo_mode {
-            self.prefetch_sounds(cx);
+            self.prefetch_sounds();
         }
         cx.notify();
     }
 
-    fn prefetch_sounds(&self, cx: &App) {
+    fn prefetch_sounds(&self) {
         let sounds = &self.settings.sounds;
         let chosen = [
             sounds.notification_sound_type.file_name(),
@@ -358,22 +358,22 @@ impl NotificationCenter {
             Ringtone::Beep.file_name(),
         ];
         let call_tones = CallTone::ALL.map(CallTone::file_name);
-        sound_cache::prefetch(&chosen, cx);
-        sound_cache::prefetch(&call_tones, cx);
+        sound_cache::prefetch(&chosen);
+        sound_cache::prefetch(&call_tones);
     }
 
-    pub fn preview_sound(&mut self, file_name: &'static str, cx: &mut Context<Self>) {
-        self.preview = Some(sound_cache::start(file_name, false, cx));
+    pub fn preview_sound(&mut self, file_name: &'static str) {
+        self.preview = Some(sound_cache::start(file_name, false));
     }
 
-    fn play_notification_sound(&self, cx: &App) {
+    fn play_notification_sound(&self) {
         let file_name = self.settings.sounds.notification_sound_type.file_name();
-        sound_cache::play_or(file_name, platform::play_sound, cx);
+        sound_cache::play_or(file_name, platform::play_sound);
     }
 
-    fn play_urgent_sound(&self, cx: &App) {
+    fn play_urgent_sound(&self) {
         let file_name = self.settings.sounds.urgent_sound_type.file_name();
-        sound_cache::play_or(file_name, platform::play_sound, cx);
+        sound_cache::play_or(file_name, platform::play_sound);
     }
 
     fn on_app_event(&mut self, event: &AppEvent, cx: &mut Context<Self>) {
@@ -384,7 +384,7 @@ impl NotificationCenter {
             AppEvent::Ring => self.on_rings_changed(cx),
             AppEvent::MeetingReminder => self.on_meeting_reminder(cx),
             AppEvent::MeetingChime => self.on_meeting_chime(cx),
-            AppEvent::CallTone(tone) => self.on_call_tone(*tone, cx),
+            AppEvent::CallTone(tone) => self.on_call_tone(*tone),
             AppEvent::Call => self.sync_call_sounds(cx),
             AppEvent::SoundSettings => self.on_account_sounds(cx),
             AppEvent::ChatSettings => self.on_account_notifications(cx),
@@ -508,9 +508,9 @@ impl NotificationCenter {
             outcome.plays_sound(throttle_allows) || (decision.urgent_sound && throttle_allows);
         if decision.sound && audible && !self.app.read(cx).mode.demo {
             if decision.urgent_sound {
-                self.play_urgent_sound(cx);
+                self.play_urgent_sound();
             } else {
-                self.play_notification_sound(cx);
+                self.play_notification_sound();
             }
         }
         if let Some(user_id) = incoming.sender_id.clone() {
@@ -589,7 +589,7 @@ impl NotificationCenter {
         }
         let quiet = self.settings.do_not_disturb || self.app.read(cx).mode.demo;
         if self.settings.sounds.notification_sound && !quiet {
-            self.play_notification_sound(cx);
+            self.play_notification_sound();
         }
         self.sync_windows(cx);
     }
@@ -677,7 +677,7 @@ impl NotificationCenter {
                 .to_string();
         }
         if decision.sound && !self.demo_mode {
-            self.play_notification_sound(cx);
+            self.play_notification_sound();
         }
         if should_flash(&self.settings, decision.toast, self.main_window_active(cx))
             && let Some(native) = self.main_native
@@ -848,13 +848,13 @@ impl NotificationCenter {
         let busy = self.environment("", cx).busy();
         if meeting_start_sound(&self.settings, busy) && !self.reminders_quiet(cx) && !self.demo_mode
         {
-            sound_cache::play(CallTone::MeetingReminder.file_name(), cx);
+            sound_cache::play(CallTone::MeetingReminder.file_name());
         }
     }
 
-    fn on_call_tone(&mut self, tone: CallTone, cx: &mut Context<Self>) {
+    fn on_call_tone(&mut self, tone: CallTone) {
         if !self.demo_mode {
-            sound_cache::play(tone.file_name(), cx);
+            sound_cache::play(tone.file_name());
         }
     }
 
@@ -894,7 +894,7 @@ impl NotificationCenter {
         let environment = self.environment("", cx);
         let native_call = self.app.read(cx).call.is_some();
         if let Some(ringtone) = ringtone_for(&self.settings, native_call, environment.busy()) {
-            self.ring_tone = Some(sound_cache::start(ringtone.file_name(), true, cx));
+            self.ring_tone = Some(sound_cache::start(ringtone.file_name(), true));
         }
     }
 
@@ -903,13 +903,8 @@ impl NotificationCenter {
         let ringback = should_ringback(model) && !self.demo_mode;
         let reconnecting =
             model.is_some_and(|model| model.is_reconnecting() && !model.lobby) && !self.demo_mode;
-        sync_loop(&mut self.ringback, ringback, CallTone::OutgoingRinging, cx);
-        sync_loop(
-            &mut self.reconnecting,
-            reconnecting,
-            CallTone::Reconnecting,
-            cx,
-        );
+        sync_loop(&mut self.ringback, ringback, CallTone::OutgoingRinging);
+        sync_loop(&mut self.reconnecting, reconnecting, CallTone::Reconnecting);
     }
 
     fn slide_offset(&self, opened: Instant, area: WorkArea) -> i32 {
@@ -1444,9 +1439,9 @@ fn own_do_not_disturb(state: &AppState) -> bool {
     own_presence(state) == PresenceKind::DoNotDisturb
 }
 
-fn sync_loop(handle: &mut Option<SoundHandle>, audible: bool, tone: CallTone, cx: &App) {
+fn sync_loop(handle: &mut Option<SoundHandle>, audible: bool, tone: CallTone) {
     match (audible, handle.is_some()) {
-        (true, false) => *handle = Some(sound_cache::start(tone.file_name(), true, cx)),
+        (true, false) => *handle = Some(sound_cache::start(tone.file_name(), true)),
         (false, true) => *handle = None,
         _ => {}
     }

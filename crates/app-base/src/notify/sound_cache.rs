@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui_kit::App;
-
 use super::platform;
+use crate::runtime;
 
 pub const TEAMS_SOUND_BASE_URL: &str = chatsvc::teams_cdn::SOUND_BASE_URL;
 const SOUND_DIRECTORY: &str = "sounds";
@@ -34,52 +33,43 @@ pub fn write_cached(directory: &Path, file_name: &str, bytes: &[u8]) -> io::Resu
     fs::rename(&partial, directory.join(file_name))
 }
 
-fn load(file_name: &'static str, cx: &App) -> gpui_kit::Task<Option<Vec<u8>>> {
-    let client = cx.http_client();
-    cx.background_executor().spawn(async move {
-        let directory = cache_directory()?;
-        if let Some(bytes) = read_cached(&directory, file_name) {
-            return Some(bytes);
-        }
-        use futures_util::AsyncReadExt as _;
-        let url = format!("{TEAMS_SOUND_BASE_URL}{file_name}");
-        let mut response = client.get(&url, ().into(), true).await.ok()?;
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await.ok()?;
-        if !response.status().is_success() || !is_mp3(&body) {
-            log::warn!(
-                "teams sound {file_name} not loaded: status {}",
-                response.status()
-            );
-            return None;
-        }
-        if let Err(error) = write_cached(&directory, file_name, &body) {
-            log::warn!("teams sound {file_name} not cached: {error}");
-        }
-        Some(body)
-    })
+/// Runs on the network runtime: reqwest needs tokio.
+async fn load(file_name: &'static str) -> Option<Vec<u8>> {
+    let directory = cache_directory()?;
+    if let Some(bytes) = read_cached(&directory, file_name) {
+        return Some(bytes);
+    }
+    let url = format!("{TEAMS_SOUND_BASE_URL}{file_name}");
+    let response = reqwest::get(&url).await.ok()?;
+    let status = response.status();
+    let body = response.bytes().await.ok()?;
+    if !status.is_success() || !is_mp3(&body) {
+        log::warn!("teams sound {file_name} not loaded: status {status}");
+        return None;
+    }
+    if let Err(error) = write_cached(&directory, file_name, &body) {
+        log::warn!("teams sound {file_name} not cached: {error}");
+    }
+    Some(body.to_vec())
 }
 
-pub fn prefetch(file_names: &[&'static str], cx: &App) {
-    for file_name in file_names {
-        load(file_name, cx).detach();
+pub fn prefetch(file_names: &[&'static str]) {
+    for &file_name in file_names {
+        drop(runtime::spawn(load(file_name)));
     }
 }
 
-pub fn play(file_name: &'static str, cx: &App) {
-    play_or(file_name, || {}, cx);
+pub fn play(file_name: &'static str) {
+    play_or(file_name, || {});
 }
 
-pub fn play_or(file_name: &'static str, fallback: fn(), cx: &App) {
-    let loading = load(file_name, cx);
-    cx.background_executor()
-        .spawn(async move {
-            match loading.await {
-                Some(bytes) => platform::play_mp3(bytes),
-                None => fallback(),
-            }
-        })
-        .detach();
+pub fn play_or(file_name: &'static str, fallback: fn()) {
+    drop(runtime::spawn(async move {
+        match load(file_name).await {
+            Some(bytes) => platform::play_mp3(bytes),
+            None => fallback(),
+        }
+    }));
 }
 
 pub struct SoundHandle {
@@ -92,19 +82,16 @@ impl Drop for SoundHandle {
     }
 }
 
-pub fn start(file_name: &'static str, looped: bool, cx: &App) -> SoundHandle {
+pub fn start(file_name: &'static str, looped: bool) -> SoundHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
-    let loading = load(file_name, cx);
-    cx.background_executor()
-        .spawn(async move {
-            if let Some(bytes) = loading.await
-                && !flag.load(Ordering::SeqCst)
-            {
-                platform::play_mp3_until(bytes, looped, flag);
-            }
-        })
-        .detach();
+    drop(runtime::spawn(async move {
+        if let Some(bytes) = load(file_name).await
+            && !flag.load(Ordering::SeqCst)
+        {
+            platform::play_mp3_until(bytes, looped, flag);
+        }
+    }));
     SoundHandle { stop }
 }
 

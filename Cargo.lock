@@ -445,6 +445,7 @@ dependencies = [
  "log",
  "mcp",
  "raw-window-handle",
+ "reqwest 0.13.5",
  "resvg 0.46.0",
  "rodio",
  "serde",
