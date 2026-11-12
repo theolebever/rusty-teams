@@ -25,8 +25,8 @@ La direction de ce fork est de porter l’interface sur [Rune](https://github.co
 
 | Interface | Code et exécutable | Situation actuelle |
 |---|---|---|
-| Rune | `crates/app-rune`, `rusty-teams-rune` | Interface principale du fork, à compiler depuis les sources. Connectée au backend Teams réel, avec un mode démo indépendant du compte. |
-| GPUI | `crates/app`, `teams` | Interface historique conservée et enrichie par les intégrations du projet original. Les workflows de distribution construisent encore cette interface. |
+| Rune | `crates/app-rune`, `rusty-teams-rune` | Interface principale du fork, construite par la CI. Connectée au backend Teams réel, avec un mode démo indépendant du compte. |
+| GPUI | `crates/app`, `teams` | Interface historique conservée et enrichie par les intégrations du projet original. Compilation depuis les sources. |
 
 Dernière intégration amont documentée : [`53a311d`](https://github.com/danieldaeschle/rusty-teams/commit/53a311dd86ad10c6cb8c1b9e3194549a8d55a58f), fusionnée dans `main` par [`ac43e65`](https://github.com/theolebever/rusty-teams/commit/ac43e65df66d251db6758857e9bfb5c70d5141ed) le 12 novembre 2026. Les commits amont suivants doivent être examinés lors des prochaines intégrations. [Comparer les branches actuelles](https://github.com/danieldaeschle/rusty-teams/compare/main...theolebever:rusty-teams:main).
 
@@ -36,7 +36,7 @@ Dernière intégration amont documentée : [`53a311d`](https://github.com/daniel
 - Un crate `app-backend` commun aux deux interfaces, sans dépendance à GPUI, qui regroupe la connexion, le lancement des appels, les notifications et les préférences partagées.
 - Des adaptations de connexion : option `--no-sso` pour choisir un autre compte Windows et User-Agent mobile appliqué à la page Teams avant sa première navigation.
 - Des optimisations du chargement des conversations, des avatars et des réactions. Rune précharge les conversations récentes sans cache et réduit les aperçus d’images hors du thread d’interface.
-- Une distribution Windows GPUI avec exécutable portable et installateur par utilisateur. Ces builds démarrent avec le comportement `--no-sso`.
+- Une distribution Windows Rune avec exécutable portable à chaque build et installateur par utilisateur sur les tags. Le choix manuel du compte est le comportement par défaut.
 
 Les transports HTTP et Trouter natifs, la mise en veille des WebViews et de nombreux correctifs d’appels sont désormais partagés avec l’amont. Leur présence dans ce dépôt ne signifie pas qu’ils sont propres au fork.
 
@@ -75,10 +75,10 @@ cargo run -p app-rune -- --demo
 Pour se connecter à Teams sous Windows en choisissant le compte :
 
 ```bash
-cargo run -p app-rune -- --no-sso
+cargo run -p app-rune
 ```
 
-Sans `--no-sso`, WebView2 peut utiliser le compte Windows. La connexion interactive demande le runtime WebView2.
+Rune désactive le SSO Windows par défaut. `--no-sso` reste accepté ; `--sso` réactive explicitement la connexion avec le compte Windows. La connexion interactive demande le runtime WebView2.
 
 | Usage | Commande |
 |---|---|
@@ -115,12 +115,12 @@ Sous Linux, la compilation GPUI nécessite notamment clang 21 ou plus récent po
 
 ### Binaires et CI
 
-Les artefacts sont disponibles dans les exécutions du workflow [Build de ce fork](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml). Ils contiennent le client **GPUI** : `teams.exe`, son installateur Windows, le binaire Linux et l’archive macOS. Rune doit encore être compilé depuis les sources.
+Le workflow [Build de ce fork](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml) construit Rune. Chaque build produit le portable Windows `rusty-teams-rune.exe`, le binaire Linux et une application macOS universelle. Le portable Windows est téléchargeable dans l’artefact `teams-windows-amd64-portable`. L’installateur Windows est construit et envoyé comme artefact uniquement sur un tag.
 
 | Workflow | Déclenchement | Contenu |
 |---|---|---|
 | [Test](.github/workflows/test.yml) | Push sur `main` ou lancement manuel | Tests du workspace, dont Rune, sous Linux et Windows. |
-| [Build](.github/workflows/build.yml) | Push d’un tag ou lancement manuel | Compilation et empaquetage GPUI sous Linux, Windows et macOS. Publication d’une release pour les tags commençant par `v`. |
+| [Build](.github/workflows/build.yml) | Push sur `main`, push d’un tag ou lancement manuel | Compilation et empaquetage Rune sous Linux, Windows et macOS. Portable Windows à chaque build, installateur sur les tags, publication d’une release pour les tags commençant par `v`. |
 
 Le mécanisme de recherche de mises à jour GPUI référence encore les releases du dépôt original. Il reste à adapter à la distribution de ce fork.
 
@@ -163,7 +163,7 @@ Ces résultats concernent les tests automatisés locaux. Ils ne constituent pas 
 
 Les budgets d’images de Rune limitent la rétention des images de messages avec un délai de grâce pour les images récemment affichées. Ils ne constituent pas une limite stricte de la mémoire totale : les avatars et certains coûts d’animation restent en dehors de ce budget.
 
-Le fichier [ROADMAP.md](ROADMAP.md) conserve la feuille de route héritée du projet original. Pour le fork, les écarts actuels comprennent la parité Rune/GPUI, la distribution de Rune et sa validation multiplateforme.
+Le fichier [ROADMAP.md](ROADMAP.md) conserve la feuille de route héritée du projet original. Pour le fork, les écarts actuels comprennent la parité Rune/GPUI et la validation des binaires Rune sur chaque plateforme.
 
 ## Crédits et licence
 
