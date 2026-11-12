@@ -34,6 +34,8 @@ sys-locale = "0.3"
 resvg = { version = "0.46", default-features = false, features = ["text"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Rune enables Fontconfig dlopen; font-kit must use the same mode in the workspace.
+zed-font-kit = { version = "0.14.1-zed", features = ["source-fontconfig-dlopen"] }
 x11rb = { version = "0.13", features = ["shape"] }
 
 [target.'cfg(windows)'.dependencies]
