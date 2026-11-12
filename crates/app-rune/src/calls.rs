@@ -1,4 +1,6 @@
 //! Meeting prejoin and active call controls.
+use crate::avatar::rgb;
+use crate::ui::text;
 use calling::{
     CallCommand, CallState, CallUpdate, EngineEvent, IncomingRing, MuteCommand, RosterEntry,
     VideoKey, VideoPicture,
@@ -6,13 +8,138 @@ use calling::{
 use rune::native_surface::{ByteFrame, ColorInfo, Format};
 use rune::tok::Family;
 use rune::*;
-use crate::ui::text;
-use crate::avatar::rgb;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use crate::gallery::{self, Rotation};
 use crate::types::Actions;
 use crate::ui::UiState;
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    #[default]
+    Gallery,
+    Speaker,
+    Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    Accept(bool),
+    Decline,
+    Mute,
+    Camera,
+    Hangup,
+    Hand,
+    Share,
+}
+
+pub fn shortcut<A: Actions>(s: &mut UiState<A>, action: Shortcut) -> bool {
+    if s.read_only {
+        return false;
+    }
+    let active = s.calls.state.as_ref().is_some_and(CallState::is_active);
+    let available = match action {
+        Shortcut::Accept(_) => s.calls.ring.is_some() && !active && !s.calls.pending,
+        Shortcut::Decline => s.calls.ring.is_some(),
+        _ => active,
+    };
+    if !available {
+        return false;
+    }
+    if let Some(window) = &s.call_window {
+        window.shortcut(action);
+        return true;
+    }
+    match action {
+        Shortcut::Accept(video) => {
+            if let Some(ring) = &s.calls.ring {
+                s.calls.pending = true;
+                s.calls.video = video;
+                s.actions.accept_call(ring.ring_id, video);
+            }
+        }
+        Shortcut::Decline => {
+            if let Some(ring) = s.calls.ring.take() {
+                s.actions.decline_call(ring.ring_id);
+            }
+        }
+        Shortcut::Mute => s
+            .actions
+            .call_command(CallCommand::Mute(MuteCommand::Toggle)),
+        Shortcut::Camera => s
+            .actions
+            .call_command(CallCommand::SetCamera(!s.calls.camera)),
+        Shortcut::Hangup => s.actions.call_command(CallCommand::Hangup),
+        Shortcut::Hand => s.actions.call_command(CallCommand::SetHand(!s.calls.hand)),
+        Shortcut::Share => {
+            if s.calls.local_share.is_some() {
+                s.actions.call_command(CallCommand::StopShare);
+            } else {
+                s.calls.show_shares = !s.calls.show_shares;
+                s.calls.show_people = false;
+                s.calls.show_devices = false;
+                s.calls.show_captions = false;
+                if s.calls.show_shares {
+                    s.actions.call_command(CallCommand::RefreshShareSources);
+                }
+            }
+        }
+    }
+    true
+}
+
+struct Preview {
+    hub: Arc<calling::VideoHub>,
+    sender: tokio::sync::mpsc::UnboundedSender<CallUpdate>,
+    updates: tokio::sync::mpsc::UnboundedReceiver<CallUpdate>,
+    settings: Arc<calling::blur::BlurSettings>,
+    capture: Option<calling::capture::Capture>,
+    camera: Option<calling::DeviceChoice>,
+}
+
+impl Preview {
+    fn new() -> Self {
+        let (sender, updates) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            hub: calling::VideoHub::new(sender.clone()),
+            sender,
+            updates,
+            settings: Arc::new(calling::blur::BlurSettings::default()),
+            capture: None,
+            camera: None,
+        }
+    }
+
+    fn start(&mut self, choice: &calling::DeviceChoice) {
+        self.capture = None;
+        self.camera = Some(choice.clone());
+        let hub = self.hub.clone();
+        let settings = self.settings.clone();
+        let sender = self.sender.clone();
+        match calling::camera::start_camera(
+            choice,
+            settings.clone(),
+            move |buffer| {
+                if let Some(mut picture) = calling::video_frame::picture_from_i420(buffer, 640) {
+                    if settings.effects().mirror {
+                        picture.flip_horizontally();
+                    }
+                    hub.publish(VideoKey::LocalCamera, picture);
+                }
+            },
+            move |error| {
+                let _ = sender.send(CallUpdate::Notice(error));
+            },
+        ) {
+            Ok(capture) => self.capture = Some(capture),
+            Err(error) => {
+                let _ = self.sender.send(CallUpdate::Notice(error.to_string()));
+            }
+        }
+    }
+}
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryFilter {
@@ -60,7 +187,12 @@ fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(button(
             "Join a meeting",
             "open-prejoin",
-            |s: &mut UiState<A>, _| s.calls.prejoin_open = true,
+            |s: &mut UiState<A>, _| {
+                s.calls.prejoin_open = true;
+                if matches!(s.calls.state, Some(CallState::Ended { .. })) {
+                    s.calls.state = None;
+                }
+            },
         ))
         .child(
             text("Contacts")
@@ -192,7 +324,13 @@ fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
             .gap(12.0)
             .center_y()
             .hover(color("#EBEBEB"))
-            .child(crate::avatar::person(s, name, entry.peer_id.as_deref(), 36.0, None))
+            .child(crate::avatar::person(
+                s,
+                name,
+                entry.peer_id.as_deref(),
+                36.0,
+                None,
+            ))
             .child(
                 col()
                     .grow(1.0)
@@ -281,6 +419,29 @@ pub struct CallView {
     pub roster: Vec<RosterEntry>,
     pub notice: Option<String>,
     pub ring: Option<IncomingRing>,
+    pub retry: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub detached: bool,
+    lobby: bool,
+    progress: Option<calling::Progress>,
+    speaking: Vec<String>,
+    local_level: f32,
+    health: Option<calling::CallHealth>,
+    show_health: bool,
+    selected_input: calling::DeviceChoice,
+    selected_output: calling::DeviceChoice,
+    pub(crate) selected_camera: calling::DeviceChoice,
+    preview: Option<Preview>,
+    prejoin_mic: bool,
+    pub(crate) background_blur: bool,
+    pub(crate) effects: calling::CameraEffects,
+    rotation: Rotation,
+    page: usize,
+    layout: Layout,
+    pinned: Option<String>,
+    tile_menu: Option<String>,
+    stage_size: (f32, f32),
+    video_wants: Option<Vec<calling::VideoWant>>,
+    screen_share: Option<String>,
     surfaces: HashMap<VideoKey, NativeSurface>,
     frame_id: u64,
     devices: calling::DeviceLists,
@@ -288,13 +449,23 @@ pub struct CallView {
     shares: Vec<calling::ShareSource>,
     local_share: Option<String>,
     show_people: bool,
+    invite_open: bool,
+    confirm: Option<CallCommand>,
     show_reactions: bool,
     show_devices: bool,
     show_shares: bool,
     hand: bool,
     captions: calling::CaptionState,
     caption: Option<calling::CaptionEntry>,
-    reaction: Option<(String, calling::Reaction)>,
+    caption_history: Vec<calling::CaptionEntry>,
+    show_captions: bool,
+    caption_language: Option<String>,
+    recording: bool,
+    recording_pending: bool,
+    recording_audio_only: bool,
+    transcribing: bool,
+    consent_required: bool,
+    reactions: Vec<(u64, String, calling::Reaction, Instant)>,
     own_mri: String,
 }
 
@@ -316,6 +487,29 @@ impl Default for CallView {
             roster: Vec::new(),
             notice: None,
             ring: None,
+            retry: None,
+            detached: false,
+            lobby: false,
+            progress: None,
+            speaking: Vec::new(),
+            local_level: 0.0,
+            health: None,
+            show_health: false,
+            selected_input: calling::DeviceChoice::default(),
+            selected_output: calling::DeviceChoice::default(),
+            selected_camera: calling::DeviceChoice::default(),
+            preview: None,
+            prejoin_mic: false,
+            background_blur: false,
+            effects: calling::CameraEffects::default(),
+            rotation: Rotation::default(),
+            page: 0,
+            layout: Layout::default(),
+            pinned: None,
+            tile_menu: None,
+            stage_size: (900.0, 560.0),
+            video_wants: None,
+            screen_share: None,
             surfaces: HashMap::new(),
             frame_id: 0,
             devices: calling::DeviceLists::default(),
@@ -323,19 +517,53 @@ impl Default for CallView {
             shares: Vec::new(),
             local_share: None,
             show_people: false,
+            invite_open: false,
+            confirm: None,
             show_reactions: false,
             show_devices: false,
             show_shares: false,
             hand: false,
             captions: calling::CaptionState::Off,
             caption: None,
-            reaction: None,
+            caption_history: Vec::new(),
+            show_captions: false,
+            caption_language: None,
+            recording: false,
+            recording_pending: false,
+            recording_audio_only: false,
+            transcribing: false,
+            consent_required: false,
+            reactions: Vec::new(),
             own_mri: String::new(),
         }
     }
 }
 
 impl CallView {
+    fn stop_preview(&mut self) {
+        self.preview = None;
+        self.surfaces.remove(&VideoKey::LocalCamera);
+    }
+
+    fn prejoin_commands(&self) -> Vec<CallCommand> {
+        vec![
+            CallCommand::SelectInput(self.selected_input.clone()),
+            CallCommand::SelectOutput(self.selected_output.clone()),
+            CallCommand::SelectCamera(self.selected_camera.clone()),
+            CallCommand::SetBackground(if self.background_blur {
+                calling::BackgroundChoice::Blur
+            } else {
+                calling::BackgroundChoice::None
+            }),
+            CallCommand::SetCameraEffects(self.effects),
+            CallCommand::Mute(if self.prejoin_mic {
+                MuteCommand::Unmute
+            } else {
+                MuteCommand::Mute
+            }),
+        ]
+    }
+
     pub fn apply_ring(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::Incoming(ring) => self.ring = Some(ring),
@@ -354,6 +582,14 @@ impl CallView {
 
     pub fn apply_video(&mut self, frames: Vec<(VideoKey, Arc<VideoPicture>)>) {
         for (key, picture) in frames {
+            if let VideoKey::Person(mri) = &key
+                && self
+                    .video_wants
+                    .as_ref()
+                    .is_some_and(|wants| !wants.iter().any(|want| &want.mri == mri))
+            {
+                continue;
+            }
             let surface = self.surfaces.entry(key).or_default();
             self.frame_id = self.frame_id.wrapping_add(1);
             let _ = surface.push_bytes(
@@ -370,12 +606,36 @@ impl CallView {
     }
 
     pub fn apply(&mut self, update: CallUpdate) {
+        let layout_changed = matches!(
+            &update,
+            CallUpdate::State(_)
+                | CallUpdate::Roster(_)
+                | CallUpdate::Speakers(_)
+                | CallUpdate::OwnIdentity { .. }
+        );
         match update {
             CallUpdate::State(state) => {
                 self.pending = false;
                 if matches!(state, CallState::Connecting) {
+                    self.stop_preview();
+                    self.lobby = false;
+                    self.progress = None;
+                    self.speaking.clear();
+                    self.local_level = 0.0;
+                    self.health = None;
+                    self.show_health = false;
+                    self.rotation = Rotation::default();
+                    self.page = 0;
+                    self.layout = Layout::Gallery;
+                    self.pinned = None;
+                    self.tile_menu = None;
+                    self.video_wants = None;
+                    self.screen_share = None;
+                    self.retry = None;
                     self.roster.clear();
                     self.show_people = false;
+                    self.invite_open = false;
+                    self.confirm = None;
                     self.show_devices = false;
                     self.show_shares = false;
                     self.show_reactions = false;
@@ -387,7 +647,15 @@ impl CallView {
                     self.hand = false;
                     self.captions = calling::CaptionState::Off;
                     self.caption = None;
-                    self.reaction = None;
+                    self.caption_history.clear();
+                    self.show_captions = false;
+                    self.caption_language = None;
+                    self.recording = false;
+                    self.recording_pending = false;
+                    self.recording_audio_only = false;
+                    self.transcribing = false;
+                    self.consent_required = false;
+                    self.reactions.clear();
                     self.local_share = None;
                     self.own_mri.clear();
                 }
@@ -397,6 +665,15 @@ impl CallView {
                 self.state = Some(state);
             }
             CallUpdate::Muted(muted) => self.muted = muted,
+            CallUpdate::Lobby(lobby) => self.lobby = lobby,
+            CallUpdate::Progress(progress) => self.progress = Some(progress),
+            CallUpdate::Speakers(speaking) => self.speaking = speaking,
+            CallUpdate::Levels { local, .. } => self.local_level = local,
+            CallUpdate::Health(health) => self.health = Some(health),
+            CallUpdate::Selected { input, output } => {
+                self.selected_input = input;
+                self.selected_output = output;
+            }
             CallUpdate::Camera(camera) => {
                 self.camera = camera;
                 if !camera {
@@ -411,20 +688,64 @@ impl CallView {
                     _ => true,
                 });
                 self.roster = roster;
+                if self
+                    .pinned
+                    .as_ref()
+                    .is_some_and(|mri| !self.roster.iter().any(|p| &p.mri == mri && !p.in_lobby))
+                {
+                    self.pinned = None;
+                }
             }
             CallUpdate::VideoStopped(key) => {
                 self.surfaces.remove(&key);
             }
-            CallUpdate::ScreenShare(None) => {
-                self.surfaces.remove(&VideoKey::Screen);
+            CallUpdate::ScreenShare(sharer) => {
+                if sharer.is_none() {
+                    self.surfaces.remove(&VideoKey::Screen);
+                }
+                self.screen_share = sharer;
             }
             CallUpdate::Devices(devices) => self.devices = devices,
             CallUpdate::Cameras(cameras) => self.cameras = cameras,
             CallUpdate::ShareSources(shares) => self.shares = shares,
             CallUpdate::OwnHand(hand) => self.hand = hand.is_some(),
-            CallUpdate::Captions(state) => self.captions = state,
-            CallUpdate::Caption(caption) => self.caption = Some(caption),
-            CallUpdate::Reaction { mri, reaction } => self.reaction = Some((mri, reaction)),
+            CallUpdate::Captions(state) => {
+                if state != calling::CaptionState::On {
+                    self.caption = None;
+                }
+                self.captions = state;
+            }
+            CallUpdate::Caption(caption) if self.captions != calling::CaptionState::Off => {
+                if let Some(line) = self
+                    .caption_history
+                    .iter_mut()
+                    .rev()
+                    .take(16)
+                    .find(|line| line.id == caption.id && line.user_id == caption.user_id)
+                {
+                    *line = caption.clone();
+                } else {
+                    // shortcut: keep the last 200 utterances in memory; add persistent history only if requested.
+                    if self.caption_history.len() == 200 {
+                        self.caption_history.remove(0);
+                    }
+                    self.caption_history.push(caption.clone());
+                }
+                self.caption = Some(caption);
+            }
+            CallUpdate::Recording(recording) => self.recording = recording,
+            CallUpdate::RecordingPending(pending) => self.recording_pending = pending,
+            CallUpdate::RecordingAudioOnly(audio) => self.recording_audio_only = audio,
+            CallUpdate::Transcribing(transcribing) => self.transcribing = transcribing,
+            CallUpdate::ConsentRequired(required) => self.consent_required = required,
+            CallUpdate::Reaction { mri, reaction } => {
+                self.frame_id = self.frame_id.wrapping_add(1);
+                if self.reactions.len() == 12 {
+                    self.reactions.remove(0);
+                }
+                self.reactions
+                    .push((self.frame_id, mri, reaction, Instant::now()));
+            }
             CallUpdate::OwnIdentity { mri } => self.own_mri = mri,
             CallUpdate::LocalShare(share) => {
                 if share.is_none() {
@@ -436,8 +757,249 @@ impl CallView {
                 self.pending = false;
                 self.notice = Some(notice);
             }
+            CallUpdate::Organizer { action, outcome } => {
+                self.notice = match outcome {
+                    Ok(status) if (200..300).contains(&status) => None,
+                    Ok(_) => Some(format!("Could not {action}. Try again.")),
+                    Err(error) => Some(format!("Could not {action}: {error}")),
+                };
+            }
             _ => {}
         }
+        if layout_changed {
+            self.refresh_gallery(Instant::now());
+        }
+    }
+
+    fn can_manage(&self) -> bool {
+        self.roster.iter().any(|person| {
+            person.mri == self.own_mri
+                && (person.organizer || person.role == Some(calling::MeetingRole::Organizer))
+        })
+    }
+
+    fn has_content(&self) -> bool {
+        self.screen_share.is_some()
+            || self.local_share.is_some()
+            || self.surfaces.contains_key(&VideoKey::Screen)
+            || self.surfaces.contains_key(&VideoKey::LocalScreen)
+    }
+
+    fn refresh_gallery(&mut self, now: Instant) {
+        let members: Vec<_> = self
+            .roster
+            .iter()
+            .filter(|p| !p.in_lobby && p.mri != self.own_mri && !p.mri.starts_with("28:"))
+            .map(|p| p.mri.clone())
+            .collect();
+        self.rotation
+            .update(now, &members, &self.speaking, gallery::GALLERY_MAX);
+        self.page = self.page.min(gallery::gallery_pages(members.len(), 0) - 1);
+    }
+
+    fn ordered_people(&self) -> Vec<&RosterEntry> {
+        let mut people: Vec<_> = self
+            .rotation
+            .order()
+            .iter()
+            .filter_map(|mri| self.roster.iter().find(|p| &p.mri == mri))
+            .collect();
+        people.sort_by_key(|p| {
+            (
+                self.pinned.as_deref() != Some(p.mri.as_str()),
+                p.spotlight.as_ref().map(|s| s.rank).unwrap_or(u64::MAX),
+            )
+        });
+        people
+    }
+
+    fn focus<'a>(&self, people: &[&'a RosterEntry]) -> Option<&'a RosterEntry> {
+        people
+            .iter()
+            .copied()
+            .find(|p| self.pinned.as_deref() == Some(p.mri.as_str()) || p.spotlight.is_some())
+            .or_else(|| {
+                people
+                    .iter()
+                    .copied()
+                    .find(|p| self.speaking.contains(&p.mri))
+            })
+            .or_else(|| people.first().copied())
+    }
+
+    fn visible_people(&self) -> Vec<(&RosterEntry, calling::TileDetail)> {
+        use calling::TileDetail::{Small, Stage};
+        let people = self.ordered_people();
+        if self.has_content() {
+            return if self.layout == Layout::Content {
+                Vec::new()
+            } else {
+                people
+                    .into_iter()
+                    .take(gallery::GALLERY_MAX)
+                    .map(|p| (p, Small))
+                    .collect()
+            };
+        }
+        if self.layout == Layout::Speaker
+            || self.pinned.is_some()
+            || people.iter().any(|p| p.spotlight.is_some())
+        {
+            let focus = self.focus(&people);
+            return focus
+                .into_iter()
+                .map(|p| (p, Stage))
+                .chain(
+                    people
+                        .into_iter()
+                        .filter(|p| focus.is_none_or(|f| f.mri != p.mri))
+                        .take(gallery::GALLERY_MAX - 1)
+                        .map(|p| (p, Small)),
+                )
+                .collect();
+        }
+        let range = gallery::gallery_page_range(people.len(), 0, self.page);
+        let detail = if range.len() <= 4 { Stage } else { Small };
+        people[range].iter().map(|p| (*p, detail)).collect()
+    }
+
+    fn wants(&self) -> Vec<calling::VideoWant> {
+        self.visible_people()
+            .into_iter()
+            .filter(|(p, _)| p.has_video)
+            .take(calling::video_layout::RECEIVE_SLOTS)
+            .map(|(p, detail)| calling::VideoWant {
+                mri: p.mri.clone(),
+                detail,
+            })
+            .collect()
+    }
+
+    fn status(&self, now: Instant) -> String {
+        if self.lobby {
+            return "Waiting in the lobby...".into();
+        }
+        match &self.state {
+            Some(CallState::Connecting) => match self.progress {
+                Some(calling::Progress::Ringing) => "Ringing",
+                Some(calling::Progress::Calling) => "Calling...",
+                None => "Connecting...",
+            }
+            .into(),
+            Some(CallState::Reconnecting { .. }) => "Reconnecting...".into(),
+            Some(CallState::Connected { since }) => {
+                let seconds = now.saturating_duration_since(*since).as_secs();
+                let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+                if hours > 0 {
+                    format!("{hours}:{minutes:02}:{seconds:02}")
+                } else {
+                    format!("{minutes:02}:{seconds:02}")
+                }
+            }
+            _ => "Call".into(),
+        }
+    }
+}
+
+pub fn poll<A: Actions>(state: &mut UiState<A>, _: f64, tx: &mut Tx) -> bool {
+    let active = state.calls.state.as_ref().is_some_and(CallState::is_active);
+    let prejoin = !active
+        && matches!(state.calls.state, None | Some(CallState::Idle))
+        && state.calls.ring.is_none()
+        && !state.calls.pending
+        && !state.read_only
+        && state.screens.screen == crate::screens::Screen::Calls
+        && (state.calls.prejoin_open || !state.calls.link.text.is_empty());
+    let mut changed = false;
+    if prejoin {
+        if state.calls.preview.is_none() {
+            let preview = Preview::new();
+            let sender = preview.sender.clone();
+            app_backend::runtime::handle().spawn_blocking(move || {
+                let _ = sender.send(CallUpdate::Devices(calling::devices::list_devices(
+                    &calling::devices::shared_factory(),
+                )));
+                let _ = sender.send(CallUpdate::Cameras(calling::camera::list_cameras()));
+            });
+            state.calls.preview = Some(preview);
+        }
+        let call = &mut state.calls;
+        let preview = call.preview.as_mut().expect("prejoin preview");
+        preview.settings.set_enabled(call.background_blur);
+        preview.settings.set_effects(call.effects);
+        if call.video && preview.camera.as_ref() != Some(&call.selected_camera) {
+            preview.start(&call.selected_camera);
+        } else if !call.video {
+            preview.capture = None;
+            preview.camera = None;
+            call.surfaces.remove(&VideoKey::LocalCamera);
+        }
+        let mut updates = Vec::new();
+        while let Ok(update) = preview.updates.try_recv() {
+            updates.push(update);
+        }
+        let frames = preview.hub.drain();
+        changed = !updates.is_empty() || !frames.is_empty();
+        for update in updates {
+            call.apply(update);
+        }
+        call.apply_video(frames);
+        tx.wake_after(Duration::from_millis(33));
+    } else if state.calls.preview.is_some() {
+        state.calls.stop_preview();
+        changed = true;
+    }
+    let running = active && state.call_window.is_none();
+    if running {
+        let now = Instant::now();
+        state
+            .calls
+            .reactions
+            .retain(|(_, _, _, at)| now.saturating_duration_since(*at) < Duration::from_secs(4));
+        state.calls.refresh_gallery(now);
+        sync_video(state);
+        tx.wake_after(if state.calls.reactions.is_empty() {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(33)
+        });
+    }
+    running || changed
+}
+
+fn sync_video<A: Actions>(state: &mut UiState<A>) {
+    let wants = state.calls.wants();
+    if state.calls.video_wants.as_ref() != Some(&wants) {
+        state.calls.surfaces.retain(|key, _| match key {
+            VideoKey::Person(mri) => wants.iter().any(|want| &want.mri == mri),
+            _ => true,
+        });
+        state
+            .actions
+            .call_command(CallCommand::SetVideoWants(wants.clone()));
+        state.calls.video_wants = Some(wants);
+    }
+}
+
+fn end_reason(reason: &calling::EndReason) -> String {
+    use calling::{EndKind, EndReason};
+    match reason {
+        EndReason::LocalHangup => "You left the call".into(),
+        EndReason::Cancelled | EndReason::Remote(EndKind::Cancelled) => "Call cancelled".into(),
+        EndReason::Dropped | EndReason::Remote(EndKind::MediaError) => {
+            "Call dropped. Check your internet connection and try again.".into()
+        }
+        EndReason::Failed(message) => format!("Could not connect: {message}"),
+        EndReason::Remote(EndKind::Declined) => "Call declined".into(),
+        EndReason::Remote(EndKind::NoAnswer) => "No answer".into(),
+        EndReason::Remote(EndKind::Unavailable) => "This person is not available".into(),
+        EndReason::Remote(EndKind::AnsweredElsewhere) => "Call answered on another device".into(),
+        EndReason::Remote(EndKind::Forwarded) => "Call forwarded".into(),
+        EndReason::Remote(EndKind::RoomClosed) => "The meeting has ended".into(),
+        EndReason::Remote(EndKind::Removed) => {
+            "Someone just removed you from the meeting. You can try to rejoin.".into()
+        }
+        EndReason::Remote(EndKind::Normal | EndKind::Other) => "Call ended".into(),
     }
 }
 
@@ -463,10 +1025,22 @@ fn button<A: Actions + 'static>(
         _ => None,
     };
     if let Some(symbol) = symbol {
-        return col().key(key.to_owned()).label(label.to_owned()).w(64.0).h(60.0).gap(4.0).radius(4.0).center()
-            .hover(color("#424242")).on_press_tx(action)
+        return col()
+            .key(key.to_owned())
+            .label(label.to_owned())
+            .w(64.0)
+            .h(60.0)
+            .gap(4.0)
+            .radius(4.0)
+            .center()
+            .hover(color("#424242"))
+            .on_press_tx(action)
             .child(crate::icons::sym(symbol, 22.0).color(rgb(0xFFFFFF)))
-            .child(text(label.to_owned()).font(style(11.0, 400.0)).color(rgb(0xFFFFFF)));
+            .child(
+                text(label.to_owned())
+                    .font(style(11.0, 400.0))
+                    .color(rgb(0xFFFFFF)),
+            );
     }
     row()
         .key(key.to_owned())
@@ -474,42 +1048,388 @@ fn button<A: Actions + 'static>(
         .px(16.0)
         .radius(6.0)
         .center()
-        .fill(color(if key == "call-leave" { "#C4314B" } else { "#E8EBFA" }))
-        .hover(color(if key == "call-leave" { "#A4262C" } else { "#DADDF5" }))
+        .fill(color(if key == "call-leave" {
+            "#C4314B"
+        } else {
+            "#E8EBFA"
+        }))
+        .hover(color(if key == "call-leave" {
+            "#A4262C"
+        } else {
+            "#DADDF5"
+        }))
         .on_press_tx(action)
         .child(
             text(label.to_owned())
                 .font(style(13.0, 600.0))
-                .color(if key == "call-leave" { rgb(0xFFFFFF) } else { color("#242424") }),
+                .color(if key == "call-leave" {
+                    rgb(0xFFFFFF)
+                } else {
+                    color("#242424")
+                }),
         )
 }
 
-fn participant_tile(name: &str, key: &str, surface: Option<&NativeSurface>, muted: bool) -> El {
-    let mut tile = col().key(key.to_owned()).grow(1.0).min_w(0.0).h_full().min_h(0.0)
-        .radius(10.0).fill(color("#333333"));
+fn health_indicator<A: Actions + 'static>(call: &CallView) -> El {
+    let Some(health) = &call.health else {
+        return el();
+    };
+    let (lit, label, tint) = match health.level {
+        calling::NetworkLevel::Good => (3, "Network: Good", "#FFFFFF"),
+        calling::NetworkLevel::Poor => (2, "Network: Poor", "#FFAA44"),
+        calling::NetworkLevel::Bad => (1, "Network: Bad", "#FFB3BE"),
+    };
+    let mut bars = row()
+        .key("call-health")
+        .label(label)
+        .gap(2.0)
+        .h(18.0)
+        .center_y()
+        .on_press(|s: &mut UiState<A>| s.calls.show_health = !s.calls.show_health);
+    for (index, height) in [6.0, 10.0, 14.0].into_iter().enumerate() {
+        bars = bars.child(
+            el().w(3.0)
+                .h(height)
+                .radius(1.0)
+                .fill(color(if index < lit { tint } else { "#616161" })),
+        );
+    }
+    bars
+}
+
+fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
+    let mut panel = col().key("call-device-list").gap(4.0);
+    for (kind, title, entries, selected) in [
+        (
+            "input",
+            "Microphone",
+            call.devices.input_entries(),
+            &call.selected_input,
+        ),
+        (
+            "output",
+            "Speaker",
+            call.devices.output_entries(),
+            &call.selected_output,
+        ),
+        (
+            "camera",
+            "Camera",
+            calling::camera_entries(&call.cameras),
+            &call.selected_camera,
+        ),
+    ] {
+        panel = panel.child(text(title).font(style(13.0, 700.0)).color(color("#242424")));
+        for entry in entries {
+            let choice = entry.choice;
+            let label = format!(
+                "{}{}",
+                if &choice == selected { "✓ " } else { "" },
+                entry.label
+            );
+            panel = panel.child(button::<A>(
+                &label,
+                &format!("{kind}-{}", entry.label),
+                move |s, _| {
+                    let command = match kind {
+                        "input" => CallCommand::SelectInput(choice.clone()),
+                        "output" => CallCommand::SelectOutput(choice.clone()),
+                        _ => CallCommand::SelectCamera(choice.clone()),
+                    };
+                    if prejoin {
+                        match kind {
+                            "input" => s.calls.selected_input = choice.clone(),
+                            "output" => s.calls.selected_output = choice.clone(),
+                            _ => s.calls.selected_camera = choice.clone(),
+                        }
+                    } else {
+                        s.actions.call_command(command);
+                        // shortcut: the engine has no selected-camera update; confirm it when that event exists.
+                        if kind == "camera" {
+                            s.calls.selected_camera = choice.clone();
+                        }
+                    }
+                },
+            ));
+        }
+    }
+    panel
+}
+
+fn effects_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
+    let mut panel = col().key("call-effects").gap(4.0).child(button::<A>(
+        if call.background_blur {
+            "Background blur on"
+        } else {
+            "Background blur off"
+        },
+        "call-blur",
+        move |s, _| {
+            s.calls.background_blur = !s.calls.background_blur;
+            if !prejoin {
+                s.actions
+                    .call_command(CallCommand::SetBackground(if s.calls.background_blur {
+                        calling::BackgroundChoice::Blur
+                    } else {
+                        calling::BackgroundChoice::None
+                    }));
+            }
+        },
+    ));
+    for (key, label, enabled) in [
+        ("mirror", "Mirror my video", call.effects.mirror),
+        ("framing", "Auto framing", call.effects.auto_framing),
+        (
+            "brightness",
+            "Adjust brightness",
+            call.effects.adjust_brightness,
+        ),
+        ("soft-focus", "Soft focus", call.effects.soft_focus),
+    ] {
+        panel = panel.child(button::<A>(
+            &format!("{} {label}", if enabled { "✓" } else { "" }),
+            &format!("effect-{key}"),
+            move |s, _| {
+                match key {
+                    "mirror" => s.calls.effects.mirror = !enabled,
+                    "framing" => s.calls.effects.auto_framing = !enabled,
+                    "brightness" => s.calls.effects.adjust_brightness = !enabled,
+                    _ => s.calls.effects.soft_focus = !enabled,
+                }
+                if !prejoin {
+                    s.actions
+                        .call_command(CallCommand::SetCameraEffects(s.calls.effects));
+                }
+            },
+        ));
+    }
+    panel
+}
+
+fn invite_draft<A: Actions>(s: &mut UiState<A>) -> &mut crate::new_chat::Draft {
+    &mut s.chatlist.manage.add
+}
+
+fn reaction_glyph(reaction: &calling::Reaction) -> &str {
+    match reaction {
+        calling::Reaction::Like => "👍",
+        calling::Reaction::Heart => "❤",
+        calling::Reaction::Applause => "👏",
+        calling::Reaction::Laugh => "😆",
+        calling::Reaction::Surprised => "😮",
+        calling::Reaction::Other(name) => name,
+    }
+}
+
+fn participant_tile<A: Actions + 'static>(
+    call: &CallView,
+    person: &RosterEntry,
+    (width, height): (f32, f32),
+) -> El {
+    let own = person.mri == call.own_mri;
+    let name = if own {
+        "You"
+    } else if person.display_name.is_empty() {
+        &person.mri
+    } else {
+        &person.display_name
+    };
+    let key = if own {
+        "call-self".into()
+    } else {
+        format!("call-person-{}", person.mri)
+    };
+    let video = if own {
+        VideoKey::LocalCamera
+    } else {
+        VideoKey::Person(person.mri.clone())
+    };
+    let surface = call.surfaces.get(&video);
+    let speaking = !person.muted
+        && if own {
+            call.local_level > 0.02
+        } else {
+            call.speaking.contains(&person.mri)
+        };
+    let compact = height < 200.0;
+    let inset = if compact { 4.0 } else { 8.0 };
+    let mut tile = col()
+        .key(key.clone())
+        .size(width, height)
+        .min_w(0.0)
+        .min_h(0.0)
+        .radius(10.0)
+        .fill(color("#333333"))
+        .border(2.0, color(if speaking { "#9299F7" } else { "#333333" }));
     let picture = if let Some(surface) = surface {
-        el().w_full().grow(1.0).min_h(0.0).native_surface(surface, SurfaceFit::Fit)
+        el().w_full()
+            .h_full()
+            .min_h(0.0)
+            .native_surface(surface, SurfaceFit::Fit)
     } else {
         col().w_full().grow(1.0).center().child(
-            row().w(72.0).h(72.0).radius(36.0).center().fill(color("#5B5FC7"))
-                .child(text(name.split_whitespace().take(2).filter_map(|word| word.chars().next()).collect::<String>())
-                    .font(style(26.0, 600.0)).color(rgb(0xFFFFFF))))
+            row()
+                .w(72.0)
+                .h(72.0)
+                .radius(36.0)
+                .center()
+                .fill(color("#5B5FC7"))
+                .child(
+                    text(
+                        name.split_whitespace()
+                            .take(2)
+                            .filter_map(|word| word.chars().next())
+                            .collect::<String>(),
+                    )
+                    .font(style(26.0, 600.0))
+                    .color(rgb(0xFFFFFF)),
+                ),
+        )
     };
-    tile = tile.child(picture).child(row().w_full().h(32.0).px(12.0).center_y()
-        .child(text(format!("{name}{}", if muted { " · Muted" } else { "" }))
-            .font(style(12.0, 400.0)).color(rgb(0xFFFFFF)).truncate()));
+    let mut plate = row()
+        .key(format!("{key}-name"))
+        .pin(Some(inset), None, None, Some(inset))
+        .max_w(if compact { width * 0.6 } else { width - 16.0 })
+        .px(6.0)
+        .py(2.0)
+        .gap(4.0)
+        .center_y()
+        .radius(4.0)
+        .fill(color("#1F1F1F"))
+        .child(
+            text(name.to_owned())
+                .font(style(if compact { 11.0 } else { 13.0 }, 400.0))
+                .color(rgb(0xFFFFFF))
+                .truncate()
+                .min_w(0.0),
+        );
+    for (visible, suffix, icon, label) in [
+        (person.muted, "muted", "mic_off", "Muted"),
+        (speaking, "speaking", "mic", "Speaking"),
+        (person.hand.is_some(), "hand", "back_hand", "Hand raised"),
+        (person.sharing, "sharing", "share", "Sharing"),
+        (
+            call.pinned.as_deref() == Some(person.mri.as_str()),
+            "pinned",
+            "keep",
+            "Pinned for me",
+        ),
+        (
+            person.spotlight.is_some(),
+            "spotlight",
+            "star",
+            "Spotlighted",
+        ),
+    ] {
+        if visible {
+            plate = plate.child(
+                crate::icons::sym(icon, 14.0)
+                    .key(format!("{key}-{suffix}"))
+                    .label(label)
+                    .color(rgb(0xFFFFFF)),
+            );
+        }
+    }
+    tile = tile.child(picture).child(plate);
+    if !own {
+        let mri = person.mri.clone();
+        tile = tile.child(
+            row()
+                .key(format!("{key}-menu"))
+                .label("More options")
+                .pin(None, Some(4.0), Some(4.0), None)
+                .size(24.0, 24.0)
+                .center()
+                .radius(4.0)
+                .fill(color("#292929"))
+                .on_press(move |s: &mut UiState<A>| {
+                    s.calls.tile_menu = if s.calls.tile_menu.as_ref() == Some(&mri) {
+                        None
+                    } else {
+                        Some(mri.clone())
+                    };
+                })
+                .child(crate::icons::sym("more_horiz", 18.0).color(rgb(0xFFFFFF))),
+        );
+    }
     tile
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
+    view_with_motion(s, false)
+}
+
+pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bool) -> El {
     let call = &s.calls;
     let active = call.state.as_ref().is_some_and(CallState::is_active);
     if s.call_window.is_some() && (active || call.ring.is_some()) {
-        return col().grow(1.0).h_full()
+        return col()
+            .grow(1.0)
+            .h_full()
             .child(button::<A>("Return to call", "return-to-call", |s, _| {
-                if let Some(window) = &s.call_window { window.open(); }
+                if let Some(window) = &s.call_window {
+                    window.open();
+                }
             }))
             .child(history_view(s));
+    }
+    if s.call_window.is_some() && matches!(call.state, Some(CallState::Ended { .. })) {
+        return history_view(s);
+    }
+    if call.ring.is_none()
+        && let Some(CallState::Ended { reason }) = &call.state
+    {
+        let mut actions =
+            row()
+                .gap(8.0)
+                .center()
+                .child(button::<A>("Close", "call-end-close", |s, tx| {
+                    s.calls.state = None;
+                    s.calls.pending = false;
+                    s.calls.prejoin_open = false;
+                    s.calls.link.clear();
+                    s.calls.stop_preview();
+                    if s.calls.detached {
+                        tx.close_window();
+                    }
+                }));
+        if !s.read_only
+            && !matches!(
+                reason,
+                calling::EndReason::Remote(calling::EndKind::RoomClosed)
+            )
+            && let Some(retry) = &call.retry
+        {
+            let retry = retry.clone();
+            actions = actions.child(button::<A>("Rejoin", "call-end-rejoin", move |s, _| {
+                if !s.calls.pending {
+                    s.calls.pending = true;
+                    retry();
+                }
+            }));
+        }
+        return col()
+            .key("call-ended")
+            .w_full()
+            .h_full()
+            .center()
+            .gap(20.0)
+            .fill(color("#1F1F1F"))
+            .child(crate::icons::sym("call", 48.0).color(rgb(0xFFFFFF)))
+            .child(
+                text(end_reason(reason))
+                    .key("call-end-reason")
+                    .font(style(20.0, 600.0))
+                    .color(rgb(0xFFFFFF))
+                    .wrap(),
+            )
+            .children(call.notice.as_ref().map(|notice| {
+                text(notice.clone())
+                    .font(style(13.0, 400.0))
+                    .color(color("#FFB3BE"))
+                    .wrap()
+            }))
+            .child(actions);
     }
     if !active && call.ring.is_none() && call.link.text.is_empty() && !call.prejoin_open {
         return history_view(s);
@@ -575,20 +1495,45 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         }
     }
     if active {
-        let label = match call.state.as_ref() {
-            Some(CallState::Connecting) => "Connecting…",
-            Some(CallState::Connected { .. }) => "Connected",
-            Some(CallState::Reconnecting { .. }) => "Reconnecting…",
-            _ => "Call",
-        };
-        body = col().key("call-session").w_full().h_full().min_h(0.0)
+        let label = call.status(Instant::now());
+        body = col()
+            .key("call-session")
+            .w_full()
+            .h_full()
+            .min_h(0.0)
             .fill(color("#1F1F1F"));
-        let mut panels = col().key("call-panel").w(280.0).h_full().min_h(0.0)
-            .padding(16.0).gap(12.0).fill(color("#FFFFFF"))
-            .scroll(ScrollSpec { stick_bottom: false });
-        let mut controls = row().key("call-toolbar").w_full().min_h(72.0).px(16.0).gap(8.0).center_y()
+        let mut panels = col()
+            .key("call-panel")
+            .w(280.0)
+            .h_full()
+            .min_h(0.0)
+            .padding(16.0)
+            .gap(12.0)
+            .fill(color("#FFFFFF"))
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            });
+        let mut controls = row()
+            .key("call-toolbar")
+            .w_full()
+            .min_h(72.0)
+            .px(16.0)
+            .gap(8.0)
+            .center_y()
             .fill(color("#292929"))
-            .child(text(label).font(style(13.0, 600.0)).color(rgb(0xFFFFFF)).grow(1.0).min_w(0.0).truncate());
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(
+                        text(label)
+                            .key("call-status")
+                            .font(style(13.0, 600.0))
+                            .color(rgb(0xFFFFFF))
+                            .truncate(),
+                    )
+                    .child(health_indicator::<A>(call)),
+            );
         controls = controls.child(button::<A>(
             if call.muted { "Unmute" } else { "Mute" },
             "call-mute",
@@ -609,6 +1554,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             s.calls.show_devices = !s.calls.show_devices;
             s.calls.show_people = false;
             s.calls.show_shares = false;
+            s.calls.show_captions = false;
             if s.calls.show_devices {
                 s.actions.call_command(CallCommand::RefreshDevices);
             }
@@ -622,26 +1568,128 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 s.calls.show_shares = !s.calls.show_shares;
                 s.calls.show_people = false;
                 s.calls.show_devices = false;
+                s.calls.show_captions = false;
                 if s.calls.show_shares {
                     s.actions.call_command(CallCommand::RefreshShareSources);
                 }
             }));
         }
-        controls = controls.child(button::<A>("People", "call-people", |s, _| {
-            s.calls.show_people = !s.calls.show_people;
-            s.calls.show_devices = false;
-            s.calls.show_shares = false;
-        })).child(button::<A>("More", "call-more", |s, _| {
-            s.calls.show_reactions = !s.calls.show_reactions;
-        }));
+        controls = controls
+            .child(button::<A>("People", "call-people", |s, _| {
+                s.calls.show_people = !s.calls.show_people;
+                s.calls.show_devices = false;
+                s.calls.show_shares = false;
+                s.calls.show_captions = false;
+            }))
+            .child(button::<A>("More", "call-more", |s, _| {
+                s.calls.show_reactions = !s.calls.show_reactions;
+            }));
         controls = controls.child(button::<A>("Leave", "call-leave", |s, _| {
             s.actions.call_command(CallCommand::Hangup)
         }));
         body = body.child(controls);
+        if call.recording || call.transcribing || call.recording_pending {
+            let label = if call.recording_pending {
+                "Starting recording…"
+            } else if call.recording && call.recording_audio_only {
+                "● Recording audio"
+            } else if call.recording {
+                "● Recording"
+            } else {
+                "Transcribing"
+            };
+            body = body.child(
+                text(label)
+                    .key("call-recording-indicator")
+                    .font(style(13.0, 600.0))
+                    .color(color("#FFB3BE")),
+            );
+        }
+        if call.consent_required {
+            body = body.child(col().key("call-recording-consent").w_full().padding(12.0).gap(8.0)
+                .child(text("This meeting is being recorded. Agree to being recorded to turn on your microphone or camera.")
+                    .font(style(14.0, 400.0)).color(rgb(0xFFFFFF)).wrap())
+                .child(button::<A>("Agree", "call-consent-agree", |s, _| s.actions.call_command(CallCommand::ConsentToRecording))));
+        }
+        if let Some(command) = &call.confirm {
+            let prompt = match command {
+                CallCommand::EndMeeting => "End the meeting for everyone?",
+                CallCommand::RemoveParticipant { .. } => "Remove this person from the meeting?",
+                CallCommand::MuteAll => "Mute everyone?",
+                CallCommand::StopRecording { .. } => "Stop recording?",
+                _ => "Continue?",
+            };
+            body = body.child(
+                row()
+                    .key("call-confirm")
+                    .w_full()
+                    .padding(12.0)
+                    .gap(8.0)
+                    .wrap()
+                    .child(text(prompt).font(style(14.0, 600.0)).color(rgb(0xFFFFFF)))
+                    .child(button::<A>("Confirm", "call-confirm-yes", |s, _| {
+                        if let Some(command) = s.calls.confirm.take()
+                            && s.calls.can_manage()
+                            && !s.calls.lobby
+                        {
+                            s.actions.call_command(command);
+                        }
+                    }))
+                    .child(button::<A>("Cancel", "call-confirm-no", |s, _| {
+                        s.calls.confirm = None;
+                    })),
+            );
+        }
+        let waiting = call.roster.iter().filter(|p| p.in_lobby).count();
+        if waiting > 0 && call.can_manage() && !call.lobby {
+            body = body.child(
+                row()
+                    .key("call-lobby-banner")
+                    .w_full()
+                    .padding(8.0)
+                    .gap(8.0)
+                    .wrap()
+                    .child(
+                        text(if waiting == 1 {
+                            "1 person is waiting in the lobby".into()
+                        } else {
+                            format!("{waiting} people are waiting in the lobby")
+                        })
+                        .color(rgb(0xFFFFFF)),
+                    )
+                    .child(button::<A>("View lobby", "call-open-lobby", |s, _| {
+                        s.calls.show_people = true;
+                        s.calls.show_devices = false;
+                        s.calls.show_shares = false;
+                    }))
+                    .child(button::<A>("Admit all", "lobby-admit-all", |s, _| {
+                        s.actions.call_command(CallCommand::AdmitAll);
+                    })),
+            );
+        }
+        if call.show_health
+            && let Some(health) = &call.health
+        {
+            body = body.child(
+                text(format!(
+                    "Call health · Packet loss {:.1}% · Round trip {:.0} ms · Jitter {:.0} ms",
+                    health.sample.loss_percent,
+                    health.sample.round_trip_ms,
+                    health.sample.jitter_ms
+                ))
+                .key("call-health-details")
+                .font(style(13.0, 400.0))
+                .color(rgb(0xFFFFFF))
+                .wrap(),
+            );
+        }
         if let Some(ring) = &call.ring {
-            let mut incoming = row().w_full().padding(12.0).gap(12.0).center_y()
-                .child(text(format!("Incoming call from {}", ring.caller.display_name))
-                    .font(style(14.0, 600.0)).color(rgb(0xFFFFFF)).grow(1.0));
+            let mut incoming = row().w_full().padding(12.0).gap(12.0).center_y().child(
+                text(format!("Incoming call from {}", ring.caller.display_name))
+                    .font(style(14.0, 600.0))
+                    .color(rgb(0xFFFFFF))
+                    .grow(1.0),
+            );
             if !s.read_only && !call.pending {
                 let id = ring.ring_id;
                 incoming = incoming.child(button::<A>("Decline", "call-decline", move |s, _| {
@@ -669,6 +1717,20 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 move |s, _| s.actions.call_command(CallCommand::SetCaptions(!enabled)),
             ));
         }
+        if call.recording && call.can_manage() {
+            let scope = if call.transcribing {
+                calling::StopScope::RecordingOnly
+            } else {
+                calling::StopScope::Both
+            };
+            features = features.child(button::<A>(
+                "Stop recording",
+                "call-record-stop",
+                move |s, _| {
+                    s.calls.confirm = Some(CallCommand::StopRecording { scope });
+                },
+            ));
+        }
         for reaction in calling::Reaction::ALL {
             let label = reaction.name().to_owned();
             features = features.child(button::<A>(
@@ -681,10 +1743,33 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             ));
         }
         if call.show_reactions {
-            body = body.child(row().w_full().padding(8.0).scroll(ScrollSpec { stick_bottom: false }).child(features));
+            body = body.child(
+                row()
+                    .w_full()
+                    .padding(8.0)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .child(features),
+            );
+            body = body.child(button::<A>(
+                "Captions history",
+                "call-caption-history",
+                |s, _| {
+                    s.calls.show_captions = !s.calls.show_captions;
+                    s.calls.show_people = false;
+                    s.calls.show_devices = false;
+                    s.calls.show_shares = false;
+                },
+            ));
         }
         if let Some(notice) = &call.notice {
-            body = body.child(text(notice.clone()).font(style(13.0, 400.0)).color(rgb(0xFFFFFF)).wrap());
+            body = body.child(
+                text(notice.clone())
+                    .font(style(13.0, 400.0))
+                    .color(rgb(0xFFFFFF))
+                    .wrap(),
+            );
         }
         if let calling::CaptionState::Failed(error) = &call.captions {
             body = body.child(
@@ -701,69 +1786,48 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .wrap(),
             );
         }
-        if let Some((mri, reaction)) = &call.reaction {
-            let name = call
-                .roster
-                .iter()
-                .find(|person| person.mri == *mri)
-                .map(|person| person.display_name.as_str())
-                .unwrap_or(mri);
-            body = body.child(
-                text(format!("Latest reaction: {name}: {}", reaction.name()))
-                    .font(style(13.0, 400.0))
-                    .color(rgb(0xFFFFFF)),
-            );
-        }
         if call.show_devices {
-            let mut devices = col().gap(4.0).child(
-                text("Microphone")
-                    .font(style(13.0, 700.0))
+            panels = panels
+                .child(device_panel::<A>(call, false))
+                .child(effects_panel::<A>(call, false));
+        }
+        if call.show_captions {
+            panels = panels.child(
+                text("Captions")
+                    .font(style(18.0, 600.0))
                     .color(color("#242424")),
             );
-            for entry in call.devices.input_entries() {
-                let choice = entry.choice;
-                devices = devices.child(button::<A>(
-                    &entry.label,
-                    &format!("input-{}", entry.label),
-                    move |s, _| {
-                        s.actions
-                            .call_command(CallCommand::SelectInput(choice.clone()))
-                    },
-                ));
+            if matches!(call.captions, calling::CaptionState::On) {
+                for (tag, name) in calling::SPOKEN_LANGUAGES {
+                    let label = format!(
+                        "{}{}",
+                        if call.caption_language.as_deref() == Some(tag) {
+                            "✓ "
+                        } else {
+                            ""
+                        },
+                        name
+                    );
+                    panels = panels.child(button::<A>(
+                        &label,
+                        &format!("caption-language-{tag}"),
+                        move |s, _| {
+                            s.calls.caption_language = Some(tag.to_owned());
+                            s.actions
+                                .call_command(CallCommand::SetCaptionLanguage(tag.to_owned()));
+                        },
+                    ));
+                }
             }
-            devices = devices.child(
-                text("Speaker")
-                    .font(style(13.0, 700.0))
-                    .color(color("#242424")),
-            );
-            for entry in call.devices.output_entries() {
-                let choice = entry.choice;
-                devices = devices.child(button::<A>(
-                    &entry.label,
-                    &format!("output-{}", entry.label),
-                    move |s, _| {
-                        s.actions
-                            .call_command(CallCommand::SelectOutput(choice.clone()))
-                    },
-                ));
+            for (index, caption) in call.caption_history.iter().enumerate() {
+                panels = panels.child(
+                    text(format!("{}: {}", caption.display_name, caption.text))
+                        .key(format!("caption-{index}-{}-{}", caption.user_id, caption.id))
+                        .font(style(13.0, 400.0))
+                        .color(color("#242424"))
+                        .wrap(),
+                );
             }
-            devices = devices.child(
-                text("Camera")
-                    .font(style(13.0, 700.0))
-                    .color(color("#242424")),
-            );
-            for entry in calling::camera_entries(&call.cameras) {
-                let choice = entry.choice;
-                devices = devices.child(button::<A>(
-                    &entry.label,
-                    &format!("camera-{}", entry.label),
-                    move |s, _| {
-                        s.actions
-                            .call_command(CallCommand::SelectCamera(choice.clone()))
-                    },
-                ));
-            }
-            panels = panels.child(devices);
         }
         if call.show_shares && call.local_share.is_none() {
             let mut shares = col().gap(4.0).child(
@@ -785,60 +1849,316 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             }
             panels = panels.child(shares);
         }
-        let mut stage = col().key("call-stage").grow(1.0).min_w(0.0).h_full().min_h(0.0)
-            .padding(16.0).gap(12.0);
-        let shared = call.surfaces.get(&VideoKey::Screen)
-            .or_else(|| call.surfaces.get(&VideoKey::LocalScreen));
-        if let Some(surface) = shared {
-            stage = stage.child(el().key("call-presentation").w_full().grow(3.0).min_h(0.0)
-                .native_surface(surface, SurfaceFit::Fit));
+        let mut stage = col()
+            .key("call-stage")
+            .grow(1.0)
+            .min_w(0.0)
+            .h_full()
+            .min_h(0.0)
+            .padding(16.0)
+            .gap(12.0);
+        for (index, (id, mri, reaction, at)) in call.reactions.iter().enumerate() {
+            let progress =
+                (Instant::now().saturating_duration_since(*at).as_secs_f32() / 4.0).min(1.0);
+            let name = call
+                .roster
+                .iter()
+                .find(|p| &p.mri == mri)
+                .map_or(mri.as_str(), |p| p.display_name.as_str());
+            stage = stage.child(
+                text(reaction_glyph(reaction))
+                    .key(format!("call-reaction-{id}"))
+                    .label(format!("{name}: {}", reaction.name()))
+                    .font(style(40.0, 400.0))
+                    .color(rgb(0xFFFFFF))
+                    .opacity(if reduced_motion { 1.0 } else { 1.0 - progress })
+                    .pin(
+                        None,
+                        None,
+                        Some(16.0 + (index % 4) as f32 * 52.0),
+                        Some(
+                            16.0 + if reduced_motion {
+                                0.0
+                            } else {
+                                progress * 160.0
+                            },
+                        ),
+                    ),
+            );
         }
-        let people: Vec<_> = call.roster.iter().filter(|person| !person.in_lobby && person.mri != call.own_mri).collect();
-        let mut gallery = col().key("call-gallery").w_full().grow(1.0).min_h(0.0).gap(12.0)
-            .scroll(ScrollSpec { stick_bottom: false });
-        if shared.is_some() {
-            let mut strip = row().w_full().h(120.0).gap(12.0)
-                .scroll(ScrollSpec { stick_bottom: false });
-            for person in &people {
-                let name = if person.display_name.is_empty() { &person.mri } else { &person.display_name };
-                strip = strip.child(participant_tile(name, &format!("call-person-{}", person.mri),
-                    call.surfaces.get(&VideoKey::Person(person.mri.clone())), person.muted).grow(0.0).w(180.0).min_w(180.0).max_w(180.0));
+        if call.show_reactions {
+            let mut layouts = row().gap(8.0);
+            for (label, layout) in [
+                ("Gallery", Layout::Gallery),
+                ("Speaker", Layout::Speaker),
+                ("Content", Layout::Content),
+            ] {
+                if layout == Layout::Content && !call.has_content() {
+                    continue;
+                }
+                layouts = layouts.child(button::<A>(
+                    label,
+                    &format!("layout-{label}"),
+                    move |s, _| {
+                        s.calls.layout = layout;
+                        s.calls.page = 0;
+                        sync_video(s);
+                    },
+                ));
             }
-            if call.camera {
-                strip = strip.child(participant_tile("You", "call-self", call.surfaces.get(&VideoKey::LocalCamera), call.muted).grow(0.0).w(180.0).min_w(180.0).max_w(180.0));
+            stage = stage.child(layouts);
+        }
+        if let Some(person) = call
+            .tile_menu
+            .as_ref()
+            .and_then(|mri| call.roster.iter().find(|p| &p.mri == mri && !p.in_lobby))
+        {
+            let mri = person.mri.clone();
+            let mut menu = col().key("call-tile-menu").gap(4.0).child(button::<A>(
+                if call.pinned.as_ref() == Some(&mri) {
+                    "Unpin"
+                } else {
+                    "Pin for me"
+                },
+                "call-pin",
+                move |s, _| {
+                    s.calls.pinned = if s.calls.pinned.as_ref() == Some(&mri) {
+                        None
+                    } else {
+                        Some(mri.clone())
+                    };
+                    s.calls.tile_menu = None;
+                    sync_video(s);
+                },
+            ));
+            if call.can_manage() {
+                let mri = person.mri.clone();
+                let spotlighted = person.spotlight.is_some();
+                menu = menu.child(button::<A>(
+                    if spotlighted {
+                        "Stop spotlight"
+                    } else {
+                        "Spotlight for everyone"
+                    },
+                    "call-spotlight",
+                    move |s, _| {
+                        s.actions.call_command(if spotlighted {
+                            CallCommand::StopSpotlight { mri: mri.clone() }
+                        } else {
+                            CallCommand::Spotlight { mri: mri.clone() }
+                        });
+                        s.calls.tile_menu = None;
+                    },
+                ));
             }
-            gallery = gallery.grow(0.0).h(120.0).min_h(120.0).max_h(120.0).child(strip);
-        } else {
-            for pair in people.chunks(2) {
-                let mut tiles = row().w_full().grow(1.0).min_h(120.0).gap(12.0);
-                for person in pair {
-                    let name = if person.display_name.is_empty() { &person.mri } else { &person.display_name };
-                    tiles = tiles.child(participant_tile(name, &format!("call-person-{}", person.mri),
-                        call.surfaces.get(&VideoKey::Person(person.mri.clone())), person.muted));
+            stage = stage.child(menu);
+        }
+        let shared = call
+            .surfaces
+            .get(&VideoKey::Screen)
+            .or_else(|| call.surfaces.get(&VideoKey::LocalScreen));
+        if call.has_content() {
+            let presentation = el().key("call-presentation").w_full().grow(3.0).min_h(0.0);
+            stage = stage.child(if let Some(surface) = shared {
+                presentation.native_surface(surface, SurfaceFit::Fit)
+            } else {
+                presentation.child(text("Loading shared content…").color(rgb(0xFFFFFF)))
+            });
+        }
+        let people = call.visible_people();
+        let own = RosterEntry {
+            mri: call.own_mri.clone(),
+            muted: call.muted,
+            hand: call.hand.then_some(calling::RaisedHand {
+                state_id: String::new(),
+                rank: 0,
+            }),
+            sharing: call.local_share.is_some(),
+            ..Default::default()
+        };
+        let mut gallery = col()
+            .key("call-gallery")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .gap(12.0)
+            .on_layout(|s: &mut UiState<A>, [_, _, width, height]| {
+                s.calls.stage_size = (width, height)
+            });
+        let focused = !call.has_content()
+            && (call.layout == Layout::Speaker
+                || call.pinned.is_some()
+                || people.iter().any(|(p, _)| p.spotlight.is_some()));
+        if call.has_content() || focused {
+            let mut remaining = people.as_slice();
+            if focused && let Some(((person, _), others)) = remaining.split_first() {
+                gallery = gallery.child(participant_tile::<A>(
+                    call,
+                    person,
+                    (call.stage_size.0, (call.stage_size.1 - 132.0).max(0.0)),
+                ));
+                remaining = others;
+            }
+            let mut strip = row()
+                .w_full()
+                .h(120.0)
+                .min_h(120.0)
+                .gap(12.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                });
+            for (person, _) in remaining {
+                strip = strip.child(participant_tile::<A>(call, person, (180.0, 120.0)));
+            }
+            if call.camera && call.layout != Layout::Content {
+                strip = strip.child(participant_tile::<A>(call, &own, (180.0, 120.0)));
+            }
+            if !remaining.is_empty() || call.camera && call.layout != Layout::Content {
+                gallery = gallery.child(strip);
+            }
+            if call.has_content() {
+                gallery = gallery.grow(0.0).h(120.0).min_h(120.0).max_h(120.0);
+            }
+        } else if !people.is_empty() {
+            let (columns, width, height) =
+                gallery::gallery_grid(people.len(), call.stage_size, 12.0);
+            for group in people.chunks(columns) {
+                let mut tiles = row().w_full().h(height).gap(12.0).center();
+                for (person, _) in group {
+                    tiles = tiles.child(participant_tile::<A>(call, person, (width, height)));
                 }
                 gallery = gallery.child(tiles);
             }
         }
-        if people.is_empty() && shared.is_none() {
-            gallery = gallery.child(col().w_full().grow(1.0).center().gap(16.0)
-                .child(crate::icons::sym("call", 40.0).color(color("#B8B8E6")))
-                .child(text(if matches!(call.state, Some(CallState::Connecting)) { "Calling…" } else { "Waiting for others to join" })
-                    .font(style(20.0, 600.0)).color(rgb(0xFFFFFF))));
+        if people.is_empty() && !call.has_content() {
+            gallery = gallery.child(
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .center()
+                    .gap(16.0)
+                    .child(crate::icons::sym("call", 40.0).color(color("#B8B8E6")))
+                    .child(
+                        text(
+                            if call.lobby
+                                || matches!(
+                                    call.state,
+                                    Some(CallState::Connecting | CallState::Reconnecting { .. })
+                                )
+                            {
+                                call.status(Instant::now())
+                            } else {
+                                "Waiting for others to join".into()
+                            },
+                        )
+                        .key("call-waiting")
+                        .font(style(20.0, 600.0))
+                        .color(rgb(0xFFFFFF)),
+                    ),
+            );
         }
-        if !people.is_empty() || shared.is_none() || call.camera {
+        if !people.is_empty()
+            || !call.has_content()
+            || call.camera && call.layout != Layout::Content
+        {
             stage = stage.child(gallery);
         }
-        if call.camera && shared.is_none() {
-            stage = stage.child(row().w_full().h(132.0)
-                .child(el().grow(1.0))
-                .child(participant_tile("You", "call-self", call.surfaces.get(&VideoKey::LocalCamera), call.muted).grow(0.0).w(208.0).min_w(208.0).max_w(208.0)));
+        if !call.has_content() && !focused {
+            let pages = gallery::gallery_pages(call.rotation.order().len(), 0);
+            if pages > 1 {
+                let mut pager = row().key("call-gallery-pages").gap(8.0).center();
+                if call.page > 0 {
+                    pager = pager.child(button::<A>("Previous", "gallery-previous", |s, _| {
+                        s.calls.page -= 1;
+                        sync_video(s);
+                    }));
+                }
+                pager =
+                    pager.child(text(format!("{} / {pages}", call.page + 1)).color(rgb(0xFFFFFF)));
+                if call.page + 1 < pages {
+                    pager = pager.child(button::<A>("Next", "gallery-next", |s, _| {
+                        s.calls.page += 1;
+                        sync_video(s);
+                    }));
+                }
+                stage = stage.child(pager);
+            }
+        }
+        if call.camera && !call.has_content() && !focused {
+            stage = stage.child(
+                row()
+                    .w_full()
+                    .h(132.0)
+                    .child(el().grow(1.0))
+                    .child(participant_tile::<A>(call, &own, (208.0, 132.0))),
+            );
         }
         if call.show_people {
-            panels = panels.child(text(format!("People ({})", call.roster.len())).font(style(18.0, 600.0)).color(color("#242424")));
-            let can_manage = call.roster.iter().any(|person| {
-                person.mri == call.own_mri
-                    && (person.organizer || person.role == Some(calling::MeetingRole::Organizer))
-            });
+            panels = panels.child(
+                text(format!("People ({})", call.roster.len()))
+                    .font(style(18.0, 600.0))
+                    .color(color("#242424")),
+            );
+            let can_manage = call.can_manage() && !call.lobby;
+            if can_manage {
+                if waiting > 0 {
+                    panels = panels.child(button::<A>("Admit all", "people-admit-all", |s, _| {
+                        s.actions.call_command(CallCommand::AdmitAll)
+                    }));
+                }
+                panels = panels
+                    .child(button::<A>("Mute all", "people-mute-all", |s, _| {
+                        s.calls.confirm = Some(CallCommand::MuteAll);
+                    }))
+                    .child(button::<A>(
+                        "Lower all hands",
+                        "people-lower-all",
+                        |s, _| s.actions.call_command(CallCommand::LowerAllHands),
+                    ))
+                    .child(button::<A>("Invite people", "people-invite", |s, _| {
+                        s.calls.invite_open = !s.calls.invite_open;
+                        if s.calls.invite_open {
+                            s.chatlist.manage.add = crate::new_chat::Draft::default();
+                        }
+                    }))
+                    .child(button::<A>(
+                        "End meeting for all",
+                        "people-end-meeting",
+                        |s, _| {
+                            s.calls.confirm = Some(CallCommand::EndMeeting);
+                        },
+                    ));
+                if call.invite_open {
+                    let skip = call
+                        .roster
+                        .iter()
+                        .map(|p| p.mri.strip_prefix("8:orgid:").unwrap_or(&p.mri).to_owned())
+                        .collect::<Vec<_>>();
+                    panels = panels.child(crate::new_chat::picker(
+                        s,
+                        &s.chatlist.manage.add,
+                        "call-invite",
+                        invite_draft::<A>,
+                        &skip,
+                    ));
+                    if !s.chatlist.manage.add.chips.is_empty() {
+                        panels = panels.child(button::<A>("Add", "call-invite-send", |s, _| {
+                            let callees = std::mem::take(&mut s.chatlist.manage.add.chips)
+                                .into_iter()
+                                .map(|p| calling::Callee {
+                                    mri: format!("8:orgid:{}", p.user_id),
+                                    display_name: p.name,
+                                })
+                                .collect();
+                            s.actions.call_command(CallCommand::Invite {
+                                callees,
+                                group_thread: None,
+                            });
+                            s.calls.invite_open = false;
+                        }));
+                    }
+                }
+            }
             for person in &call.roster {
                 let name = if person.display_name.is_empty() {
                     &person.mri
@@ -852,7 +2172,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 } else {
                     ""
                 };
-                let mut person_row = row().w_full().gap(8.0).center_y().child(
+                let mut person_row = row().w_full().gap(8.0).wrap().center_y().child(
                     text(format!("{name}{detail}"))
                         .font(style(13.0, 400.0))
                         .color(color("#242424")),
@@ -877,14 +2197,37 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                                     .call_command(CallCommand::Deny { mri: mri.clone() })
                             },
                         ));
-                    } else if !person.muted {
+                    } else {
+                        if !person.muted {
+                            let mri = person.mri.clone();
+                            person_row = person_row.child(button::<A>(
+                                "Mute",
+                                &format!("mute-{mri}"),
+                                move |s, _| {
+                                    s.actions.call_command(CallCommand::MuteParticipant {
+                                        mri: mri.clone(),
+                                    })
+                                },
+                            ));
+                        }
+                        if person.hand.is_some() {
+                            let mri = person.mri.clone();
+                            person_row = person_row.child(button::<A>(
+                                "Lower hand",
+                                &format!("lower-{mri}"),
+                                move |s, _| {
+                                    s.actions
+                                        .call_command(CallCommand::LowerHand { mri: mri.clone() });
+                                },
+                            ));
+                        }
                         let mri = person.mri.clone();
                         person_row = person_row.child(button::<A>(
-                            "Mute",
-                            &format!("mute-{mri}"),
+                            "Remove",
+                            &format!("remove-{mri}"),
                             move |s, _| {
-                                s.actions
-                                    .call_command(CallCommand::MuteParticipant { mri: mri.clone() })
+                                s.calls.confirm =
+                                    Some(CallCommand::RemoveParticipant { mri: mri.clone() });
                             },
                         ));
                     }
@@ -893,18 +2236,15 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             }
         }
         let mut content = row().w_full().grow(1.0).min_h(0.0).child(stage);
-        if call.show_people || call.show_devices || (call.show_shares && call.local_share.is_none()) {
+        if call.show_people
+            || call.show_devices
+            || call.show_captions
+            || (call.show_shares && call.local_share.is_none())
+        {
             content = content.child(panels);
         }
         return body.child(content);
     } else if call.ring.is_none() {
-        if let Some(CallState::Ended { reason }) = &call.state {
-            body = body.child(
-                text(format!("Call ended: {reason:?}"))
-                    .font(style(13.0, 400.0))
-                    .color(color("#616161")),
-            );
-        }
         body = body
             .child(
                 text("Join a meeting")
@@ -912,9 +2252,13 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .color(color("#242424")),
             )
             .child(
-                text("Your microphone starts muted")
-                    .font(style(13.0, 400.0))
-                    .color(color("#616161")),
+                text(if call.prejoin_mic {
+                    "Your microphone is on"
+                } else {
+                    "Your microphone starts muted"
+                })
+                .font(style(13.0, 400.0))
+                .color(color("#616161")),
             )
             .child(
                 text_input(&call.link, style(14.0, 400.0))
@@ -926,20 +2270,62 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                     .on_edit(|s: &mut UiState<A>| &mut s.calls.link),
             );
         if !s.read_only {
-            body = body.child(button::<A>(
-                if call.video {
-                    "Camera on"
-                } else {
-                    "Camera off"
-                },
-                "prejoin-camera",
-                |s, _| s.calls.video = !s.calls.video,
-            ));
+            if call.video {
+                let preview = el()
+                    .key("prejoin-preview")
+                    .w_full()
+                    .h(220.0)
+                    .fill(color("#292929"));
+                body = body.child(
+                    if let Some(surface) = call.surfaces.get(&VideoKey::LocalCamera) {
+                        preview.native_surface(surface, SurfaceFit::Fit)
+                    } else {
+                        preview.child(text("Starting camera…").color(rgb(0xFFFFFF)))
+                    },
+                );
+            }
+            body = body
+                .child(button::<A>(
+                    if call.video {
+                        "Camera on"
+                    } else {
+                        "Camera off"
+                    },
+                    "prejoin-camera",
+                    |s, _| {
+                        s.calls.video = !s.calls.video;
+                        if !s.calls.video {
+                            s.calls.stop_preview();
+                        }
+                    },
+                ))
+                .child(button::<A>(
+                    if call.prejoin_mic {
+                        "Microphone on"
+                    } else {
+                        "Microphone off"
+                    },
+                    "prejoin-mic",
+                    |s, _| {
+                        s.calls.prejoin_mic = !s.calls.prejoin_mic;
+                    },
+                ))
+                .child(button::<A>(
+                    "Device settings and effects",
+                    "prejoin-devices",
+                    |s, _| {
+                        s.calls.show_devices = !s.calls.show_devices;
+                    },
+                ));
             if !call.pending {
                 body = body.child(button::<A>("Join now", "join-call", |s, _| {
                     if !s.calls.link.text.trim().is_empty() {
                         s.calls.pending = true;
                         s.calls.notice = None;
+                        s.calls.stop_preview();
+                        for command in s.calls.prejoin_commands() {
+                            s.actions.call_command(command);
+                        }
                         s.actions.join_call(&s.calls.link.text, s.calls.video);
                     }
                 }));
@@ -949,6 +2335,11 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .font(style(13.0, 400.0))
                         .color(color("#616161")),
                 );
+            }
+            if call.show_devices {
+                body = body
+                    .child(device_panel::<A>(call, true))
+                    .child(effects_panel::<A>(call, true));
             }
         }
     }
@@ -992,11 +2383,449 @@ mod tests {
         fn call_command(&self, command: CallCommand) {
             self.actions.borrow_mut().push(format!("{command:?}"));
         }
+        fn accept_call(&self, ring_id: u64, video: bool) {
+            self.actions
+                .borrow_mut()
+                .push(format!("accept {ring_id} {video}"));
+        }
+        fn decline_call(&self, ring_id: u64) {
+            self.actions.borrow_mut().push(format!("decline {ring_id}"));
+        }
+    }
+
+    fn crowd(count: usize) -> Vec<RosterEntry> {
+        (0..count)
+            .map(|index| RosterEntry {
+                mri: format!("p{index}"),
+                display_name: format!("Person {index}"),
+                has_video: true,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn connected(count: usize) -> UiState<Fake> {
+        let mut state = UiState::new(Fake::default());
+        state.calls.apply(CallUpdate::State(CallState::Connecting));
+        state.calls.apply(CallUpdate::State(CallState::Connected {
+            since: Instant::now(),
+        }));
+        state
+            .calls
+            .apply(CallUpdate::OwnIdentity { mri: "me".into() });
+        state.calls.apply(CallUpdate::Roster(crowd(count)));
+        state
+    }
+
+    fn runtime(state: UiState<Fake>) -> Runtime<UiState<Fake>> {
+        let mut rt = Runtime::new(
+            state,
+            crate::call_window::view::<Fake>,
+            (1180.0, 760.0),
+            Env::default(),
+        );
+        rt.frame(1.0);
+        rt.frame(2.0);
+        rt.frame(3.0);
+        rt
+    }
+
+    fn click(rt: &mut Runtime<UiState<Fake>>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("missing {key}"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(4.0);
+        rt.frame(5.0);
+    }
+
+    #[test]
+    fn speakers_hands_sharing_devices_and_health_reach_the_view() {
+        let mut state = connected(1);
+        state.calls.roster[0].hand = Some(calling::RaisedHand {
+            state_id: "hand".into(),
+            rank: 1,
+        });
+        state.calls.roster[0].sharing = true;
+        state.calls.apply(CallUpdate::Speakers(vec!["p0".into()]));
+        state.calls.apply(CallUpdate::Health(calling::CallHealth {
+            level: calling::NetworkLevel::Poor,
+            cpu_limited: false,
+            sample: calling::HealthSample::default(),
+            transport: calling::TransportDetails::default(),
+            path: calling::MediaPath::Direct,
+        }));
+        let mut rt = runtime(state);
+        for key in [
+            "call-person-p0-speaking",
+            "call-person-p0-hand",
+            "call-person-p0-sharing",
+            "call-health",
+        ] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        click(&mut rt, "call-health");
+        assert!(rt.find("call-health-details").is_some());
+        click(&mut rt, "call-devices");
+        rt.state.calls.apply(CallUpdate::Selected {
+            input: calling::DeviceChoice::Device("mic".into()),
+            output: calling::DeviceChoice::SystemDefault,
+        });
+        assert_eq!(
+            rt.state.calls.selected_input,
+            calling::DeviceChoice::Device("mic".into())
+        );
+        click(&mut rt, "input-Default device");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("SelectInput(SystemDefault)")
+        );
+        assert_eq!(
+            rt.state.calls.selected_input,
+            calling::DeviceChoice::Device("mic".into()),
+            "wait for the engine's Selected acknowledgement"
+        );
+        rt.state
+            .calls
+            .apply(CallUpdate::State(CallState::Connecting));
+        assert!(rt.state.calls.speaking.is_empty() && rt.state.calls.health.is_none());
+    }
+
+    #[test]
+    fn video_wants_follow_visible_page_focus_and_content() {
+        let mut state = connected(12);
+        let call = &mut state.calls;
+        let wants = call.wants();
+        assert_eq!(wants.len(), 9);
+        assert!(
+            wants
+                .iter()
+                .all(|want| want.detail == calling::TileDetail::Small)
+        );
+        call.page = 1;
+        let wants = call.wants();
+        assert_eq!(
+            wants
+                .iter()
+                .map(|want| want.mri.as_str())
+                .collect::<Vec<_>>(),
+            ["p9", "p10", "p11"]
+        );
+        assert!(
+            wants
+                .iter()
+                .all(|want| want.detail == calling::TileDetail::Stage)
+        );
+        call.pinned = Some("p11".into());
+        assert_eq!(
+            call.wants()[0],
+            calling::VideoWant {
+                mri: "p11".into(),
+                detail: calling::TileDetail::Stage
+            }
+        );
+        assert!(
+            call.wants()[1..]
+                .iter()
+                .all(|want| want.detail == calling::TileDetail::Small)
+        );
+        call.screen_share = Some("p0".into());
+        assert!(
+            call.wants()
+                .iter()
+                .all(|want| want.detail == calling::TileDetail::Small)
+        );
+        call.layout = Layout::Content;
+        assert!(call.wants().is_empty());
+        call.screen_share = None;
+        call.pinned = None;
+        call.page = 0;
+        call.apply(CallUpdate::Roster(crowd(2)));
+        assert!(
+            call.wants()
+                .iter()
+                .all(|want| want.detail == calling::TileDetail::Stage)
+        );
+    }
+
+    #[test]
+    fn subscriptions_are_sent_once_until_the_visible_layout_changes() {
+        let mut state = connected(12);
+        sync_video(&mut state);
+        sync_video(&mut state);
+        assert_eq!(state.actions.actions.borrow().len(), 1);
+        state.calls.page = 1;
+        sync_video(&mut state);
+        assert_eq!(state.actions.actions.borrow().len(), 2);
+    }
+
+    #[test]
+    fn gallery_pages_pin_menu_and_compact_plates_are_interactive() {
+        let mut rt = runtime(connected(12));
+        assert!(rt.find("call-person-p0").is_some());
+        assert!(rt.find("call-person-p9").is_none());
+        let (tile, _) = rt.presented("call-person-p0").unwrap();
+        let (plate, _) = rt.presented("call-person-p0-name").unwrap();
+        assert!(tile[3] < 200.0);
+        assert!(plate[2] <= tile[2] * 0.6 + 0.5);
+        click(&mut rt, "gallery-next");
+        assert!(rt.find("call-person-p0").is_none());
+        assert!(rt.find("call-person-p9").is_some());
+        click(&mut rt, "call-person-p11-menu");
+        click(&mut rt, "call-pin");
+        assert_eq!(rt.state.calls.pinned.as_deref(), Some("p11"));
+        assert!(rt.find("call-person-p11-pinned").is_some());
+        rt.state.calls.apply(CallUpdate::Roster(crowd(2)));
+        assert!(rt.state.calls.pinned.is_none());
+        assert_eq!(rt.state.calls.page, 0);
+    }
+
+    #[test]
+    fn prejoin_choices_prepare_the_call_without_turning_on_capture_in_headless_tests() {
+        let mut state = UiState::new(Fake::default());
+        state.calls.prejoin_open = true;
+        state.calls.link = TextEdit::new("https://teams.microsoft.com/meet/1234");
+        let mut rt = runtime(state);
+        click(&mut rt, "prejoin-mic");
+        click(&mut rt, "prejoin-devices");
+        click(&mut rt, "input-Default device");
+        assert!(rt.state.actions.actions.borrow().is_empty());
+        assert!(rt.state.calls.preview.is_none());
+        // Inspect effects without scrolling the long settings list in this command test.
+        rt.state.calls.background_blur = true;
+        rt.state.calls.effects.adjust_brightness = true;
+        click(&mut rt, "join-call");
+        let actions = rt.state.actions.actions.borrow();
+        assert!(actions.iter().any(|action| action == "SetBackground(Blur)"));
+        assert!(actions.iter().any(|action| action == "Mute(Unmute)"));
+        assert_eq!(
+            actions.last().map(String::as_str),
+            Some("join https://teams.microsoft.com/meet/1234 false")
+        );
+    }
+
+    #[test]
+    fn organizer_controls_require_the_own_role_and_confirm_destructive_actions() {
+        let mut state = connected(1);
+        state.calls.roster.push(RosterEntry {
+            mri: "me".into(),
+            organizer: true,
+            ..Default::default()
+        });
+        state.calls.roster.push(RosterEntry {
+            mri: "guest".into(),
+            in_lobby: true,
+            ..Default::default()
+        });
+        let mut rt = runtime(state);
+        assert!(rt.find("call-lobby-banner").is_some());
+        click(&mut rt, "lobby-admit-all");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("AdmitAll")
+        );
+        click(&mut rt, "call-people");
+        click(&mut rt, "people-end-meeting");
+        assert!(
+            !rt.state
+                .actions
+                .actions
+                .borrow()
+                .iter()
+                .any(|action| action == "EndMeeting")
+        );
+        click(&mut rt, "call-confirm-no");
+        click(&mut rt, "people-end-meeting");
+        click(&mut rt, "call-confirm-yes");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("EndMeeting")
+        );
+        let mut attendee = runtime(connected(1));
+        click(&mut attendee, "call-people");
+        assert!(attendee.find("people-end-meeting").is_none());
+    }
+
+    #[test]
+    fn captions_merge_revisions_and_recording_consent_is_explicit() {
+        let mut state = connected(1);
+        state
+            .calls
+            .apply(CallUpdate::Captions(calling::CaptionState::On));
+        let caption = |text: &str, is_final| calling::CaptionEntry {
+            id: "phrase".into(),
+            user_id: "p0".into(),
+            display_name: "Ada".into(),
+            text: text.into(),
+            is_final,
+        };
+        state
+            .calls
+            .apply(CallUpdate::Caption(caption("Hel", false)));
+        state
+            .calls
+            .apply(CallUpdate::Caption(caption("Hello", true)));
+        assert_eq!(state.calls.caption_history.len(), 1);
+        assert_eq!(state.calls.caption_history[0].text, "Hello");
+        state.calls.apply(CallUpdate::Recording(true));
+        state.calls.apply(CallUpdate::ConsentRequired(true));
+        let mut rt = runtime(state);
+        assert!(rt.find("call-recording-indicator").is_some());
+        assert!(rt.state.actions.actions.borrow().is_empty());
+        click(&mut rt, "call-consent-agree");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("ConsentToRecording")
+        );
+        assert!(
+            rt.state.calls.consent_required,
+            "wait for the engine acknowledgement"
+        );
+        rt.update(|s, _| s.calls.show_captions = true);
+        rt.frame(6.0);
+        click(&mut rt, "caption-language-en-US");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("SetCaptionLanguage(\"en-US\")")
+        );
+        rt.state.calls.apply(CallUpdate::ConsentRequired(false));
+        rt.state
+            .calls
+            .apply(CallUpdate::Captions(calling::CaptionState::Off));
+        assert!(rt.state.calls.caption.is_none());
+        rt.state
+            .calls
+            .apply(CallUpdate::State(CallState::Connecting));
+        assert!(rt.state.calls.caption_history.is_empty() && !rt.state.calls.recording);
+    }
+
+    #[test]
+    fn stopping_recording_requires_organizer_confirmation() {
+        let mut state = connected(1);
+        state.calls.roster.push(RosterEntry {
+            mri: "me".into(),
+            organizer: true,
+            ..Default::default()
+        });
+        state.calls.apply(CallUpdate::Recording(true));
+        state.calls.apply(CallUpdate::Transcribing(true));
+        let mut rt = runtime(state);
+        click(&mut rt, "call-more");
+        click(&mut rt, "call-record-stop");
+        assert!(rt.state.actions.actions.borrow().is_empty());
+        click(&mut rt, "call-confirm-yes");
+        assert_eq!(
+            rt.state.actions.actions.borrow().last().map(String::as_str),
+            Some("StopRecording { scope: RecordingOnly }")
+        );
+    }
+
+    #[test]
+    fn shortcuts_dispatch_only_when_available_and_reactions_expire() {
+        let mut state = connected(1);
+        for action in [
+            Shortcut::Camera,
+            Shortcut::Hand,
+            Shortcut::Share,
+            Shortcut::Hangup,
+        ] {
+            assert!(shortcut(&mut state, action));
+        }
+        assert_eq!(
+            state.actions.actions.borrow().as_slice(),
+            [
+                "SetCamera(true)",
+                "SetHand(true)",
+                "RefreshShareSources",
+                "Hangup"
+            ]
+        );
+        state.read_only = true;
+        assert!(!shortcut(&mut state, Shortcut::Camera));
+        state.read_only = false;
+        state.calls.apply(CallUpdate::Reaction {
+            mri: "p0".into(),
+            reaction: calling::Reaction::Heart,
+        });
+        assert_eq!(state.calls.reactions.len(), 1);
+        state.calls.reactions[0].3 = Instant::now() - Duration::from_secs(5);
+        poll(&mut state, 0.0, &mut Tx::default());
+        assert!(state.calls.reactions.is_empty());
+        state.calls.state = None;
+        assert!(!shortcut(&mut state, Shortcut::Camera));
+        state.calls.apply_ring(EngineEvent::Incoming(IncomingRing {
+            ring_id: 7,
+            caller: calling::Caller {
+                mri: "peer".into(),
+                display_name: "Peer".into(),
+            },
+            thread_id: None,
+            video: true,
+            is_group: false,
+            subject: None,
+        }));
+        assert!(shortcut(&mut state, Shortcut::Accept(false)));
+        assert!(!shortcut(&mut state, Shortcut::Accept(true)));
+        assert_eq!(
+            state.actions.actions.borrow().last().map(String::as_str),
+            Some("accept 7 false")
+        );
+    }
+
+    #[test]
+    fn lobby_progress_and_reconnecting_keep_the_original_call_timer() {
+        let since = Instant::now();
+        let mut call = CallView::default();
+        call.apply(CallUpdate::State(CallState::Connecting));
+        call.apply(CallUpdate::Progress(calling::Progress::Ringing));
+        assert_eq!(call.status(since), "Ringing");
+        call.apply(CallUpdate::Lobby(true));
+        assert_eq!(call.status(since), "Waiting in the lobby...");
+        call.apply(CallUpdate::Lobby(false));
+        call.apply(CallUpdate::State(CallState::Connected { since }));
+        assert_eq!(call.status(since + Duration::from_secs(61)), "01:01");
+        call.apply(CallUpdate::State(CallState::Reconnecting { since }));
+        assert_eq!(call.status(since), "Reconnecting...");
+        call.apply(CallUpdate::State(CallState::Connected { since }));
+        assert_eq!(call.status(since + Duration::from_secs(3725)), "1:02:05");
+    }
+
+    #[test]
+    fn end_screen_rejoins_once_and_closes_without_hanging_up() {
+        let mut state = UiState::new(Fake::default());
+        state.calls.apply(CallUpdate::State(CallState::Ended {
+            reason: calling::EndReason::Dropped,
+        }));
+        let retries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = retries.clone();
+        state.calls.retry = Some(Arc::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let mut rt = Runtime::new(
+            state,
+            crate::call_window::view::<Fake>,
+            (1180.0, 760.0),
+            Env::default(),
+        );
+        rt.frame(1.0);
+        assert!(rt.find("call-end-reason").is_some());
+        assert!(rt.find("meeting-link").is_none());
+        for key in ["call-end-rejoin", "call-end-rejoin", "call-end-close"] {
+            let (x, y) = rt.find(key).expect("end screen action");
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(2.0);
+        }
+        assert_eq!(retries.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(rt.state.calls.state.is_none());
+        assert!(rt.state.actions.actions.borrow().is_empty());
     }
 
     #[test]
     fn updates_track_controls_and_reset_for_next_call() {
-        let mut view = CallView { pending: true, ..Default::default() };
+        let mut view = CallView {
+            pending: true,
+            ..Default::default()
+        };
         view.apply(CallUpdate::State(CallState::Connecting));
         assert!(!view.pending);
         view.apply(CallUpdate::Muted(false));
@@ -1013,7 +2842,8 @@ mod tests {
         let mut view = CallView::default();
         let peer = VideoKey::Person("8:orgid:peer".into());
         view.surfaces.insert(peer.clone(), NativeSurface::default());
-        view.surfaces.insert(VideoKey::LocalCamera, NativeSurface::default());
+        view.surfaces
+            .insert(VideoKey::LocalCamera, NativeSurface::default());
         view.apply(CallUpdate::VideoStopped(peer.clone()));
         assert!(!view.surfaces.contains_key(&peer));
         assert!(view.surfaces.contains_key(&VideoKey::LocalCamera));
@@ -1095,8 +2925,14 @@ mod tests {
         runtime.pointer_up(x, y);
         runtime.frame(1.0);
         assert_eq!(
-            runtime.state.actions.actions.borrow().as_slice(),
-            ["join https://teams.microsoft.com/meet/1234 false"]
+            runtime
+                .state
+                .actions
+                .actions
+                .borrow()
+                .last()
+                .map(String::as_str),
+            Some("join https://teams.microsoft.com/meet/1234 false")
         );
         runtime.update(|state, _| state.calls.apply(CallUpdate::State(CallState::Connecting)));
         runtime.frame(1.0);

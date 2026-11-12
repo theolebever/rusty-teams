@@ -70,7 +70,7 @@ enum Action {
     Compose,
     Find,
     JumpNewest,
-    ToggleMute,
+    Call(crate::calls::Shortcut),
 }
 
 struct Shortcut {
@@ -106,7 +106,14 @@ const SHORTCUTS: &[Shortcut] = &[
     sc(Group::Navigation, "Go to compose box", "mod+r", Action::Compose),
     sc(Group::Messages, "Find in chat", "mod+f", Action::Find),
     sc(Group::Messages, "Jump to newest message", "mod+j", Action::JumpNewest),
-    sc(Group::Calls, "Mute or unmute", "mod+shift+m", Action::ToggleMute),
+    sc(Group::Calls, "Mute or unmute", "mod+shift+m", Action::Call(crate::calls::Shortcut::Mute)),
+    sc(Group::Calls, "Turn camera on or off", "mod+shift+o", Action::Call(crate::calls::Shortcut::Camera)),
+    sc(Group::Calls, "Hang up or leave", "mod+shift+h", Action::Call(crate::calls::Shortcut::Hangup)),
+    sc(Group::Calls, "Raise or lower hand", "mod+shift+k", Action::Call(crate::calls::Shortcut::Hand)),
+    sc(Group::Calls, "Share or stop sharing", "mod+shift+e", Action::Call(crate::calls::Shortcut::Share)),
+    sc(Group::Calls, "Accept video call", "mod+shift+a", Action::Call(crate::calls::Shortcut::Accept(true))),
+    sc(Group::Calls, "Accept audio call", "mod+shift+s", Action::Call(crate::calls::Shortcut::Accept(false))),
+    sc(Group::Calls, "Decline call", "mod+shift+d", Action::Call(crate::calls::Shortcut::Decline)),
 ];
 
 /// "mod+shift+4" as "Ctrl+Shift+4".
@@ -175,12 +182,7 @@ fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) ->
             crate::find::open(s, tx);
         }
         Action::JumpNewest => tx.scroll_to_bottom("messages"),
-        Action::ToggleMute => {
-            if !s.calls.state.as_ref().is_some_and(calling::CallState::is_active) {
-                return false;
-            }
-            s.actions.call_command(calling::CallCommand::Mute(calling::MuteCommand::Toggle));
-        }
+        Action::Call(action) => return crate::calls::shortcut(s, action),
     }
     true
 }

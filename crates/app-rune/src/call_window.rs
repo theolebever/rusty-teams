@@ -20,13 +20,43 @@ impl CallWindow {
         self.app.open();
     }
 
+    pub fn shortcut(&self, action: crate::calls::Shortcut) {
+        if action == crate::calls::Shortcut::Share {
+            self.app.open();
+        }
+        self.app.update(move |state, _| {
+            crate::calls::shortcut(state, action);
+        });
+    }
+
     pub fn forward(&self, update: &Update) {
         if matches!(
             update,
-            Update::Call(_) | Update::Ring(_) | Update::Appearance(_)
+            Update::Call(_)
+                | Update::Ring(_)
+                | Update::Appearance(_)
+                | Update::People { .. }
+                | Update::Me { .. }
+                | Update::Details(_)
         ) {
             let update = update.clone();
-            self.app.update(move |state, _| state.apply(update));
+            if matches!(
+                &update,
+                Update::Call(calling::CallUpdate::State(CallState::Connecting))
+                    | Update::Ring(calling::EngineEvent::Incoming(_))
+            ) {
+                self.app.open();
+            }
+            self.app.update(move |state, _| {
+                let ended = matches!(
+                    &update,
+                    Update::Call(calling::CallUpdate::State(CallState::Ended { .. }))
+                );
+                state.apply(update);
+                if ended {
+                    state.calls.retry = state.actions.retry_call();
+                }
+            });
         }
     }
 
@@ -39,6 +69,14 @@ impl CallWindow {
         let wanted = needs_window(call);
         if wanted != self.shown {
             if wanted {
+                let camera = call.selected_camera.clone();
+                let blur = call.background_blur;
+                let effects = call.effects;
+                self.app.update(move |state, _| {
+                    state.calls.selected_camera = camera;
+                    state.calls.background_blur = blur;
+                    state.calls.effects = effects;
+                });
                 self.app.open();
             } else {
                 self.app.hide();
@@ -49,12 +87,15 @@ impl CallWindow {
 }
 
 fn needs_window(call: &CallView) -> bool {
-    call.state.as_ref().is_some_and(CallState::is_active) || call.ring.is_some()
+    call.state
+        .as_ref()
+        .is_some_and(|state| !matches!(state, CallState::Idle))
+        || call.ring.is_some()
 }
 
 pub fn view<A: Actions + 'static>(state: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
     crate::theme::apply(cx, &state.appearance);
-    crate::calls::view(state)
+    crate::calls::view_with_motion(state, cx.is_reduced_motion())
 }
 
 pub fn closed<A: Actions>(state: &mut UiState<A>, _: &mut Tx) {
@@ -63,6 +104,9 @@ pub fn closed<A: Actions>(state: &mut UiState<A>, _: &mut Tx) {
     }
     if let Some(ring) = &state.calls.ring {
         state.actions.decline_call(ring.ring_id);
+    }
+    if matches!(state.calls.state, Some(CallState::Ended { .. })) {
+        state.calls.state = None;
     }
 }
 
@@ -252,7 +296,7 @@ mod tests {
         call.apply(CallUpdate::State(CallState::Ended {
             reason: EndReason::LocalHangup,
         }));
-        assert!(!needs_window(&call));
+        assert!(needs_window(&call));
     }
 
     #[test]
@@ -267,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn window_lives_from_dial_until_hangup() {
+    fn window_lives_from_dial_until_end_screen_is_closed() {
         let mut call = CallView::default();
         assert!(!needs_window(&call));
         call.apply(CallUpdate::State(CallState::Connecting));
@@ -275,6 +319,8 @@ mod tests {
         call.apply(CallUpdate::State(CallState::Ended {
             reason: EndReason::LocalHangup,
         }));
+        assert!(needs_window(&call));
+        call.state = None;
         assert!(!needs_window(&call));
     }
 
