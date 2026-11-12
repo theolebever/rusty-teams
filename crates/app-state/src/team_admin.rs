@@ -1,4 +1,3 @@
-use gpui_kit::*;
 use store::TeamRights;
 use teams_core::{ChannelPrivacy, MAX_CHANNEL_NAME_LENGTH};
 

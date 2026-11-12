@@ -1,5 +1,4 @@
 use calling::{CallCommand, Callee, MeetingOptions, MeetingRole, Modality};
-use gpui_kit::*;
 
 use super::actions::NOT_CONNECTED_NOTICE;
 use super::features::TransferCandidate;

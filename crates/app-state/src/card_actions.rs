@@ -1,4 +1,3 @@
-use gpui_kit::*;
 use serde_json::Value;
 use teams_core::{
     AdaptiveCard, CardAction, CardActionOutcome, CardInput, ChatApp, TaskDialog, TaskDialogKind,

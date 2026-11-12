@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui_kit::*;
 use serde_json::Value;
 use teams_core::{
     Language, LanguageSettings, Translation, TranslationBehavior, TranslationStatus,

@@ -63,7 +63,7 @@ pub fn open_profile(user_id: &str, position: Point<Pixels>, cx: &mut App) {
     };
     let (app, user_id) = (handle.0.clone(), user_id.to_owned());
     app.update(cx, |state, cx| {
-        state.open_profile_card(&user_id, position, cx)
+        state.open_profile_card(&user_id, (position.x.into(), position.y.into()), cx)
     });
 }
 

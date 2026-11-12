@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui_kit::*;
 use teams_core::PersonProfile;
 
 use crate::Host;
@@ -28,13 +27,14 @@ impl ProfileEntry {
 
 pub struct ProfileRequest {
     pub user_id: String,
-    pub anchor: Point<Pixels>,
+    /// Window position `(x, y)` in logical pixels.
+    pub anchor: (f32, f32),
 }
 
 pub type ProfileCache = HashMap<String, ProfileEntry>;
 
 impl AppState {
-    pub fn open_profile_card(&mut self, user_id: &str, anchor: Point<Pixels>, cx: &mut dyn Host) {
+    pub fn open_profile_card(&mut self, user_id: &str, anchor: (f32, f32), cx: &mut dyn Host) {
         self.profile_request = Some(ProfileRequest {
             user_id: user_id.to_owned(),
             anchor,

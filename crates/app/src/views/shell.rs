@@ -755,12 +755,12 @@ impl AppShell {
         self.close_image_viewer(window, cx);
         if let Some(card) = &self.profile_card {
             card.update(cx, |card, cx| {
-                card.move_to(request.user_id, request.anchor, cx)
+                card.move_to(request.user_id, anchor_point(request.anchor), cx)
             });
             return;
         }
         let app = self.state.clone();
-        let card = cx.new(|cx| ProfileCard::new(app, request.user_id, request.anchor, window, cx));
+        let card = cx.new(|cx| ProfileCard::new(app, request.user_id, anchor_point(request.anchor), window, cx));
         cx.subscribe_in(
             &card,
             window,
@@ -1267,4 +1267,8 @@ mod opening_link_tests {
         assert_eq!(opening_link_text("mailto:"), "Opening mailto:...");
         assert_eq!(opening_link_text(""), "Opening link...");
     }
+}
+
+fn anchor_point((x, y): (f32, f32)) -> Point<Pixels> {
+    point(px(x), px(y))
 }

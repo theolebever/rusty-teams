@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use chatsvc::TypingEvent;
 use chrono::{DateTime, Utc};
-use gpui_kit::*;
+use gpui_kit::{Entity, EventEmitter, Global};
 use store::{ChatRecord, Sidebar, Store};
 use teams_core::{
     ChatApp, ChatSection, ChatSectionSettings, CoreEvent, ImageRef, PinnedMessage, PresenceStatus,
