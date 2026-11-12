@@ -137,6 +137,8 @@ pub enum Update {
     ChatCreated(String),
     Audio { url: String, result: Result<Vec<u8>, String> },
     CallHistory(Result<Vec<chatsvc::CallLogEntry>, String>),
+    /// Local and account settings for the settings panes, notifications and tray.
+    Preferences(Box<crate::settings::Preferences>),
     AgentSettings(agents::AgentSettings),
     AgentResult(String),
     Details(std::collections::HashMap<String, ChatDetails>),
@@ -258,6 +260,10 @@ pub trait Actions {
     fn forward_message(&self, _source_id: &str, _target_id: &str, _message_id: &str, _comment: &str) {}
     fn mark_unread_from(&self, _conversation_id: &str, _message_id: &str) {}
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
+    /// Saves one settings edit where GPUI keeps it; a failure republishes `Update::Preferences`.
+    fn save_setting(&self, _change: crate::settings::Change) {}
+    /// Lists audio devices and cameras, answered with `Update::Call(Devices | Cameras)`.
+    fn load_devices(&self) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}
     fn load_calendar_range(&self, start: chrono::NaiveDate, _end: chrono::NaiveDate) { self.load_calendar(start); }
     fn load_agenda(&self) {}

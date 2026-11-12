@@ -40,6 +40,8 @@ mod reactions;
 mod screens;
 mod search;
 mod settings;
+mod settings_backend;
+mod sound;
 mod status_menu;
 mod teams;
 mod team_menu;
@@ -76,6 +78,8 @@ fn init() -> UiState<Bridge> {
         }
     });
     let mut state = UiState::new(bridge);
+    // The stored preferences are queued already; startup reads them (tray, close to tray).
+    for update in state.actions.poll() { state.apply(update); }
     state.apply(Update::Status("Connecting…".into()));
     state
 }
@@ -196,6 +200,9 @@ fn main() {
         return;
     }
     let mut state = init();
+    let prefs = &state.settings.prefs;
+    let hidden = app_backend::autostart::StartupSettings { auto_start: prefs.auto_start, open_in_background: prefs.open_in_background }
+        .starts_hidden(ARGUMENTS.get().is_some_and(|arguments| arguments.autostart));
     let call_actions = state.actions.call_window_actions();
     let mut app = App::new(AppSpec {
         setup: Some(setup),
@@ -214,7 +221,10 @@ fn main() {
             state.apply(update);
         }
     })
-    .on_close(|state, _| view_composer::persist_draft(state))
+    .on_close(|state, tx| {
+        view_composer::persist_draft(state);
+        if !state.settings.prefs.notify.close_to_tray { tx.quit(); }
+    })
     .on_quit(|state, _| {
         state.actions.shutdown();
         app_backend::presence_link::unregister_on_exit(std::time::Duration::from_millis(800));
@@ -236,6 +246,7 @@ fn main() {
         .options(WindowOptions { min_size: Some((560.0, 420.0)), ..Default::default() }));
     state.call_window = Some(call_window::CallWindow::new(call_handle));
     let app = app.init(move || state);
+    let app = if hidden { app.windowless() } else { app };
     let handle = app.handle();
     let icon = ::image::load_from_memory(app_backend::appearance::AppIcon::MicrosoftTeams.png())
         .expect("embedded application icon").into_rgba8();

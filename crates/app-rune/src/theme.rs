@@ -1,4 +1,4 @@
-//! Dark and high-contrast theme. The appearance setting plus the OS dark mode resolve to one
+//! Colour scheme and shade. The appearance setting (scheme, theme) plus the OS dark mode resolve to one
 //! shade of the shared palette (`app_backend::schemes`), which the light-hex helper in
 //! `settings::color` reads. Rune's own widgets (text fields, placeholders, carets) take their
 //! ink from `Cx::foreground`, so it is set from the same palette.
@@ -13,7 +13,7 @@ pub fn apply<S>(cx: &mut Cx<S>, settings: &AppearanceSettings) {
         dark: cx.system_dark(),
         high_contrast: app_backend::appearance::system_high_contrast(),
     };
-    schemes::set_thread_scheme(Some(schemes::TEAMS.id));
+    schemes::set_thread_scheme(Some(settings.color_scheme.id));
     schemes::set_thread_shade(Some(settings.theme.shade(system)));
     cx.foreground(crate::settings::color("#242424"));
     cx.caption_color(crate::settings::color("#242424"));
@@ -60,8 +60,11 @@ mod tests {
     }
 
     #[test]
-    fn rune_uses_the_official_teams_palette() {
-        let _ = rt(false);
+    fn rune_uses_the_chosen_color_scheme() {
+        let mut rt = rt(false);
+        assert_eq!(schemes::active_scheme().id, schemes::default_scheme().id);
+        rt.update(|s, _| s.apply(Update::Appearance(AppearanceSettings { color_scheme: &schemes::TEAMS, ..Default::default() })));
+        rt.frame(1.0 / 60.0);
         assert_eq!(schemes::active_scheme().id, "teams");
         assert_eq!(schemes::active_palette().accent, 0x5b5fc7);
     }

@@ -154,7 +154,7 @@ impl NotificationCenter {
             main_window: window.window_handle(),
             main_native: platform::native_handle(window),
             settings,
-            startup: StartupSettings::load(&app.read(cx).store, !app.read(cx).mode.demo),
+            startup: StartupSettings::load(&app.read(cx).store, crate::APP_NAME, !app.read(cx).mode.demo),
             stack: ToastStack::default(),
             tracker: IncomingTracker::new(Utc::now()),
             throttle: SoundThrottle::default(),

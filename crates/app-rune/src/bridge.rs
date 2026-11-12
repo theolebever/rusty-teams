@@ -53,6 +53,7 @@ pub(crate) struct Shared {
     updates: Sender<Update>,
     wake: Box<dyn Fn() + Send + Sync>,
     agent_stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(crate) store: Arc<Store>,
 }
 
 impl Shared {
@@ -64,6 +65,10 @@ impl Shared {
         };
         let _ = self.updates.send(update);
         (self.wake)();
+    }
+
+    pub(crate) fn launcher(&self) -> Option<Arc<app_backend::launcher::CallLauncher>> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     pub(crate) fn engine(&self) -> Option<Arc<Engine>> {
@@ -233,6 +238,8 @@ impl Bridge {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Bridge {
         let (updates, receiver) = mpsc::channel();
+        let database = database.unwrap_or_else(|| data_path(DATABASE_FILE));
+        let store = Arc::new(open_store(&database));
         let shared = Arc::new_cyclic(|weak: &std::sync::Weak<Shared>| {
             let weak = weak.clone();
             let video_weak = weak.clone();
@@ -256,15 +263,15 @@ impl Bridge {
             calendar_nudge: Mutex::new(None),
             updates,
             wake: Box::new(wake),
+            store: store.clone(),
         }});
+        shared.publish(Update::Preferences(Box::new(crate::settings_backend::load(&store))));
         let notification_shared = Arc::downgrade(&shared);
         rune_notify::on_click(move |click| {
             if let Some(shared) = notification_shared.upgrade() && let Some(update) = crate::notifications::clicked(&click) {
                 shared.publish(update);
             }
         });
-        let database = database.unwrap_or_else(|| data_path(DATABASE_FILE));
-        let store = Arc::new(open_store(&database));
         let transport = endpoint.map_or_else(|| transport(&database, no_sso), |endpoint| Arc::new(session::CdpTransport::new(&endpoint)) as Arc<dyn session::Transport>);
         let (activity_sender, activity) = watch::channel(false);
         let events = app_backend::backend::start(store, transport, !read_only, activity);
@@ -767,8 +774,10 @@ impl Actions for Bridge {
     fn upload_file(&self, target: SendTarget, path: PathBuf) { crate::media::upload_file(self.shared.clone(), target, path); }
     fn discard_attachment(&self, uploaded: teams_core::UploadedFile) { crate::media::discard_attachment(self.shared.clone(), uploaded); }
     fn set_appearance(&self, settings: app_backend::appearance::AppearanceSettings) {
-        if let Some(engine) = self.shared.engine() { app_backend::appearance::save(engine.store(), &settings); }
+        app_backend::appearance::save(&self.shared.store, &settings);
     }
+    fn save_setting(&self, change: crate::settings::Change) { crate::settings_backend::save(&self.shared, change); }
+    fn load_devices(&self) { crate::settings_backend::list_devices(self.shared.clone()); }
     fn accept_call(&self, ring_id: u64, video: bool) { self.shared.call_control.accept(ring_id, video); }
     fn decline_call(&self, ring_id: u64) { self.shared.call_control.decline(ring_id); }
     fn load_image(&self, image: teams_core::ImageRef) { crate::media::load_image(self.shared.clone(), image); }
@@ -1180,6 +1189,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 let settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
                     .and_then(|json| agents::AgentSettings::from_json(&json).ok()).unwrap_or_default();
                 shared.publish(Update::AgentSettings(settings));
+                crate::settings_backend::refresh(shared.clone(), engine.clone());
                 let shared = shared.clone();
                 app_backend::runtime::handle().spawn(async move {
                     if let Ok(sidebar) = engine.sidebar() {

@@ -11,9 +11,9 @@ pub struct StartupSettings {
 }
 
 impl StartupSettings {
-    pub fn load(store: &store::Store, read_system: bool) -> StartupSettings {
+    pub fn load(store: &store::Store, name: &str, read_system: bool) -> StartupSettings {
         StartupSettings {
-            auto_start: read_system && is_enabled(crate::APP_NAME),
+            auto_start: read_system && is_enabled(name),
             open_in_background: store.meta(BACKGROUND_META_KEY).ok().flatten().as_deref()
                 == Some("1"),
         }
@@ -145,14 +145,14 @@ mod tests {
     #[test]
     fn background_choice_survives_a_restart_and_only_applies_to_autostart() {
         let store = store::Store::open_in_memory().unwrap();
-        let loaded = StartupSettings::load(&store, false);
+        let loaded = StartupSettings::load(&store, "test", false);
         assert_eq!(loaded, StartupSettings::default());
         let settings = StartupSettings {
             auto_start: true,
             open_in_background: true,
         };
         settings.save_background(&store);
-        assert!(StartupSettings::load(&store, false).open_in_background);
+        assert!(StartupSettings::load(&store, "test", false).open_in_background);
         assert!(settings.starts_hidden(true));
         assert!(!settings.starts_hidden(false));
         assert!(

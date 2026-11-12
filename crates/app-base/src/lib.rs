@@ -1,7 +1,6 @@
 pub mod agent_api;
 pub mod agents;
 pub mod assets;
-pub mod autostart;
 pub mod avatar_image;
 pub mod channel_files;
 pub mod demo_cards;
@@ -33,7 +32,6 @@ pub mod theme;
 pub mod translation;
 pub mod updater;
 pub mod user_activity;
-pub use app_backend::{appearance, crash_log, diagnostics, presence_link, runtime, version};
+pub use app_backend::{appearance, autostart, crash_log, diagnostics, presence_link, runtime, version};
 pub mod zoom;
-
 pub const APP_NAME: &str = "Rusty Teams";

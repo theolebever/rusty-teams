@@ -1,3 +1,4 @@
+pub mod autostart;
 pub mod backend;
 pub mod appearance;
 pub mod crash_log;

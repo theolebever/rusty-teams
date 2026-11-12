@@ -500,6 +500,7 @@ dependencies = [
  "directories",
  "embed-resource",
  "image",
+ "reqwest 0.13.5",
  "rodio",
  "rune",
  "rune-notify",

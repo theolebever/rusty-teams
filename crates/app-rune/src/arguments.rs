@@ -12,6 +12,8 @@ pub struct Arguments {
     pub endpoint: Option<String>,
     pub demo: bool,
     pub help: bool,
+    /// Started by the Windows Run key; may open hidden (`settings_backend::AUTOSTART_NAME`).
+    pub autostart: bool,
 }
 
 impl Arguments {
@@ -25,6 +27,7 @@ impl Arguments {
                 "--sso" => parsed.no_sso = false,
                 "--read-only" => parsed.read_only = true,
                 "--demo" => parsed.demo = true,
+                app_backend::autostart::AUTOSTART_FLAG => parsed.autostart = true,
                 "--help" | "-h" => parsed.help = true,
                 "--database" | "--endpoint" => {
                     let value = input
@@ -75,6 +78,7 @@ mod tests {
         ]).unwrap();
         assert_eq!(args.database, Some(PathBuf::from("other account/cache.db")));
         assert!(args.no_sso && args.read_only);
+        assert!(parse(&["--autostart"]).unwrap().autostart);
         assert_eq!(args.endpoint.as_deref(), Some("http://127.0.0.1:9222"));
     }
 

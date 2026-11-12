@@ -75,6 +75,7 @@ pub struct UiState<A: Actions> {
     /// Mentions, pickers and GIFs of the composer (`view_composer.rs`).
     pub(crate) compose: crate::view_composer::Compose,
     pub agent: crate::agent_panel::State,
+    pub settings: crate::settings::State,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
     pub nav: crate::shortcuts::NavState,
     pub global_search: crate::search::SearchState,
@@ -99,6 +100,7 @@ impl<A: Actions> UiState<A> {
         UiState {
             actions,
             agent: Default::default(),
+            settings: Default::default(),
             nav: Default::default(),
             details: HashMap::new(),
             typing: HashMap::new(),
@@ -243,6 +245,12 @@ impl<A: Actions> UiState<A> {
                 Err(error) => self.toast.show(error),
             },
             Update::Appearance(settings) => self.appearance = settings,
+            Update::Preferences(prefs) => {
+                self.calls.selected_camera = prefs.camera.clone();
+                self.calls.selected_input = prefs.microphone.clone();
+                self.calls.selected_output = prefs.speaker.clone();
+                self.settings.prefs = *prefs;
+            }
             Update::Activity(snapshot) => self.screens.activity = snapshot,
             Update::Call(update) => {
                 if self.call_window.is_some() {
