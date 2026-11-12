@@ -2,7 +2,7 @@
 use crate::screens::{CalendarRow, color, style};
 use crate::types::Actions;
 use crate::ui::UiState;
-use chrono::{Local, Offset};
+use chrono::{Datelike, Duration, Local, Offset};
 use rune::*;
 use crate::ui::text;
 
@@ -95,8 +95,9 @@ fn event<A: Actions + 'static>(s: &UiState<A>, e: &CalendarRow, date: chrono::Na
 
 pub fn week<A: Actions + 'static>(s: &UiState<A>) -> El {
     let source = events(&s.screens.calendar);
-    let days = model::week_days(&source, s.screens.week, 7, Local::now().offset().fix());
-    let mut headings = row().grow(1.0).min_w(0.0).h_full().equal_columns(7);
+    let count = s.screens.calendar_view.days();
+    let days = model::week_days(&source, s.screens.week, count as i64, Local::now().offset().fix());
+    let mut headings = row().grow(1.0).min_w(0.0).h_full().equal_columns(count);
     let all_day_height = 26.0
         * days
             .iter()
@@ -104,7 +105,7 @@ pub fn week<A: Actions + 'static>(s: &UiState<A>) -> El {
             .max()
             .unwrap_or(0)
             .max(1) as f32;
-    let mut all_day = row().grow(1.0).min_w(0.0).h_full().equal_columns(7);
+    let mut all_day = row().grow(1.0).min_w(0.0).h_full().equal_columns(count);
     let mut hours = col().w(52.0).h(24.0 * HOUR);
     for hour in 0..24 {
         hours = hours.child(
@@ -193,6 +194,56 @@ pub fn week<A: Actions + 'static>(s: &UiState<A>) -> El {
                 })
                 .child(columns),
         )
+}
+
+pub fn month<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let mut grid = col().key("calendar-month").grow(1.0).min_w(0.0).h_full().min_h(0.0);
+    for week in 0..6 {
+        let mut line = row().w_full().grow(1.0).min_h(0.0).equal_columns(7);
+        for day in 0..7 {
+            let date = s.screens.week + Duration::days(week * 7 + day);
+            let mut cell = col().key(format!("month-day-{date}")).min_w(0.0).h_full().min_h(0.0).padding(4.0).gap(2.0).border(0.5, color("#E0E0E0"))
+                .child(crate::screens::button(&date.format("%a %d").to_string(), &format!("month-open-{date}"), move |s: &mut UiState<A>, _| {
+                    s.screens.calendar_view = crate::screens::CalendarView::Day;
+                    crate::screens::select_date(s, date);
+                }));
+            let mut entries = col().w_full().gap(2.0);
+            for entry in s.screens.calendar.iter().filter(|entry| crate::screens::occurs_on(entry, date)) {
+                entries = entries.child(event(s, entry, date).h(28.0));
+            }
+            cell = cell.child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(entries));
+            line = line.child(cell);
+        }
+        grid = grid.child(line);
+    }
+    grid
+}
+
+pub fn date_picker<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let month = s.screens.picker_month;
+    let first = month.with_day(1).unwrap_or(month);
+    let start = first - Duration::days(i64::from(first.weekday().num_days_from_monday()));
+    let mut picker = col().key("calendar-picker").w(280.0).padding(10.0).gap(4.0).radius(8.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
+        .anchored("calendar-date-picker", Side::Bottom, Align::Start, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.screens.date_picker = false)
+        .child(row().w_full().gap(4.0).center_y()
+            .child(crate::screens::button("‹", "picker-previous", |s: &mut UiState<A>, _| {
+                s.screens.picker_month = s.screens.picker_month.checked_sub_months(chrono::Months::new(1)).unwrap_or(s.screens.picker_month);
+            }))
+            .child(text(month.format("%B %Y").to_string()).font(style(13.0, 600.0)).color(color("#242424")).grow(1.0))
+            .child(crate::screens::button("›", "picker-next", |s: &mut UiState<A>, _| {
+                s.screens.picker_month = s.screens.picker_month.checked_add_months(chrono::Months::new(1)).unwrap_or(s.screens.picker_month);
+            })));
+    for week in 0..6 {
+        let mut line = row().w_full().equal_columns(7);
+        for day in 0..7 {
+            let date = start + Duration::days(week * 7 + day);
+            line = line.child(crate::screens::button(&date.day().to_string(), &format!("picker-date-{date}"), move |s: &mut UiState<A>, _| crate::screens::select_date(s, date))
+                .fill(color(if date == s.screens.calendar_date { "#E8EBFA" } else { "#FFFFFF" })));
+        }
+        picker = picker.child(line);
+    }
+    picker
 }
 
 #[cfg(test)]

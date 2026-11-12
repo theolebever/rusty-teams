@@ -79,6 +79,8 @@ pub struct Me {
 }
 
 pub struct State {
+    pub paused_until: Option<DateTime<Utc>>,
+    submenu: Option<&'static str>,
     pub me: Option<Me>,
     pub status: PresenceStatus,
     pub menu: bool,
@@ -91,6 +93,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         State {
+            paused_until: None,
+            submenu: None,
             me: None,
             status: PresenceStatus::default(),
             menu: false,
@@ -234,6 +238,33 @@ fn status_glyph(presence: Presence) -> (&'static str, Color) {
 fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
     let palette = active_palette();
     let muted = rgb(palette.text_muted);
+    if let Some(page) = s.own.submenu {
+        let mut menu = col().key("status-menu").w(MENU_WIDTH).padding(6.0).gap(2.0).radius(8.0)
+            .fill(rgb(palette.popup)).border(1.0, rgb(palette.border)).anchored("title-account", Side::Bottom, Align::End, 4.0)
+            .modal(true, |s: &mut UiState<A>| { s.own.menu = false; s.own.submenu = None; })
+            .child(item("status-back", Some(("keyboard_arrow_left", muted)), "Back", false, |s: &mut UiState<A>| s.own.submenu = None));
+        if page == "pause" {
+            for (index, span) in STATUS_SPANS.into_iter().enumerate() {
+                menu = menu.child(item(&format!("pause-for-{index}"), None, span.label(), false, move |s: &mut UiState<A>| {
+                    s.actions.set_notification_pause(span.expires_at(Local::now()));
+                    s.own.menu = false; s.own.submenu = None;
+                }));
+            }
+            if s.own.paused_until.is_some_and(|until| Utc::now() < until) {
+                menu = menu.child(item("pause-resume", None, "Resume notifications", false, |s: &mut UiState<A>| {
+                    s.actions.set_notification_pause(None); s.own.menu = false; s.own.submenu = None;
+                }));
+            }
+        } else {
+            for (key, label, kind) in [("office", "Office", Some(teams_core::WorkLocationKind::Office)), ("remote", "Remote", Some(teams_core::WorkLocationKind::Remote)), ("clear", "Clear work location", None)] {
+                menu = menu.child(item(&format!("work-location-{key}"), None, label, s.own.status.work_location.map(|location| location.kind) == kind, move |s: &mut UiState<A>| {
+                    let location = kind.and_then(|kind| Span::Today.expires_at(Local::now()).map(|until| (kind, until)));
+                    s.actions.set_work_location(location); s.own.menu = false; s.own.submenu = None;
+                }));
+            }
+        }
+        return menu;
+    }
     let mut header = col().grow(1.0).min_w(0.0);
     let (name, id, email) = s.own.me.as_ref().map_or(("", None, ""), |me| (me.name.as_str(), Some(me.user_id.as_str()), me.email.as_str()));
     header = header
@@ -268,6 +299,12 @@ fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
                 set_forced(s, Some(ForcedAvailability { kind, expires_at: span.expires_at(Local::now()) }));
             }));
         }
+    }
+    let paused = s.own.paused_until.filter(|until| Utc::now() < *until);
+    let pause_label = paused.map(|until| format!("Paused until {}", until.with_timezone(&Local).format("%H:%M"))).unwrap_or_else(|| "Pause notifications".into());
+    menu = menu.child(item("status-pause", Some(("notifications_off", muted)), &pause_label, false, |s: &mut UiState<A>| s.own.submenu = Some("pause")));
+    if !s.read_only {
+        menu = menu.child(item("status-work-location", Some(("location_on", muted)), "Set work location for today", false, |s: &mut UiState<A>| s.own.submenu = Some("location")));
     }
     menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
         .child(item("status-reset", Some(("close", muted)), "Reset status", false, |s: &mut UiState<A>| set_forced(s, None)))

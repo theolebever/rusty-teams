@@ -12,6 +12,8 @@ use crate::ui::{open_chat, UiState};
 /// State of the keyboard-driven surfaces. `Default` is the closed, scrolled-to-end state.
 #[derive(Default)]
 pub struct NavState {
+    pub meet_more: bool,
+    pub settings_more: bool,
     pub switcher: Option<crate::switcher::Switcher>,
     pub find: crate::find::Find,
     pub shortcuts_open: bool,
@@ -58,7 +60,11 @@ impl Group {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     FocusSearch,
+    FilterChats,
     Switcher,
     NewChat,
     Shortcuts,
@@ -86,8 +92,13 @@ const fn sc(group: Group, label: &'static str, chord: &'static str, action: Acti
 
 // `mod` is Ctrl here and Cmd on macOS. Ctrl+4 (Saved) has no Rune screen.
 const SHORTCUTS: &[Shortcut] = &[
+    sc(Group::General, "Zoom in", "mod+plus", Action::ZoomIn),
+    sc(Group::General, "Zoom in", "mod+equal", Action::ZoomIn),
+    sc(Group::General, "Zoom out", "mod+minus", Action::ZoomOut),
+    sc(Group::General, "Reset zoom", "mod+0", Action::ZoomReset),
     sc(Group::General, "Search chats and messages", "mod+k", Action::FocusSearch),
     sc(Group::General, "Search chats and messages", "mod+e", Action::FocusSearch),
+    sc(Group::General, "Filter chats", "mod+shift+f", Action::FilterChats),
     sc(Group::General, "New chat", "mod+n", Action::NewChat),
     sc(Group::General, "Keyboard shortcuts", "mod+.", Action::Shortcuts),
     sc(Group::General, "Settings", "mod+comma", Action::Screen(Screen::Settings)),
@@ -148,12 +159,20 @@ pub fn on_key<A: Actions + 'static>(s: &mut UiState<A>, ev: &KeyEvent, tx: &mut 
 
 fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) -> bool {
     match action {
+        Action::ZoomIn => zoom(s, 1),
+        Action::ZoomOut => zoom(s, -1),
+        Action::ZoomReset => zoom(s, 0),
         Action::FocusSearch => {
             close_popups(s);
             navigate(s, Screen::Chat);
             tx.focus("chat-search-input", false);
         }
         Action::Switcher => crate::switcher::open(s, tx),
+        Action::FilterChats => {
+            close_popups(s);
+            navigate(s, Screen::Chat);
+            crate::view_chatlist::open_filter(s, tx);
+        }
         Action::NewChat => {
             close_popups(s);
             navigate(s, Screen::Chat);
@@ -187,7 +206,19 @@ fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) ->
     true
 }
 
+pub(crate) fn zoom<A: Actions>(s: &mut UiState<A>, direction: i32) {
+    use app_backend::appearance;
+    s.appearance.zoom = match direction {
+        1 => appearance::zoom_in(s.appearance.zoom),
+        -1 => appearance::zoom_out(s.appearance.zoom),
+        _ => appearance::DEFAULT_ZOOM,
+    };
+    s.actions.set_appearance(s.appearance);
+    s.toast.show(format!("{}%", appearance::zoom_percent(s.appearance.zoom)));
+}
+
 fn close_popups<A: Actions>(s: &mut UiState<A>) {
+    s.nav.settings_more = false;
     s.nav.switcher = None;
     s.nav.shortcuts_open = false;
 }
@@ -195,7 +226,7 @@ fn close_popups<A: Actions>(s: &mut UiState<A>) {
 /// Opens the previous or next chat of the list, only unread ones when `unread`. From a selection
 /// outside the list it starts at the first (or last) chat.
 fn step_chat<A: Actions>(s: &mut UiState<A>, delta: isize, unread: bool, tx: &mut Tx) {
-    let ids: Vec<String> = crate::view_chatlist::visible_chats(&s.chatlist, &s.chats)
+    let ids: Vec<String> = crate::view_chatlist::filtered_chats(s)
         .into_iter()
         .map(|i| &s.chats[i])
         .filter(|chat| !unread || chat.unread || Some(chat.id.as_str()) == s.selected.as_deref())

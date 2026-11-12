@@ -2,7 +2,6 @@
 //! leave confirmation, the new-chat panel and the members panel. All four float above the window
 //! over a click-away backdrop. GPUI: `views/chat_menu.rs`.
 //!
-//! No "Pin chat": the engine has no write for the favourites folder, and GPUI's menu omits it too.
 
 use app_backend::schemes::active_palette;
 use rune::*;
@@ -24,6 +23,8 @@ const MEMBERS_TOP: f32 = 110.0;
 /// Open overlays and the pending chat to open. Lives on `ChatListState`.
 #[derive(Default)]
 pub struct Manage {
+    pub submenu: Option<&'static str>,
+    pub remove_history: Option<String>,
     /// Chat id and window point of the open context menu.
     pub menu: Option<(String, f32, f32)>,
     /// Last pointer point over a row's "..." button, where its menu opens.
@@ -41,11 +42,13 @@ pub struct Manage {
 
 impl Manage {
     fn any(&self) -> bool {
-        self.menu.is_some() || self.leave.is_some() || self.new_chat_open || self.members_open
+        self.menu.is_some() || self.leave.is_some() || self.remove_history.is_some() || self.new_chat_open || self.members_open
     }
 
     fn close(&mut self) {
         self.menu = None;
+        self.submenu = None;
+        self.remove_history = None;
         self.leave = None;
         self.new_chat_open = false;
         self.members_open = false;
@@ -62,6 +65,7 @@ pub fn drain<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
 }
 
 pub fn open_menu<A: Actions>(s: &mut UiState<A>, id: &str, x: f32, y: f32) {
+    s.chatlist.manage.submenu = None;
     s.chatlist.manage.menu = Some((id.to_owned(), x, y));
 }
 
@@ -77,8 +81,9 @@ pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> El {
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .on_press(|s: &mut UiState<A>| s.chatlist.manage.close());
     let layer = layer.child(backdrop);
+    if let Some(id) = &manage.remove_history { return layer.child(confirm_dialog(s, id, true)); }
     if let Some(id) = &manage.leave {
-        return layer.child(leave_dialog(s, id));
+        return layer.child(confirm_dialog(s, id, false));
     }
     if let Some((id, x, y)) = &manage.menu {
         return layer.child(menu(s, id, *x, *y));
@@ -101,6 +106,35 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
     let unread = s.chats.iter().find(|chat| chat.id == id).is_some_and(|chat| chat.unread);
     let muted = s.details.get(id).is_some_and(|d| d.muted);
     let notes = teams_core::is_notes_chat(id);
+    if let Some(page) = s.chatlist.manage.submenu {
+        let mut panel = col().key("chat-menu").w(280.0).padding(4.0).radius(8.0)
+            .fill(tone(p.popup)).border(1.0, tone(p.border_strong))
+            .child(submenu_button::<A>("menu-back", "Back", None));
+        if page == "sections" {
+            let current = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id));
+            for folder in s.chatlist.folders.iter().filter(|folder| matches!(folder.kind, teams_core::FolderKind::Favorites | teams_core::FolderKind::UserCreated)) {
+                let (chat, target) = (id.to_owned(), folder.id.clone());
+                if current.is_some_and(|current| current.id == folder.id) { continue; }
+                let label = if folder.kind == teams_core::FolderKind::Favorites { "Favorites" } else { &folder.name };
+                panel = panel.child(item(&format!("menu-move-{}", folder.id), "folder", label, false,
+                    move |s: &mut UiState<A>| s.actions.move_to_folder(&chat, &target)));
+            }
+        } else {
+            let mode = if muted { teams_core::ChatNotificationMode::Mute } else { teams_core::ChatNotificationMode::AllNewMessages };
+            let desktop = s.details.get(id).map(|details| details.desktop_notifications).unwrap_or_default();
+            for (key, label, value) in [("all", "All new messages", teams_core::ChatNotificationMode::AllNewMessages), ("mute", "Mute", teams_core::ChatNotificationMode::Mute)] {
+                let chat = id.to_owned();
+                panel = panel.child(item(&format!("menu-notify-{key}"), if value == mode { "check" } else { "notifications" }, label, false,
+                    move |s: &mut UiState<A>| s.actions.set_chat_notifications(&chat, value, desktop)));
+            }
+            for (key, label, value) in [("match", "Match settings used for all chats", teams_core::DesktopNotifications::MatchAllChats), ("off", "Don't get desktop notifications", teams_core::DesktopNotifications::Off)] {
+                let chat = id.to_owned();
+                panel = panel.child(item(&format!("menu-desktop-{key}"), if value == desktop { "check" } else { "notifications" }, label, false,
+                    move |s: &mut UiState<A>| s.actions.set_chat_notifications(&chat, mode, value)));
+            }
+        }
+        return el().pin(Some(x), Some(y.min(MAX_ANCHOR_Y)), None, None).child(panel);
+    }
     let mut panel = col()
         .key("chat-menu")
         .w(MENU_W)
@@ -112,11 +146,33 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
             let id = id.to_owned();
             move |s: &mut UiState<A>| s.actions.set_chat_read(&id, unread)
         }));
+    if !s.chatlist.folders.is_empty() {
+        panel = panel.child(submenu_button::<A>("menu-sections", "Move to section", Some("sections")));
+        if let Some(folder) = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id)) {
+            let (chat, folder) = (id.to_owned(), folder.id.clone());
+            panel = panel.child(item("menu-remove-section", "folder", "Remove from section", false,
+                move |s: &mut UiState<A>| s.actions.remove_from_folder(&chat, &folder)));
+        }
+    }
     if !notes {
+        panel = panel.child(submenu_button::<A>("menu-notifications", "Manage notifications", Some("notifications")));
         panel = panel.child(item("menu-mute", if muted { "notifications" } else { "notifications_off" }, if muted { "Unmute" } else { "Mute" }, false, {
             let id = id.to_owned();
             move |s: &mut UiState<A>| s.actions.set_chat_muted(&id, !muted)
         }));
+        let chat = id.to_owned();
+        panel = panel.child(row().key("menu-copy-link").w_full().h(ITEM_H).px(8.0).gap(10.0).center_y().radius(6.0).hover(tone(p.popup_hover))
+            .label("Copy link").on_press_tx(move |s: &mut UiState<A>, tx| {
+                tx.copy(teams_core::chat_link(&chat));
+                s.chatlist.manage.close();
+                s.toast.show("Link copied");
+            }).child(sym("link", 16.0).color(tone(p.foreground)))
+            .child(text("Copy link").font(ts(13.0, 400.0)).color(tone(p.foreground))));
+        if !is_group(s, id) {
+            let chat = id.to_owned();
+            panel = panel.child(item("menu-remove-history", "delete", "Remove chat history", true,
+                move |s: &mut UiState<A>| s.chatlist.manage.remove_history = Some(chat.clone())));
+        }
     }
     panel = panel.child(item("menu-hide", "close", "Hide", false, {
         let id = id.to_owned();
@@ -129,6 +185,14 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
         }));
     }
     el().pin(Some(x), Some(y.min(MAX_ANCHOR_Y)), None, None).child(panel)
+}
+
+fn submenu_button<A: Actions + 'static>(key: &str, label: &str, page: Option<&'static str>) -> El {
+    let p = active_palette();
+    row().key(key.to_owned()).w_full().h(ITEM_H).px(8.0).gap(10.0).center_y().radius(6.0).hover(tone(p.popup_hover))
+        .label(label.to_owned()).on_press(move |s: &mut UiState<A>| s.chatlist.manage.submenu = page)
+        .child(sym(if page.is_some() { "keyboard_arrow_right" } else { "keyboard_arrow_left" }, 16.0).color(tone(p.foreground)))
+        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(tone(p.foreground)))
 }
 
 /// One menu row. The menu closes after the action unless the action opens a dialog.
@@ -152,30 +216,30 @@ fn item<A: Actions + 'static>(key: &str, glyph: &str, label: &str, danger: bool,
         .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(color))
 }
 
-fn leave_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
+fn confirm_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str, history: bool) -> El {
     let p = active_palette();
     let title = s.chats.iter().find(|chat| chat.id == id).map_or(id, |chat| chat.title.as_str());
     let others = s.details.get(id).map_or(0, |d| d.members.len().saturating_sub(1));
     let leave_id = id.to_owned();
     let dialog = col()
-        .key("leave-dialog")
+        .key(if history { "remove-history-dialog" } else { "leave-dialog" })
         .w(360.0)
         .padding(16.0)
         .gap(10.0)
         .radius(10.0)
         .fill(tone(p.surface))
         .border(1.0, tone(p.border_strong))
-        .child(text(format!("Leave \"{title}\"?")).font(ts(15.0, 600.0)).color(tone(p.foreground)))
-        .child(text(format!("The {others} other members see that you left. You can only come back if someone adds you."))
+        .child(text(if history { "Remove chat history?".into() } else { format!("Leave \"{title}\"?") }).font(ts(15.0, 600.0)).color(tone(p.foreground)))
+        .child(text(if history { "This will remove the chat from your list and search. It affects you only.".into() } else { format!("The {others} other members see that you left. You can only come back if someone adds you.") })
             .font(ts(13.0, 400.0)).color(tone(p.text_soft)))
         .child(
             row()
                 .w_full()
                 .gap(8.0)
                 .child(el().grow(1.0))
-                .child(crate::screens::button("Cancel", "leave-cancel", |s: &mut UiState<A>, _| s.chatlist.manage.close()))
-                .child(crate::screens::button("Leave", "leave-confirm", move |s: &mut UiState<A>, _| {
-                    s.actions.leave_chat(&leave_id);
+                .child(crate::screens::button("Cancel", if history { "remove-history-cancel" } else { "leave-cancel" }, |s: &mut UiState<A>, _| s.chatlist.manage.close()))
+                .child(crate::screens::button(if history { "Remove" } else { "Leave" }, if history { "remove-history-confirm" } else { "leave-confirm" }, move |s: &mut UiState<A>, _| {
+                    if history { s.actions.remove_chat_history(&leave_id); } else { s.actions.leave_chat(&leave_id); }
                     s.chatlist.manage.close();
                 })),
         );

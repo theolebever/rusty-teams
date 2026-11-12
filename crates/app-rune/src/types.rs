@@ -29,6 +29,19 @@ pub struct ChannelRow {
     pub unread: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TeamDetails {
+    pub hidden: bool,
+    pub rights: store::TeamRights,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ChannelDetails {
+    pub private: bool,
+    pub mentions: store::ChannelMentions,
+    pub notifications: store::ChannelNotifications,
+}
+
 /// One message of the open conversation, oldest first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageRow {
@@ -60,6 +73,8 @@ pub struct PinnedRow {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChatDetails {
+    pub importance: store::MessageImportance,
+    pub desktop_notifications: teams_core::DesktopNotifications,
     pub avatar_id: Option<String>,
     /// Up to two other people of a group chat, drawn as a pair when it has no picture of its own.
     pub group: Vec<store::MemberRecord>,
@@ -102,6 +117,20 @@ pub struct Composed {
 /// What the bridge reports to the view. The view applies them in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
+    NotificationPause(Option<chrono::DateTime<chrono::Utc>>),
+    MeetingReady(Result<String, String>),
+    CalendarRange { start: chrono::NaiveDate, end: chrono::NaiveDate, rows: Vec<crate::screens::CalendarRow> },
+    SwitcherSearch { session: String, query: String, result: Result<teams_core::substrate_search::Suggestions, String> },
+    TeamMetadata {
+        teams: std::collections::HashMap<String, TeamDetails>,
+        channels: std::collections::HashMap<String, ChannelDetails>,
+        pinned: Vec<String>,
+    },
+    CopyLink(Result<String, String>),
+    Folders(Vec<teams_core::ChatFolder>),
+    Favorites(Vec<String>),
+    ChatPaging { more: bool, loading: bool },
+    Saved(Result<Vec<teams_core::SavedMessage>, String>),
     /// Directory search answer for `query` (`new_chat.rs`).
     People { query: String, rows: Vec<Person> },
     /// A chat made by `create_chat`; the view opens it.
@@ -174,6 +203,24 @@ pub enum Update {
 
 /// What the view asks of the bridge. Calls return at once; results arrive as `Update`s.
 pub trait Actions {
+    fn set_notification_pause(&self, _until: Option<chrono::DateTime<chrono::Utc>>) {}
+    fn set_work_location(&self, _location: Option<(teams_core::WorkLocationKind, chrono::DateTime<chrono::Utc>)>) {}
+    fn search_switcher(&self, _session: teams_core::substrate_search::SearchSession, _query: String) {}
+    fn set_channel_pinned(&self, _id: &str, _pinned: bool) {}
+    fn set_channel_shown(&self, _id: &str, _shown: bool) {}
+    fn set_team_shown(&self, _id: &str, _shown: bool) {}
+    fn set_channel_notifications(&self, _id: &str, _notifications: store::ChannelNotifications) {}
+    fn copy_team_link(&self, _id: &str, _channel: bool) {}
+    fn create_channel(&self, _team: &str, _name: &str, _description: &str, _private: bool) {}
+    fn change_folders(&self, _change: teams_core::FolderChange) {}
+    fn move_to_folder(&self, _id: &str, _folder: &str) {}
+    fn remove_from_folder(&self, _id: &str, _folder: &str) {}
+    fn set_folder_expanded(&self, _id: &str, _expanded: bool) {}
+    fn load_older_chats(&self) {}
+    fn set_chat_notifications(&self, _id: &str, _mode: teams_core::ChatNotificationMode, _desktop: teams_core::DesktopNotifications) {}
+    fn remove_chat_history(&self, _id: &str) {}
+    fn load_saved(&self) {}
+    fn unsave(&self, _item: &teams_core::SavedMessage) {}
     fn set_chat_muted(&self, _id: &str, _muted: bool) {}
     /// `read == false` marks the chat unread.
     fn set_chat_read(&self, _id: &str, _read: bool) {}
@@ -212,6 +259,7 @@ pub trait Actions {
     fn mark_unread_from(&self, _conversation_id: &str, _message_id: &str) {}
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}
+    fn load_calendar_range(&self, start: chrono::NaiveDate, _end: chrono::NaiveDate) { self.load_calendar(start); }
     fn load_agenda(&self) {}
     fn respond_event(&self, _id: &str, _ical_uid: Option<&str>, _reply: chatsvc::Reply, _send_response: bool) {}
     fn mark_activity_read(&self, _id: &str) {}

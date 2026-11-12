@@ -30,12 +30,12 @@ struct RailItem {
     badge: usize,
 }
 
-fn rail_items(unread_chats: usize) -> Vec<RailItem> {
+fn rail_items(activity: usize, unread_chats: usize, channels: usize, agents: usize) -> Vec<RailItem> {
     vec![
-        RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: 0 },
+        RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: activity },
         RailItem { label: "Chat", outline: "chat_bubble", filled: "chat_bubble_fill", screen: Screen::Chat, badge: unread_chats },
-        RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: 0 },
-        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: 0 },
+        RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: channels },
+        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: agents },
         RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0 },
         RailItem { label: "Calls", outline: "call", filled: "call", screen: Screen::Calls, badge: 0 },
         RailItem { label: "Settings", outline: "settings", filled: "settings", screen: Screen::Settings, badge: 0 },
@@ -97,15 +97,16 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
                         .radius(6.0)
                         .center()
                         .hover(tone(palette.row_hover))
-                        .on_press_tx(|s: &mut UiState<A>, _| screens::navigate(s, Screen::Settings))
+                        .label("Settings and more")
+                        .help("Settings and more")
+                        .on_press(|s: &mut UiState<A>| s.nav.settings_more = !s.nav.settings_more)
                         .child(sym("more_horiz", 18.0).color(c(INK))),
                 )
                 .child(crate::status_menu::account_button(s)),
         )
 }
 
-/// The global search box, shown as the GPUI title bar does. Pressing it opens the chat screen,
-/// where the search field lives.
+/// The global search box opens and focuses the switcher.
 fn search_box<A: Actions + 'static>() -> El {
     let palette = active_palette();
     let muted = c(MUTED);
@@ -121,7 +122,7 @@ fn search_box<A: Actions + 'static>() -> El {
         .center_y()
         .radius(6.0)
         .fill(tone(palette.surface))
-        .on_press_tx(|s: &mut UiState<A>, _| screens::navigate(s, Screen::Chat))
+        .on_press_tx(crate::switcher::open::<A>)
         .child(sym("search", 14.0).color(muted))
         .child(
             text("Search chats, people and channels")
@@ -146,7 +147,10 @@ fn search_box<A: Actions + 'static>() -> El {
 pub fn rail<A: Actions + 'static>(s: &UiState<A>) -> El {
     let unread = s.chats.iter().filter(|chat| chat.unread).count();
     let mut rail = col().key("rail").w(RAIL_WIDTH).h_full().fill(tone(active_palette().surface)).items_center().gap(2.0);
-    for item in rail_items(unread) {
+    let activity = &s.screens.activity;
+    let activity_unread = activity.items.iter().filter(|item| activity.counts_for_bell(item)).count();
+    let channels = s.teams.iter().flat_map(|team| &team.channels).filter(|channel| channel.unread && !channel.hidden).count();
+    for item in rail_items(activity_unread, unread, channels, usize::from(s.agent.running)) {
         rail = rail.child(rail_item::<A>(item, s.screens.screen == item.screen));
     }
     rail
@@ -171,6 +175,7 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         })
         .child(sym(glyph, RAIL_ICON).color(ink))
         .label(item.label)
+        .help(format!("{} ({})", item.label, shortcut(screen)))
         .child(text(item.label).font(ts(11.0, if active { 600.0 } else { 400.0 })).color(ink).truncate());
     button = if active { button.fill(tone(palette.surface_raised)) } else { button.hover(tone(palette.row_hover)) };
     if let Some(count) = badge_text(item.badge) {
@@ -186,6 +191,40 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         button = button.child(badge.absolute(28.0, 5.0));
     }
     button
+}
+
+fn shortcut(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Activity => "Ctrl+1",
+        Screen::Chat => "Ctrl+2",
+        Screen::Teams => "Ctrl+3",
+        Screen::Agents => "Ctrl+6",
+        Screen::Calendar => "Ctrl+Shift+4",
+        Screen::Calls => "Ctrl+5",
+        Screen::Settings => "Ctrl+,",
+        Screen::Agenda => "",
+    }
+}
+
+pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if !s.nav.settings_more { return None; }
+    Some(col().key("settings-more-menu").w(220.0).padding(6.0).gap(4.0).radius(8.0)
+        .fill(tone(active_palette().popup)).border(1.0, tone(active_palette().border))
+        .anchored("title-more", Side::Bottom, Align::End, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.nav.settings_more = false)
+        .child(screens::button("Settings", "settings-more-settings", |s: &mut UiState<A>, _| {
+            s.nav.settings_more = false;
+            screens::navigate(s, Screen::Settings);
+        }))
+        .child(screens::button("Keyboard shortcuts", "settings-more-shortcuts", |s: &mut UiState<A>, _| {
+            s.nav.settings_more = false;
+            s.nav.shortcuts_open = true;
+        }))
+        .child(row().w_full().gap(6.0).center_y()
+            .child(crate::screens::button("−", "window-zoom-out", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, -1)).label("Zoom out"))
+            .child(text(format!("{}%", app_backend::appearance::zoom_percent(s.appearance.zoom))).font(ts(13.0, 400.0)).color(tone(active_palette().foreground)))
+            .child(crate::screens::button("+", "window-zoom-in", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, 1)).label("Zoom in"))
+            .child(crate::screens::button("Reset", "window-zoom-reset", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, 0)))))
 }
 
 #[cfg(test)]
@@ -204,11 +243,11 @@ mod tests {
 
     #[test]
     fn rail_lists_the_screens_in_order_and_counts_unread_chats_on_chat() {
-        let items = rail_items(3);
+        let items = rail_items(2, 3, 4, 1);
         let labels: Vec<_> = items.iter().map(|item| item.label).collect();
         assert_eq!(labels, ["Activity", "Chat", "Teams", "Agents", "Calendar", "Calls", "Settings"]);
         assert_eq!(items[1].badge, 3);
-        assert!(items.iter().enumerate().all(|(index, item)| index == 1 || item.badge == 0));
+        assert_eq!(items.iter().map(|item| item.badge).collect::<Vec<_>>(), [2, 3, 4, 1, 0, 0, 0]);
     }
 
     #[test]

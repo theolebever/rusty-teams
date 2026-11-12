@@ -68,8 +68,10 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
         .child(el().grow(1.0));
     if channel.is_none() && !s.read_only {
         let id = id.to_owned();
-        let call = if compact { icon_button("meet-now", "videocam", false).label("Meet now") } else { meet_now() };
-        bar = bar.child(call.on_press_tx(move |s: &mut UiState<A>, _| s.actions.meet_now(&id)));
+        let call = if compact {
+            icon_button("meet-now", "videocam", false).label("Meet now").on_press(move |s: &mut UiState<A>| s.actions.meet_now(&id))
+        } else { meet_now::<A>(&id) };
+        bar = bar.child(call);
     }
     if let Some(count) = s.member_counts.get(id) {
         bar = bar.child(
@@ -143,8 +145,9 @@ fn tab(label: &str, active: bool) -> El {
 }
 
 /// The Meet now split button: video glyph with label, and a chevron for the options.
-fn meet_now() -> El {
+fn meet_now<A: Actions + 'static>(id: &str) -> El {
     let palette = active_palette();
+    let id = id.to_owned();
     row()
         .key("meet-now")
         .h(CALL_H)
@@ -152,10 +155,13 @@ fn meet_now() -> El {
         .hover(c(HOVER))
         .child(
             row()
+                .key("meet-now-start")
                 .h(CALL_H)
                 .px(8.0)
                 .gap(6.0)
                 .center_y()
+                .label("Meet now")
+                .on_press(move |s: &mut UiState<A>| s.actions.meet_now(&id))
                 .child(sym("videocam", GLYPH).color(rgb(palette.text_soft)))
                 .child(text("Meet now").font(ts(14.0, 600.0)).color(c(INK))),
         )
@@ -165,8 +171,27 @@ fn meet_now() -> El {
                 .w(18.0)
                 .h(CALL_H)
                 .center()
+                .label("Meeting options")
+                .help("Meeting options")
+                .on_press(|s: &mut UiState<A>| s.nav.meet_more = !s.nav.meet_more)
                 .child(sym("keyboard_arrow_down", 12.0).color(rgb(palette.text_soft))),
         )
+}
+
+pub fn meet_options<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if !s.nav.meet_more { return None; }
+    let p = active_palette();
+    Some(col().key("meet-options-menu").w(200.0).padding(6.0).gap(4.0).radius(8.0).fill(rgb(p.popup)).border(1.0, rgb(p.border))
+        .anchored("meet-now-options", Side::Bottom, Align::End, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.nav.meet_more = false)
+        .child(crate::screens::button("Meet now", "meet-option-start", |s: &mut UiState<A>, _| {
+            s.nav.meet_more = false;
+            if let Some(id) = &s.selected { s.actions.meet_now(id); }
+        }))
+        .child(crate::screens::button("Join with an ID", "meet-option-join-id", |s: &mut UiState<A>, _| {
+            s.nav.meet_more = false;
+            s.screens.join_id_open = true;
+        })))
 }
 
 /// A 32 px icon button; `active` fills it as the open search toggle does. The handler is added

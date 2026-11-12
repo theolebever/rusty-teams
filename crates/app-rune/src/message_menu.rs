@@ -199,14 +199,14 @@ fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
                 if !s.menu.forward_sending { s.menu.forward_target = None; tx.focus("forward-search", false); }
             })));
     } else {
-        let found = crate::switcher::candidates(s, &s.menu.forward_search.text);
+        let found = crate::switcher::forward_candidates(s, &s.menu.forward_search.text);
         let highlighted = s.menu.forward_highlighted.min(found.len().saturating_sub(1));
         body = body.child(text_input(&s.menu.forward_search, ts(14.0, 400.0)).key("forward-search")
             .label("Search chats and channels").placeholder("Search chats and channels", rgb(palette.text_muted)).w_full()
             .on_edit(|s: &mut UiState<A>| &mut s.menu.forward_search)
             .on_input_change(|s: &mut UiState<A>, _| s.menu.forward_highlighted = 0)
             .on_input_key(|s: &mut UiState<A>, key, tx| {
-                let found = crate::switcher::candidates(s, &s.menu.forward_search.text);
+                let found = crate::switcher::forward_candidates(s, &s.menu.forward_search.text);
                 match key.key {
                     Key::Enter => {
                         if let Some(target) = found.get(s.menu.forward_highlighted.min(found.len().saturating_sub(1))) { choose_forward(s, target.clone(), tx); }

@@ -194,6 +194,8 @@ impl<A: Actions> UiState<A> {
             Update::Receipts { conversation_id, states } => {
                 if self.selected.as_deref() == Some(&conversation_id) { self.receipts = states; }
             }
+            Update::NotificationPause(until) => self.own.paused_until = until,
+            Update::SwitcherSearch { session, query, result } => crate::switcher::apply(self, &session, &query, result),
             Update::Audio { url, result } => self.media.voice.loaded(url, result),
             Update::CallHistory(result) => {
                 self.calls.history_loading = false;
@@ -226,7 +228,20 @@ impl<A: Actions> UiState<A> {
             Update::Profile { user_id, result } => self.profile.loaded(user_id, result),
             Update::OpenChat(id) => self.profile.chat_request = Some(id),
             Update::Chats(rows) => self.chats = rows,
+            Update::Folders(folders) => self.chatlist.folders = folders,
+            Update::Favorites(ids) => self.chatlist.favorites = ids,
+            Update::ChatPaging { more, loading } => { self.chatlist.has_older = more; self.chatlist.loading_older = loading; }
+            Update::Saved(result) => self.chatlist.saved = Some(result),
             Update::Teams(rows) => self.teams = rows,
+            Update::TeamMetadata { teams, channels, pinned } => {
+                self.chatlist.team_details = teams;
+                self.chatlist.channel_details = channels;
+                self.chatlist.pinned_channels = pinned;
+            }
+            Update::CopyLink(result) => match result {
+                Ok(link) => self.chatlist.copy_link = Some(link),
+                Err(error) => self.toast.show(error),
+            },
             Update::Appearance(settings) => self.appearance = settings,
             Update::Activity(snapshot) => self.screens.activity = snapshot,
             Update::Call(update) => {
@@ -256,7 +271,18 @@ impl<A: Actions> UiState<A> {
             Update::Calendar { week, rows } => {
                 if self.screens.week == week { self.screens.calendar = rows; }
             }
-            Update::CalendarRefresh => self.actions.load_calendar(self.screens.week),
+            Update::CalendarRange { start, end, rows } => {
+                if self.screens.week == start && start + chrono::Duration::days(self.screens.calendar_view.days() as i64) == end { self.screens.calendar = rows; }
+            }
+            Update::MeetingReady(result) => match result {
+                Ok(url) => {
+                    self.calls.link = TextEdit::new(url);
+                    self.calls.prejoin_open = true;
+                    self.screens.screen = crate::screens::Screen::Calls;
+                }
+                Err(error) => self.toast.show(format!("Could not create meeting: {error}")),
+            },
+            Update::CalendarRefresh => crate::screens::reload_calendar(self),
             Update::Agenda(events) => self.screens.agenda = events,
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
@@ -306,6 +332,21 @@ impl<A: Actions> UiState<A> {
             }
         }
     }
+
+    pub(crate) fn chat_draft(&self, id: &str) -> Option<String> {
+        let text = if self.selected.as_deref() == Some(id) && self.thread_root_id.is_none() {
+            self.composer.text.clone()
+        } else {
+            let target = SendTarget { conversation_id: id.to_owned(), thread_root_id: None, channel: self.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == id) };
+            self.drafts.get(&target).cloned().or_else(|| self.actions.load_draft(id)).unwrap_or_default()
+        };
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    pub(crate) fn chat_send_failed(&self, id: &str) -> bool {
+        (self.selected.as_deref() == Some(id) && self.thread_root_id.is_none() && self.send_error.is_some())
+            || self.send_errors.keys().any(|target| target.conversation_id == id && target.thread_root_id.is_none())
+    }
 }
 
 /// Messages of `new` that arrived live since `old`: never the first load, a chat switch, an
@@ -319,6 +360,7 @@ fn arrived(old: &[MessageRow], new: &[MessageRow]) -> Vec<String> {
 }
 
 pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
+    s.chatlist.quick_view = None;
     save_draft(s);
     s.selected = Some(id.to_owned());
     s.shared_open = false;
@@ -403,23 +445,38 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     s.composer.clear();
 }
 
+/// Lays `root` out at 1/zoom of the window and scales it back up, so everything grows by `zoom`.
+/// Rune has no percentage heights, so the window size comes from last frame's `zoom-host`.
+fn zoomed<A: Actions + 'static>(cx: &mut Cx<UiState<A>>, zoom: f32, root: El) -> El {
+    if (zoom - 1.0).abs() < f32::EPSILON {
+        return root.w_full().h_full();
+    }
+    let Some([w, h]) = cx.layout_size("zoom-host") else {
+        return col().key("zoom-host").w_full().h_full().child(root.w_full().h_full());
+    };
+    col().key("zoom-host").w_full().h_full()
+        .child(root.w(w / zoom).h(h / zoom).origin(0.0, 0.0).scale(zoom))
+}
+
 pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El {
     s.media.begin_render();
     crate::theme::apply(cx, &s.appearance);
+    let zoom = s.appearance.zoom;
+    cx.titlebar_height(crate::view_chrome::TITLE_BAR_HEIGHT * zoom);
     let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
     let arriving = !s.appearing.is_empty() && !cx.is_reduced_motion();
     if s.toast.reconnecting {
-        return col().key("root").w_full().h_full().fill(c(WHITE))
-            .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
-            .child(crate::toast::reconnect(s, cx.is_reduced_motion()));
+        return zoomed(cx, zoom, col().key("root").fill(c(WHITE))
+            .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
+            .child(crate::toast::reconnect(s, cx.is_reduced_motion())));
     }
-    let root = col().key("root").w_full().h_full();
-    crate::view_messages::snappy(root, arriving)
+    let root = col().key("root");
+    let root = crate::view_messages::snappy(root, arriving)
         // Snappy UI: no mount/unmount fades, layout tweens or colour springs anywhere below,
         // except the commit where messages arrive live (`view_messages::snappy`).
         .motion(Spring::NONE)
         .fill(c(WHITE))
-        .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing))
+        .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
         .children(crate::toast::banner(s))
         .child(
             row()
@@ -439,13 +496,22 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::toast::layer(s))
         .children(crate::profile::layer(s))
         .children(crate::status_menu::layer(s))
+        .children(crate::view_chrome::more_menu(s))
+        .children(crate::view_chatlist::more_menu(s))
+        .children(crate::team_menu::layer(s))
+        .children(crate::screens::overlays(s))
+        .children(crate::view_header::meet_options(s))
         .children(crate::image_viewer::overlay(s))
         .child(crate::chat_menu::overlay(s))
         .children(crate::message_menu::overlay(s))
-        .children(crate::shortcuts::overlays(s))
+        .children(crate::shortcuts::overlays(s));
+    zoomed(cx, zoom, root)
 }
 
 fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool, arriving: bool) -> El {
+    if s.screens.screen == crate::screens::Screen::Chat && let Some(view) = s.chatlist.quick_view {
+        return crate::quick_views::view(s, view);
+    }
     if s.screens.screen == crate::screens::Screen::Activity && s.screens.selected_activity.is_none() {
         return col().key("activity-preview").grow(1.0).min_w(0.0).h_full().center().gap(12.0)
             .child(crate::icons::sym("notifications", 40.0).color(c(MUTED)))
@@ -681,7 +747,7 @@ mod tests {
         state.apply(Update::Details(HashMap::from([("b".into(), crate::types::ChatDetails {
             avatar_id: None, group: vec![],
             members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
-            muted: true, presence: None,
+            muted: true, presence: None, importance: Default::default(), desktop_notifications: Default::default(),
         })])));
         assert_eq!(state.member_counts["b"], 1);
         assert!(state.details["b"].muted);
