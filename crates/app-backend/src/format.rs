@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc, Weekday};
 
-use app_backend::schemes::AVATAR_PALETTE;
+use crate::schemes::AVATAR_PALETTE;
 
 const BADGE_CAP: u32 = 99;
 const WEEKDAY_WINDOW_DAYS: i64 = 6;

@@ -100,7 +100,7 @@ impl WebShadow {
             schema: SCHEMA,
             engine: "teams-web",
             version: env!("CARGO_PKG_VERSION"),
-            build: app_base::version::build_version(),
+            build: app_backend::version::build_version(),
             started_utc: self.started_at.format(READABLE_STAMP).to_string(),
             duration_ms: self.duration_ms(),
             dropped_events: self.dropped,

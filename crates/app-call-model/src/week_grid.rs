@@ -211,7 +211,7 @@ fn close_cluster(blocks: &mut [WeekBlock], lanes: usize) {
 }
 
 pub fn range_label(start: NaiveDate, days: i64) -> String {
-    app_base::format::calendar_range_label(start, start + Duration::days(days - 1))
+    app_backend::format::calendar_range_label(start, start + Duration::days(days - 1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

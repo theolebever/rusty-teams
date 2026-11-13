@@ -422,6 +422,7 @@ dependencies = [
  "serde_json",
  "session",
  "store",
+ "sys-locale",
  "teams-core",
  "tokio",
  "windows 0.62.2",
@@ -453,7 +454,6 @@ dependencies = [
  "session",
  "sha2 0.10.9",
  "store",
- "sys-locale",
  "teams-core",
  "tempfile",
  "tokio",
@@ -469,7 +469,6 @@ version = "0.3.0"
 dependencies = [
  "agents",
  "app-backend",
- "app-base",
  "calling",
  "chatsvc",
  "chrono",

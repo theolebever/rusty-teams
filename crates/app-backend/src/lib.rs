@@ -3,6 +3,7 @@ pub mod backend;
 pub mod appearance;
 pub mod crash_log;
 pub mod diagnostics;
+pub mod format;
 pub mod launcher;
 pub mod notify;
 pub mod presence_link;

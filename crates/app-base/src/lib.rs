@@ -15,7 +15,6 @@ pub mod demo_recap;
 pub mod downloads;
 pub mod emoji;
 pub mod emoticons;
-pub mod format;
 #[cfg(feature = "gpui")]
 pub mod frame_log;
 pub mod fuzzy;
@@ -38,7 +37,7 @@ pub mod theme;
 pub mod translation;
 pub mod updater;
 pub mod user_activity;
-pub use app_backend::{appearance, autostart, crash_log, diagnostics, presence_link, runtime, version};
+pub use app_backend::{appearance, autostart, crash_log, diagnostics, format, presence_link, runtime, version};
 #[cfg(feature = "gpui")]
 pub mod zoom;
 pub const APP_NAME: &str = "Rusty Teams";

@@ -272,7 +272,7 @@ impl CallRecorder {
             schema: SCHEMA,
             app: AppInfo {
                 version: env!("CARGO_PKG_VERSION"),
-                build: app_base::version::build_version(),
+                build: app_backend::version::build_version(),
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
                 demo: self.demo,
