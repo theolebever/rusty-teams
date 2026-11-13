@@ -20,7 +20,10 @@ pub use invocation::{
     version_check_invocation, wsl_path, wsl_stop_invocation, wsl_unc_distro,
 };
 pub use parse::{OutputParser, RunEvent, parse_line};
-pub use profile::{AgentProfile, Environment, OutputFormat};
+pub use profile::{
+    AgentProfile, Environment, OutputFormat, environment_choices, output_choices,
+    same_environment_kind,
+};
 pub use runner::{
     RunOutcome, RunStatus, RunUpdate, probe, run, run_stop_invocation, run_stop_invocation_within,
 };
@@ -28,7 +31,9 @@ pub use sessions::{
     ExternalSession, RunningSession, encode_project_dir, live_session_names, resolve_project_dir,
     running_sessions, scan_external_sessions,
 };
-pub use settings::{AgentSettings, RECENT_WORKING_DIR_LIMIT, SETTINGS_KEY, SettingsProblem};
+pub use settings::{
+    AgentSettings, RECENT_WORKING_DIR_LIMIT, SETTINGS_KEY, SettingsProblem, move_item, unique_id,
+};
 pub use template::{UnknownPlaceholder, Values, placeholders_in, render, split_command};
 
 pub fn new_session_id() -> String {

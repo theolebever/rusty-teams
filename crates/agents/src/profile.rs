@@ -86,4 +86,85 @@ impl AgentProfile {
             mcp_config_flag: "--additional-mcp-config".to_string(),
         }
     }
+
+    /// The agents the settings offer to add, with their menu labels.
+    pub fn presets() -> [(&'static str, AgentProfile); 4] {
+        let custom = AgentProfile {
+            id: "custom".to_owned(),
+            name: "Custom agent".to_owned(),
+            environment: Environment::Host,
+            command: String::new(),
+            output: OutputFormat::Text,
+            open_session_command: String::new(),
+            mcp_config_flag: String::new(),
+        };
+        [
+            ("Claude Code (WSL)", AgentProfile::claude_wsl()),
+            ("Claude Code (Windows)", AgentProfile::claude_host()),
+            ("Copilot CLI (WSL)", AgentProfile::copilot_wsl()),
+            ("Custom", custom),
+        ]
+    }
+}
+
+/// The environments the settings offer, with their labels. A named WSL distro is
+/// `Wsl { distro: Some(_) }` whatever the name.
+pub fn environment_choices() -> [(&'static str, Environment); 3] {
+    [
+        ("Windows", Environment::Host),
+        ("WSL - default distro", Environment::Wsl { distro: None }),
+        (
+            "WSL - named distro",
+            Environment::Wsl {
+                distro: Some(String::new()),
+            },
+        ),
+    ]
+}
+
+fn environment_kind(environment: &Environment) -> u8 {
+    match environment {
+        Environment::Host => 0,
+        Environment::Wsl { distro: None } => 1,
+        Environment::Wsl { distro: Some(_) } => 2,
+    }
+}
+
+/// Whether two environments are the same choice of `environment_choices`.
+pub fn same_environment_kind(left: &Environment, right: &Environment) -> bool {
+    environment_kind(left) == environment_kind(right)
+}
+
+/// The output formats the settings offer, with their labels.
+pub fn output_choices() -> [(&'static str, OutputFormat); 3] {
+    [
+        (
+            "Claude stream-json - live steps",
+            OutputFormat::ClaudeStreamJson,
+        ),
+        ("Copilot JSON - live steps", OutputFormat::CopilotJsonl),
+        ("Plain text - time and last line", OutputFormat::Text),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environments_compare_by_kind_not_distro_name() {
+        let named = |name: &str| Environment::Wsl {
+            distro: Some(name.to_owned()),
+        };
+        assert!(same_environment_kind(&named("Ubuntu"), &named("Debian")));
+        assert!(!same_environment_kind(
+            &named("Ubuntu"),
+            &Environment::Wsl { distro: None }
+        ));
+        assert!(!same_environment_kind(&Environment::Host, &named("Ubuntu")));
+        assert!(same_environment_kind(
+            &Environment::Host,
+            &Environment::Host
+        ));
+    }
 }

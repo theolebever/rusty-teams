@@ -802,6 +802,13 @@ impl Actions for Bridge {
             if let Err(error) = written { app_backend::diagnostics::record(format!("Rune: Outlook reminder not saved: {error}")); }
         });
     }
+    fn save_agent_settings(&self, settings: agents::AgentSettings) {
+        if self.shared.read_only { return; }
+        let Some(engine) = self.shared.engine() else { return };
+        if let Err(error) = engine.store().set_meta(agents::SETTINGS_KEY, &settings.to_json()) {
+            app_backend::diagnostics::record(format!("Rune: agent settings not saved: {error}"));
+        }
+    }
     fn load_reminders(&self, start: DateTime<Utc>, end: DateTime<Utc>) {
         let launcher = self.shared.launcher();
         let shared = self.shared.clone();

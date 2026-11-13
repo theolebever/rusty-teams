@@ -250,6 +250,8 @@ pub trait Actions {
     /// `Update::AgentProgress`, the end as `Update::AgentResult`.
     fn run_agent(&self, _id: &str, _prompt: &str, _working_dir: &str) {}
     fn stop_agent(&self) {}
+    /// Saves the agents settings where GPUI keeps them (`agents::SETTINGS_KEY`).
+    fn save_agent_settings(&self, _settings: agents::AgentSettings) {}
     fn rename_chat(&self, _id: &str, _title: &str) {}
     fn meet_now(&self, _conversation_id: &str) {}
     /// Shows the cached messages at once, then fetches newer ones.

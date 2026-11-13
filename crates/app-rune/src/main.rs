@@ -5,6 +5,7 @@
 
 mod agenda;
 mod agent_panel;
+mod agent_settings;
 mod arguments;
 mod avatar;
 mod bridge;

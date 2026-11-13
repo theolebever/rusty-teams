@@ -64,31 +64,6 @@ pub struct AgentsSettings {
     _runs_subscription: Subscription,
 }
 
-pub fn unique_id(base: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(base) {
-        return base.to_owned();
-    }
-    (2..)
-        .map(|suffix| format!("{base}-{suffix}"))
-        .find(|candidate| !taken(candidate))
-        .unwrap_or_else(|| base.to_owned())
-}
-
-pub fn move_item<T>(items: &mut [T], index: usize, up: bool) -> bool {
-    let target = if up {
-        index.checked_sub(1)
-    } else {
-        Some(index + 1).filter(|target| *target < items.len())
-    };
-    match target {
-        Some(target) if index < items.len() => {
-            items.swap(index, target);
-            true
-        }
-        _ => false,
-    }
-}
-
 impl AgentsSettings {
     pub fn new(runs: Entity<AgentRuns>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&runs, |_, _, cx| cx.notify());
@@ -430,40 +405,17 @@ impl AgentsSettings {
     }
 
     fn add_agent(&mut self, preset: AgentProfile, window: &mut Window, cx: &mut Context<Self>) {
-        let mut profile = preset;
-        let existing: Vec<String> = self
-            .runs
-            .read(cx)
-            .settings()
-            .agents
-            .iter()
-            .map(|agent| agent.id.clone())
-            .collect();
-        profile.id = unique_id(&profile.id, |candidate| {
-            existing.iter().any(|id| id == candidate)
-        });
-        let id = profile.id.clone();
+        let mut id = String::new();
         self.runs.update(cx, |runs, cx| {
-            runs.update_settings(|settings| settings.agents.push(profile), cx)
+            runs.update_settings(|settings| id = settings.add_agent(preset), cx)
         });
         self.open_agent(&id, window, cx);
     }
 
     fn add_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = self.runs.read(cx).settings();
-        let agent_id = settings
-            .agents
-            .first()
-            .map(|agent| agent.id.clone())
-            .unwrap_or_default();
-        let mut action = AgentAction::answer_this(&agent_id);
-        action.label = "New action".to_owned();
-        action.id = unique_id("action", |candidate| {
-            settings.actions.iter().any(|action| action.id == candidate)
-        });
-        let id = action.id.clone();
+        let mut id = String::new();
         self.runs.update(cx, |runs, cx| {
-            runs.update_settings(|settings| settings.actions.push(action), cx)
+            runs.update_settings(|settings| id = settings.add_action(), cx)
         });
         self.open_action(&id, window, cx);
     }
@@ -472,34 +424,12 @@ impl AgentsSettings {
         self.runs.update(cx, |runs, cx| {
             runs.update_settings(
                 |settings| {
-                    move_item(&mut settings.actions, index, up);
+                    agents::move_item(&mut settings.actions, index, up);
                 },
                 cx,
             )
         });
     }
-}
-
-type Preset = (&'static str, fn() -> AgentProfile);
-
-fn agent_presets() -> [Preset; 4] {
-    fn custom() -> AgentProfile {
-        AgentProfile {
-            id: "custom".to_owned(),
-            name: "Custom agent".to_owned(),
-            environment: Environment::Host,
-            command: String::new(),
-            output: OutputFormat::Text,
-            open_session_command: String::new(),
-            mcp_config_flag: String::new(),
-        }
-    }
-    [
-        ("Claude Code (WSL)", AgentProfile::claude_wsl),
-        ("Claude Code (Windows)", AgentProfile::claude_host),
-        ("Copilot CLI (WSL)", AgentProfile::copilot_wsl),
-        ("Custom", custom),
-    ]
 }
 
 fn list_row(
@@ -570,12 +500,12 @@ impl AgentsSettings {
     fn list_page(&mut self, cx: &mut Context<Self>) -> Div {
         let settings = self.runs.read(cx).settings().clone();
         let this = cx.entity();
-        let preset_entries: Vec<MenuEntry> = agent_presets()
+        let preset_entries: Vec<MenuEntry> = AgentProfile::presets()
             .into_iter()
-            .map(|(label, build)| {
+            .map(|(label, preset)| {
                 let this = this.clone();
                 let choose: Choice = std::rc::Rc::new(move |window, cx| {
-                    this.update(cx, |this, cx| this.add_agent(build(), window, cx))
+                    this.update(cx, |this, cx| this.add_agent(preset.clone(), window, cx))
                 });
                 MenuEntry {
                     label: label.to_owned(),
@@ -694,30 +624,5 @@ impl Render for AgentsSettings {
             Page::Agent => self.agent_page(window, cx).into_any_element(),
             Page::Action => self.action_page(window, cx).into_any_element(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{move_item, unique_id};
-
-    #[test]
-    fn ids_get_a_numeric_suffix_when_taken() {
-        let taken = ["claude", "claude-2"];
-        let is_taken = |candidate: &str| taken.contains(&candidate);
-        assert_eq!(unique_id("copilot", is_taken), "copilot");
-        assert_eq!(unique_id("claude", is_taken), "claude-3");
-    }
-
-    #[test]
-    fn moving_swaps_neighbours_and_stops_at_the_ends() {
-        let mut items = vec!["a", "b", "c"];
-        assert!(move_item(&mut items, 1, true));
-        assert_eq!(items, ["b", "a", "c"]);
-        assert!(move_item(&mut items, 1, false));
-        assert_eq!(items, ["b", "c", "a"]);
-        assert!(!move_item(&mut items, 0, true));
-        assert!(!move_item(&mut items, 2, false));
-        assert_eq!(items, ["b", "c", "a"]);
     }
 }

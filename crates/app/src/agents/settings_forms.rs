@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use agents::{Environment, OutputFormat};
+use agents::{Environment, environment_choices, output_choices, same_environment_kind};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, h_flex, input::Textarea, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -26,42 +26,6 @@ const PLACEHOLDER_CHIPS: [&str; 9] = [
     "session_id",
     "agent",
 ];
-
-fn environment_choices() -> [(&'static str, Environment); 3] {
-    [
-        ("Windows", Environment::Host),
-        ("WSL - default distro", Environment::Wsl { distro: None }),
-        (
-            "WSL - named distro",
-            Environment::Wsl {
-                distro: Some(String::new()),
-            },
-        ),
-    ]
-}
-
-fn environment_kind(environment: &Environment) -> u8 {
-    match environment {
-        Environment::Host => 0,
-        Environment::Wsl { distro: None } => 1,
-        Environment::Wsl { distro: Some(_) } => 2,
-    }
-}
-
-fn same_environment_kind(left: &Environment, right: &Environment) -> bool {
-    environment_kind(left) == environment_kind(right)
-}
-
-fn output_choices() -> [(&'static str, OutputFormat); 3] {
-    [
-        (
-            "Claude stream-json - live steps",
-            OutputFormat::ClaudeStreamJson,
-        ),
-        ("Copilot JSON - live steps", OutputFormat::CopilotJsonl),
-        ("Plain text - time and last line", OutputFormat::Text),
-    ]
-}
 
 fn back_row(title: String, cx: &mut Context<AgentsSettings>) -> Stateful<Div> {
     h_flex()
@@ -444,28 +408,4 @@ pub(super) fn resume_toggle(resume: bool, settings: Entity<AgentsSettings>) -> S
         .on_click(move |_, _, cx| {
             settings.update(cx, |this, cx| this.set_resume_interrupted_runs(!resume, cx))
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use agents::Environment;
-
-    use super::same_environment_kind;
-
-    #[test]
-    fn environments_compare_by_kind_not_distro_name() {
-        let named = |name: &str| Environment::Wsl {
-            distro: Some(name.to_owned()),
-        };
-        assert!(same_environment_kind(&named("Ubuntu"), &named("Debian")));
-        assert!(!same_environment_kind(
-            &named("Ubuntu"),
-            &Environment::Wsl { distro: None }
-        ));
-        assert!(!same_environment_kind(&Environment::Host, &named("Ubuntu")));
-        assert!(same_environment_kind(
-            &Environment::Host,
-            &Environment::Host
-        ));
-    }
 }

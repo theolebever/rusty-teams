@@ -58,7 +58,61 @@ fn check_placeholders(item_id: &str, texts: &[&str], problems: &mut Vec<Settings
     }
 }
 
+/// `base`, or `base-2`, `base-3`... when `taken`.
+pub fn unique_id(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_owned();
+    }
+    (2..)
+        .map(|suffix| format!("{base}-{suffix}"))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or_else(|| base.to_owned())
+}
+
+/// Swaps `items[index]` with its neighbour above or below; false at either end.
+pub fn move_item<T>(items: &mut [T], index: usize, up: bool) -> bool {
+    let target = if up {
+        index.checked_sub(1)
+    } else {
+        Some(index + 1).filter(|target| *target < items.len())
+    };
+    match target {
+        Some(target) if index < items.len() => {
+            items.swap(index, target);
+            true
+        }
+        _ => false,
+    }
+}
+
 impl AgentSettings {
+    /// Adds `preset` under an id no other agent has, and returns that id.
+    pub fn add_agent(&mut self, mut preset: AgentProfile) -> String {
+        preset.id = unique_id(&preset.id, |candidate| {
+            self.agents.iter().any(|agent| agent.id == candidate)
+        });
+        let id = preset.id.clone();
+        self.agents.push(preset);
+        id
+    }
+
+    /// Adds a "New action" answering with the first agent, and returns its id.
+    pub fn add_action(&mut self) -> String {
+        let agent_id = self
+            .agents
+            .first()
+            .map(|agent| agent.id.clone())
+            .unwrap_or_default();
+        let mut action = AgentAction::answer_this(&agent_id);
+        action.label = "New action".to_owned();
+        action.id = unique_id("action", |candidate| {
+            self.actions.iter().any(|action| action.id == candidate)
+        });
+        let id = action.id.clone();
+        self.actions.push(action);
+        id
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
@@ -121,6 +175,31 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_get_a_numeric_suffix_when_taken() {
+        let taken = ["claude", "claude-2"];
+        let is_taken = |candidate: &str| taken.contains(&candidate);
+        assert_eq!(unique_id("copilot", is_taken), "copilot");
+        assert_eq!(unique_id("claude", is_taken), "claude-3");
+        let mut settings = AgentSettings::default();
+        assert_eq!(settings.add_agent(AgentProfile::claude_wsl()), "claude-2");
+        assert_eq!(settings.add_action(), "action");
+        assert_eq!(settings.add_action(), "action-2");
+        assert_eq!(settings.actions[2].agent_id, "claude");
+    }
+
+    #[test]
+    fn moving_swaps_neighbours_and_stops_at_the_ends() {
+        let mut items = vec!["a", "b", "c"];
+        assert!(move_item(&mut items, 1, true));
+        assert_eq!(items, ["b", "a", "c"]);
+        assert!(move_item(&mut items, 1, false));
+        assert_eq!(items, ["b", "c", "a"]);
+        assert!(!move_item(&mut items, 0, true));
+        assert!(!move_item(&mut items, 2, false));
+        assert_eq!(items, ["b", "c", "a"]);
+    }
 
     #[test]
     fn default_round_trips_and_is_valid() {

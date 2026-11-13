@@ -92,11 +92,12 @@ pub enum Section {
     Appearance,
     Chats,
     Devices,
+    Agents,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Devices, Self::About];
+    const ALL: [Section; 7] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Devices, Self::Agents, Self::About];
 
     fn label(self) -> &'static str {
         match self {
@@ -105,6 +106,7 @@ impl Section {
             Self::Appearance => "Appearance and accessibility",
             Self::Chats => "Chats and channels",
             Self::Devices => "Devices",
+            Self::Agents => "Agents",
             Self::About => "About",
         }
     }
@@ -117,6 +119,7 @@ impl Section {
             Self::Appearance => &["Theme", "Color scheme", "App icon"],
             Self::Chats => &[RECEIPTS, ENTER, REACTIONS, SKIN_TONE],
             Self::Devices => &["Speaker", "Microphone", "Camera"],
+            Self::Agents => &["Agent", "Action", "Resume interrupted runs"],
             Self::About => &["Version", "Build"],
         }
     }
@@ -149,6 +152,7 @@ pub struct State {
     pub section: Section,
     pub search: TextEdit,
     pub prefs: Preferences,
+    pub(crate) agent_form: crate::agent_settings::Form,
 }
 
 /// Applies `change` to the view and hands it to the bridge to save.
@@ -169,7 +173,7 @@ pub(crate) fn notify<A: Actions>(s: &mut UiState<A>, edit: impl FnOnce(&mut rule
     change(s, Change::Notify(settings));
 }
 
-fn caption(label: &str) -> El {
+pub(crate) fn caption(label: &str) -> El {
     text(label.to_owned()).font(ts(12.0, 600.0)).color(color("#616161")).pt(16.0)
 }
 
@@ -181,7 +185,7 @@ fn switch(on: bool) -> El {
 }
 
 /// A setting row with a switch on the right; the whole row toggles.
-fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
+pub(crate) fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
     let row = row().key(key.to_owned()).w_full().min_h(40.0).px(12.0).gap(12.0).center_y().radius(6.0)
         .child(text(title.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).wrap().grow(1.0).min_w(0.0))
         .child(switch(on));
@@ -189,7 +193,7 @@ fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool,
 }
 
 /// A radio row in a choice list.
-fn choice<A: Actions + 'static>(key: String, label: &str, selected: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
+pub(crate) fn choice<A: Actions + 'static>(key: String, label: &str, selected: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
     row().key(key).w_full().h(34.0).px(12.0).gap(10.0).center_y().radius(6.0).hover(color("#EBEBEB")).on_press(press)
         .child(text(if selected { "●" } else { "○" }).color(color(if selected { "#5B5FC7" } else { "#616161" })))
         .child(text(label.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).truncate())
@@ -223,6 +227,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         Section::Appearance => appearance(s),
         Section::Chats => chats(s),
         Section::Devices => devices(s),
+        Section::Agents => crate::agent_settings::pane(s),
         Section::About => about(),
     };
     row().key("settings").w_full().h_full().fill(color("#FFFFFF"))
