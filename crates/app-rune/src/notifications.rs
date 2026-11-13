@@ -51,15 +51,21 @@ pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize
     s.chats.iter().filter(|chat| chat.unread).count() + activity.items.iter().filter(|item| activity.counts_for_bell(item)).count()
 }
 
-/// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts.
+/// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts;
+/// loops the ringback or reconnecting tone of the current call (`CallView::tone`).
 pub fn ring<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>) {
+    let tone = s.calls.tone();
+    if s.call_tone.as_ref().map(|(playing, _)| *playing) != tone {
+        s.call_tone = tone.map(|tone| (tone, crate::sound::start(tone.file_name(), true)));
+    }
     let ringing = s.calls.ring.is_some();
     if ringing == std::mem::replace(&mut s.was_ringing, ringing) { return; }
     s.ringtone = None;
     if !ringing { return; }
     let settings = &s.settings.prefs.notify;
     let in_call = s.calls.state.as_ref().is_some_and(calling::CallState::is_active);
-    if let Some(tone) = rules::ringtone_for(settings, in_call, own_busy(s)).filter(|_| !settings.do_not_disturb) {
+    // GPUI counts being in a call as busy, so "sound when busy" off silences the in-call beep.
+    if let Some(tone) = rules::ringtone_for(settings, in_call, in_call || own_busy(s)).filter(|_| !settings.do_not_disturb) {
         s.ringtone = Some(crate::sound::start(tone.file_name(), true));
     }
     if rules::should_flash(settings, true, rune_notify::app_focused()) { crate::taskbar::flash(); }

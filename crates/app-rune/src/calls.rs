@@ -896,6 +896,17 @@ impl CallView {
             .collect()
     }
 
+    /// The looping call tone, as GPUI's `sync_call_sounds`: ringback while an outgoing call
+    /// rings (only people calls report progress), reconnecting outside the lobby.
+    pub(crate) fn tone(&self) -> Option<app_backend::notify::sounds::CallTone> {
+        use app_backend::notify::sounds::CallTone;
+        match self.state {
+            Some(CallState::Connecting) if self.progress.is_some() => Some(CallTone::OutgoingRinging),
+            Some(CallState::Reconnecting { .. }) if !self.lobby => Some(CallTone::Reconnecting),
+            _ => None,
+        }
+    }
+
     fn status(&self, now: Instant) -> String {
         if self.lobby {
             return "Waiting in the lobby...".into();
@@ -2769,16 +2780,21 @@ mod tests {
         let since = Instant::now();
         let mut call = CallView::default();
         call.apply(CallUpdate::State(CallState::Connecting));
+        assert_eq!(call.tone(), None);
         call.apply(CallUpdate::Progress(calling::Progress::Ringing));
         assert_eq!(call.status(since), "Ringing");
+        assert_eq!(call.tone(), Some(app_backend::notify::sounds::CallTone::OutgoingRinging));
         call.apply(CallUpdate::Lobby(true));
         assert_eq!(call.status(since), "Waiting in the lobby...");
         call.apply(CallUpdate::Lobby(false));
         call.apply(CallUpdate::State(CallState::Connected { since }));
         assert_eq!(call.status(since + Duration::from_secs(61)), "01:01");
+        assert_eq!(call.tone(), None);
         call.apply(CallUpdate::State(CallState::Reconnecting { since }));
         assert_eq!(call.status(since), "Reconnecting...");
+        assert_eq!(call.tone(), Some(app_backend::notify::sounds::CallTone::Reconnecting));
         call.apply(CallUpdate::State(CallState::Connected { since }));
+        assert_eq!(call.tone(), None);
         assert_eq!(call.status(since + Duration::from_secs(3725)), "1:02:05");
     }
 

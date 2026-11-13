@@ -84,6 +84,8 @@ pub struct UiState<A: Actions> {
     pub(crate) ringtone: Option<crate::sound::Handle>,
     /// Whether a call rang at the last frame, so a silent ring flashes once (`notifications::ring`).
     pub(crate) was_ringing: bool,
+    /// The looping ringback or reconnecting tone of the current call (`notifications::ring`).
+    pub(crate) call_tone: Option<(app_backend::notify::sounds::CallTone, crate::sound::Handle)>,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
     pub nav: crate::shortcuts::NavState,
     pub global_search: crate::search::SearchState,
@@ -114,6 +116,7 @@ impl<A: Actions> UiState<A> {
             launch_command: None,
             ringtone: None,
             was_ringing: false,
+            call_tone: None,
             nav: Default::default(),
             details: HashMap::new(),
             typing: HashMap::new(),
