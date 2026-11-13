@@ -7,6 +7,7 @@ name: Test
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**', '.github/readme/**']
   workflow_dispatch:
 
 permissions:
@@ -43,6 +44,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test
+          # Tag and branch runs restore main's cache but never save their own: the
+          # repository's 10 GB cache quota only holds one cache per job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Tests
         run: cargo test
@@ -62,6 +66,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test
+          # Tag and branch runs restore main's cache but never save their own: the
+          # repository's 10 GB cache quota only holds one cache per job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # After the toolchain: staging runs `cargo metadata`.
       - uses: ./.github/actions/setup-windows

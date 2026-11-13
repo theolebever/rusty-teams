@@ -8,7 +8,8 @@ crateDir="$(realpath "${1:-$repoRoot/crates/app}")"
 binaryName="${2:-}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repoRoot/target}"
 export PATH="$HOME/.cargo/bin:$PATH"
-targets=(aarch64-apple-darwin x86_64-apple-darwin)
+# MACOS_TARGETS narrows the build, e.g. arm64 only for CI artifacts; releases keep both.
+read -ra targets <<< "${MACOS_TARGETS:-aarch64-apple-darwin x86_64-apple-darwin}"
 
 rustup target add "${targets[@]}" >/dev/null
 

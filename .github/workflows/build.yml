@@ -6,6 +6,7 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**', '.github/readme/**']
     tags: ['*']
   workflow_dispatch:
 
@@ -43,6 +44,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build
+          # Tag and branch runs restore main's cache but never save their own: the
+          # repository's 10 GB cache quota only holds one cache per job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build -p app-rune --release --locked
@@ -58,6 +62,9 @@ jobs:
     name: Windows
     runs-on: windows-latest
     timeout-minutes: 90
+    # rust-lld links much faster than link.exe on a binary this size.
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
     defaults:
       run:
         shell: bash
@@ -69,6 +76,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build
+          # Tag and branch runs restore main's cache but never save their own: the
+          # repository's 10 GB cache quota only holds one cache per job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: ./.github/actions/setup-windows
         with:
@@ -119,9 +129,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: build
+          # Tag and branch runs restore main's cache but never save their own: the
+          # repository's 10 GB cache quota only holds one cache per job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The script builds both architectures and wraps the universal binary in a .app.
+      # The script wraps the binary in a .app. Tags build the universal (arm64 +
+      # x86_64) binary; other runs build arm64 only, which halves the job.
       - name: Build
+        env:
+          MACOS_TARGETS: ${{ github.ref_type == 'tag' && 'aarch64-apple-darwin x86_64-apple-darwin' || 'aarch64-apple-darwin' }}
         run: scripts/build-macos.sh crates/app-rune rusty-teams-rune
 
       - uses: actions/upload-artifact@v7
