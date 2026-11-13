@@ -8,6 +8,8 @@ use calling::{
     VideoPicture,
 };
 use teams_core::{MeetingLink, parse_meeting_link};
+
+use crate::calls::CallIntro;
 use tokio::sync::mpsc::UnboundedSender;
 
 struct State {
@@ -25,6 +27,7 @@ pub struct Calls {
     state: Arc<Mutex<State>>,
     publish: Arc<dyn Fn(CallUpdate) + Send + Sync>,
     video: Arc<dyn Fn() + Send + Sync>,
+    intro: Arc<dyn Fn(CallIntro) + Send + Sync>,
     read_only: bool,
 }
 
@@ -33,6 +36,7 @@ impl Calls {
         read_only: bool,
         publish: impl Fn(CallUpdate) + Send + Sync + 'static,
         video: impl Fn() + Send + Sync + 'static,
+        intro: impl Fn(CallIntro) + Send + Sync + 'static,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
@@ -47,6 +51,7 @@ impl Calls {
             })),
             publish: Arc::new(publish),
             video: Arc::new(video),
+            intro: Arc::new(intro),
             read_only,
         }
     }
@@ -77,6 +82,7 @@ impl Calls {
                 return;
             };
             state.retry = Some((spec.clone(), video));
+            (self.intro)(CallIntro::of(&spec));
             let handle = if video {
                 launcher.start_video_call(spec)
             } else {
@@ -119,6 +125,7 @@ impl Calls {
         let state = self.state.clone();
         let publish = self.publish.clone();
         let video_frames = self.video.clone();
+        let intro = self.intro.clone();
         app_backend::runtime::handle().spawn(async move {
             let target = match link {
                 MeetingLink::Thread(meeting) => Ok(MeetingTarget {
@@ -149,6 +156,7 @@ impl Calls {
                     return;
                 }
                 state.retry = Some((spec.clone(), video));
+                intro(CallIntro::of(&spec));
                 let handle = if video {
                     launcher.start_video_call(spec)
                 } else {
@@ -331,7 +339,7 @@ mod tests {
 
     #[test]
     fn prejoin_settings_coalesce_and_invalid_joins_clear_them() {
-        let calls = Calls::new(false, |_| {}, || {});
+        let calls = Calls::new(false, |_| {}, || {}, |_| {});
         calls.command(CallCommand::SelectInput(
             calling::DeviceChoice::SystemDefault,
         ));

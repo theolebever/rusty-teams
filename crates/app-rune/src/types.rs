@@ -175,6 +175,10 @@ pub enum Update {
     Appearance(app_backend::appearance::AppearanceSettings),
     Activity(teams_core::ActivitySnapshot),
     Call(calling::CallUpdate),
+    /// How the next call starts; sent before its first `Call` update.
+    CallIntro(crate::calls::CallIntro),
+    /// The org recording policy and our own tenant, read when a call starts.
+    RecordingRights { policy: Option<chatsvc::RecordingPolicy>, own_tenant: Option<String> },
     Ring(calling::EngineEvent),
     VideoReady,
     Image { key: String, bytes: Vec<u8> },
@@ -188,6 +192,7 @@ pub enum Update {
     /// The chat list section settings; the adaptive rail adds channel mentions to the badge.
     SectionSettings(teams_core::ChatSectionSettings),
     /// Answer to `load_reminders`: the Outlook reminders of that range.
+    LiveMeeting { thread_id: String, meeting: Option<calling::meeting::LiveMeeting> },
     OutlookReminders { start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>, result: Result<Vec<chatsvc::Reminder>, String> },
     Search { conversation_id: String, query: String, rows: Vec<MessageRow> },
     /// Answer to the chat-list search box (`search.rs`).
@@ -280,6 +285,8 @@ pub trait Actions {
     fn write_reminder(&self, _event_id: &str, _snooze_until: Option<chrono::DateTime<chrono::Utc>>) {}
     /// Reads the Outlook reminders between two times, answered with `Update::OutlookReminders`.
     fn load_reminders(&self, _start: chrono::DateTime<chrono::Utc>, _end: chrono::DateTime<chrono::Utc>) {}
+    /// Looks up whether a meeting runs in a thread, answered with `Update::LiveMeeting`.
+    fn load_live_meeting(&self, _thread_id: &str) {}
     /// Lists audio devices and cameras, answered with `Update::Call(Devices | Cameras)`.
     fn load_devices(&self) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}

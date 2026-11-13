@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Local, Offset, Utc};
 use rune::*;
 use state::call::outlook_reminders::ReminderWrite;
-use state::call::reminder::{MeetingToast, subtitle};
+use state::call::reminder::{MeetingToast, ReminderPhase, subtitle};
 
 use crate::screens::{button, color, style};
 use crate::types::Actions;
@@ -22,8 +22,11 @@ fn shown<A: Actions>(s: &UiState<A>) -> Option<&MeetingToast> {
 pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
     let before = shown(s).map(|toast| toast.id);
     if let Some((start, end)) = s.reminders.outlook_mut().poll_range(&s.screens.agenda, now) { s.actions.load_reminders(start, end); }
-    // ponytail: no live-meeting lookup, so a meeting never reaches the Live phase here.
-    let update = s.reminders.update(&s.screens.agenda, &HashSet::new(), now, true);
+    for thread_id in s.reminders.live_candidates(&s.screens.agenda, now) { s.actions.load_live_meeting(&thread_id); }
+    let live: HashSet<String> = s.live_meetings.iter()
+        .filter(|(_, meeting)| meeting.is_running(now.timestamp()) && meeting.target().is_some())
+        .map(|(thread_id, _)| thread_id.clone()).collect();
+    let update = s.reminders.update(&s.screens.agenda, &live, now, true);
     let after = shown(s).cloned();
     if update.changed && after.as_ref().map(|toast| toast.id) != before {
         if let Some(toast) = &after { announce(s, toast, update.chime); }
@@ -80,12 +83,15 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if !s.read_only {
         actions = actions.child(button::<A>("Join", "reminder-join", |s, _| { join(s); }));
     }
+    // As GPUI: snoozing only makes sense before the meeting starts.
+    if toast.phase == ReminderPhase::Soon {
+        actions = actions.child(button::<A>("Snooze", "reminder-snooze", |s, _| snooze(s)));
+    }
     let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(10.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
         .role("alert").label(toast.subject.clone())
         .child(text(toast.subject.clone()).font(style(15.0, 600.0)).color(color("#242424")).truncate())
         .child(text(card_subtitle(toast)).font(style(13.0, 400.0)).color(color("#616161")))
         .child(actions
-            .child(button::<A>("Snooze", "reminder-snooze", |s, _| snooze(s)))
             .child(button::<A>("Dismiss", "reminder-dismiss", |s, _| dismiss(s))));
     Some(el().pin(None, None, Some(16.0), Some(16.0)).child(card))
 }
@@ -98,12 +104,13 @@ mod tests {
     use std::cell::RefCell;
 
     #[derive(Default)]
-    struct Fake(RefCell<Vec<(String, bool)>>, RefCell<Vec<(DateTime<Utc>, DateTime<Utc>)>>);
+    struct Fake(RefCell<Vec<(String, bool)>>, RefCell<Vec<(DateTime<Utc>, DateTime<Utc>)>>, RefCell<Vec<String>>);
     impl Actions for Fake {
         fn open(&self, _: &str) {}
         fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn write_reminder(&self, event_id: &str, snooze_until: Option<DateTime<Utc>>) { self.0.borrow_mut().push((event_id.into(), snooze_until.is_some())); }
         fn load_reminders(&self, start: DateTime<Utc>, end: DateTime<Utc>) { self.1.borrow_mut().push((start, end)); }
+        fn load_live_meeting(&self, thread_id: &str) { self.2.borrow_mut().push(thread_id.into()); }
     }
 
     fn meeting(id: &str, start: DateTime<Utc>) -> CalendarEvent {
@@ -159,5 +166,28 @@ mod tests {
         assert_eq!(rt.state.actions.1.borrow().len(), 1, "polls at most once a minute");
         rt.update(move |s, _| { poll(s, now + Duration::minutes(2)); });
         assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("later"));
+    }
+
+    #[test]
+    fn a_started_meeting_that_runs_turns_live() {
+        let now = Utc::now();
+        let mut state = UiState::new(Fake::default());
+        state.settings.prefs.notify.do_not_disturb = true;
+        let mut event = meeting("standup", now - Duration::minutes(1));
+        event.thread_id = Some("19:standup".into());
+        state.screens.agenda = vec![event];
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
+        rt.update(move |s, _| assert!(poll(s, now)));
+        assert_eq!(shown(&rt.state).map(|r| r.phase), Some(ReminderPhase::Started));
+        assert_eq!(*rt.state.actions.2.borrow(), ["19:standup"]);
+        let meeting = calling::meeting::LiveMeeting {
+            thread_id: "19:standup".into(), conversation_url: None, expiration: None,
+            organizer_id: Some("organizer".into()), tenant_id: Some("tenant".into()), meeting_code: None, passcode: None,
+        };
+        rt.update(move |s, _| s.apply(crate::types::Update::LiveMeeting { thread_id: "19:standup".into(), meeting: Some(meeting) }));
+        rt.update(move |s, _| assert!(poll(s, now + Duration::seconds(1))));
+        rt.frame(1.0);
+        assert_eq!(shown(&rt.state).map(|r| r.phase), Some(ReminderPhase::Live));
+        assert!(rt.find("reminder-snooze").is_none(), "no snooze once started");
     }
 }

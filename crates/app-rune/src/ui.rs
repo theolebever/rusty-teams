@@ -77,6 +77,8 @@ pub struct UiState<A: Actions> {
     pub agent: crate::agent_panel::State,
     pub settings: crate::settings::State,
     pub reminders: state::call::reminder::MeetingToasts,
+    /// Running meetings by thread id, looked up near a reminded meeting (`reminders::poll`).
+    pub(crate) live_meetings: HashMap<String, calling::meeting::LiveMeeting>,
     pub tray: crate::tray::State,
     /// The launch option of the first process, run at the first poll (`arguments::Command`).
     pub(crate) launch_command: Option<crate::arguments::Command>,
@@ -114,6 +116,7 @@ impl<A: Actions> UiState<A> {
             agent: Default::default(),
             settings: Default::default(),
             reminders: Default::default(),
+            live_meetings: HashMap::new(),
             tray: Default::default(),
             launch_command: None,
             ringtone: None,
@@ -298,6 +301,8 @@ impl<A: Actions> UiState<A> {
                 if self.call_window.is_none() && matches!(&update, calling::CallUpdate::State(calling::CallState::Connecting)) { self.screens.screen = crate::screens::Screen::Calls; }
                 self.calls.apply(update);
             }
+            Update::CallIntro(intro) => self.calls.start(intro),
+            Update::RecordingRights { policy, own_tenant } => self.calls.recording_rights(policy, own_tenant),
             Update::Ring(event) => {
                 if self.call_window.is_none() && matches!(&event, calling::EngineEvent::Incoming(_)) { self.screens.screen = crate::screens::Screen::Calls; }
                 self.calls.apply_ring(event);
@@ -328,6 +333,8 @@ impl<A: Actions> UiState<A> {
             Update::Agenda(events) => self.screens.agenda = events,
             Update::SectionSettings(settings) => self.section_settings = settings,
             Update::OutlookReminders { start, end, result } => self.reminders.outlook_mut().apply(start, end, result),
+            Update::LiveMeeting { thread_id, meeting: Some(meeting) } => { self.live_meetings.insert(thread_id, meeting); }
+            Update::LiveMeeting { thread_id, meeting: None } => { self.live_meetings.remove(&thread_id); }
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
                     self.search_results = Some(rows);

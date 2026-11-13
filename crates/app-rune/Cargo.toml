@@ -15,6 +15,8 @@ embed-resource = "3"
 [dependencies]
 agents.workspace = true
 app-backend.workspace = true
+# Shared host code; GPUI stays off, as through app-state.
+app-base = { workspace = true, default-features = false }
 app-call-model.workspace = true
 app-state = { workspace = true, default-features = false }
 calling.workspace = true

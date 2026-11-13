@@ -35,11 +35,19 @@ impl CallWindow {
         if matches!(
             update,
             Update::Call(_)
+                | Update::CallIntro(_)
+                | Update::RecordingRights { .. }
                 | Update::Ring(_)
                 | Update::Appearance(_)
                 | Update::People { .. }
                 | Update::Me { .. }
                 | Update::Details(_)
+                // The chat panel beside the call: its messages, pictures and unread state.
+                | Update::Messages { .. }
+                | Update::Chats(_)
+                | Update::Image { .. }
+                | Update::ImagePreview { .. }
+                | Update::ImageFailed { .. }
         ) {
             let update = update.clone();
             if matches!(
@@ -55,6 +63,8 @@ impl CallWindow {
                     Update::Call(calling::CallUpdate::State(CallState::Ended { .. }))
                 );
                 state.apply(update);
+                // The main window plays the call chimes.
+                state.calls.tones.clear();
                 if ended {
                     state.calls.retry = state.actions.retry_call();
                 }

@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use app_call_model::model::CallModel;
+use app_call_model::end_screen::{end_tone, join_tone};
+use app_call_model::model::{CallKind, CallModel};
+use app_backend::notify::sounds::CallTone;
+use app_call_model::record_rights::{RecordBlock, RecordFeature};
 use app_call_model::recording_menu::{RecordAction, record_actions};
 use app_call_model::stage_layout::{self as gallery, VisibleRotation as Rotation};
 use crate::types::Actions;
@@ -426,6 +429,44 @@ fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(history)
 }
 
+/// How a call started, as GPUI's `CallModel` constructors (`people`, `meeting`, `incoming`)
+/// record it: the kind, the chat it belongs to and the name to show when that chat is unknown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallIntro {
+    pub kind: CallKind,
+    pub conversation: Option<String>,
+    pub name: String,
+}
+
+impl CallIntro {
+    pub fn of(spec: &calling::CallSpec) -> Self {
+        match spec {
+            calling::CallSpec::Echo => Self { kind: CallKind::Test, conversation: None, name: "Test call".into() },
+            calling::CallSpec::People { callees, thread_id } => Self {
+                kind: if callees.len() == 1 { CallKind::Direct } else { CallKind::Group },
+                conversation: Some(thread_id.clone()),
+                name: match callees.as_slice() {
+                    [callee] => callee.display_name.clone(),
+                    _ => "Call".into(),
+                },
+            },
+            calling::CallSpec::Meeting(target) => Self {
+                kind: CallKind::Meeting,
+                conversation: Some(target.thread_id.clone()),
+                name: "Meeting".into(),
+            },
+        }
+    }
+
+    /// An answered ring is a direct call in GPUI (`CallModel::incoming`), even from a group.
+    fn ring(ring: &IncomingRing) -> Self {
+        Self { kind: CallKind::Direct, conversation: ring.thread_id.clone(), name: ring.caller.display_name.clone() }
+    }
+}
+
+/// GPUI's `LOBBY_TONE_THROTTLE`: one lobby chime per half minute.
+const LOBBY_TONE_THROTTLE: Duration = Duration::from_secs(30);
+
 pub struct CallView {
     pub prejoin_open: bool,
     pub history: Vec<chatsvc::CallLogEntry>,
@@ -494,6 +535,16 @@ pub struct CallView {
     show_chat: bool,
     reactions: Vec<(u64, String, calling::Reaction, Instant)>,
     own_mri: String,
+    /// How the current (or last) call started; `None` before the first one.
+    pub(crate) intro: Option<CallIntro>,
+    /// `start` ran for the call now connecting; without it, the call is the answered ring.
+    intro_fresh: bool,
+    /// One-shot tones (joined, ended, lobby) for `notifications::ring` to play.
+    pub(crate) tones: Vec<CallTone>,
+    lobby_tone_at: Option<Instant>,
+    recording_policy: chatsvc::RecordingPolicy,
+    own_tenant: Option<String>,
+    meeting_tenant: Option<String>,
 }
 
 impl Default for CallView {
@@ -565,6 +616,13 @@ impl Default for CallView {
             show_chat: false,
             reactions: Vec::new(),
             own_mri: String::new(),
+            intro: None,
+            intro_fresh: false,
+            tones: Vec::new(),
+            lobby_tone_at: None,
+            recording_policy: chatsvc::RecordingPolicy::default(),
+            own_tenant: None,
+            meeting_tenant: None,
         }
     }
 }
@@ -592,6 +650,28 @@ impl CallView {
                 MuteCommand::Mute
             }),
         ]
+    }
+
+    /// Records how a call starts; joining a meeting chimes as in GPUI (`join_tone`).
+    pub fn start(&mut self, intro: CallIntro) {
+        self.tones.extend(join_tone(intro.kind));
+        self.intro = Some(intro);
+        self.intro_fresh = true;
+    }
+
+    pub fn recording_rights(&mut self, policy: Option<chatsvc::RecordingPolicy>, own_tenant: Option<String>) {
+        if let Some(policy) = policy { self.recording_policy = policy; }
+        if own_tenant.is_some() { self.own_tenant = own_tenant; }
+    }
+
+    /// GPUI's `chat_thread`: a meeting's chat, else the chat of the people called.
+    fn chat_thread(&self) -> Option<&str> {
+        let conversation = self.intro.as_ref().and_then(|intro| intro.conversation.as_deref());
+        app_call_model::model::chat_thread(self.kind(), self.meeting_chat.as_deref(), conversation)
+    }
+
+    fn kind(&self) -> CallKind {
+        self.intro.as_ref().map_or(CallKind::Meeting, |intro| intro.kind)
     }
 
     pub fn apply_ring(&mut self, event: EngineEvent) {
@@ -647,6 +727,9 @@ impl CallView {
             CallUpdate::State(state) => {
                 self.pending = false;
                 if matches!(state, CallState::Connecting) {
+                    if !std::mem::take(&mut self.intro_fresh) && let Some(ring) = &self.ring {
+                        self.intro = Some(CallIntro::ring(ring));
+                    }
                     self.stop_preview();
                     self.lobby = false;
                     self.progress = None;
@@ -691,9 +774,13 @@ impl CallView {
                     self.reactions.clear();
                     self.local_share = None;
                     self.own_mri.clear();
+                    self.meeting_tenant = None;
                 }
                 if matches!(state, CallState::Ended { .. }) {
                     self.surfaces.clear();
+                    if self.state.as_ref().is_some_and(|old| !matches!(old, CallState::Ended { .. })) {
+                        self.tones.extend(end_tone(self.kind(), false));
+                    }
                 }
                 self.state = Some(state);
             }
@@ -720,7 +807,17 @@ impl CallView {
                         .any(|person| person.mri == *id && person.has_video),
                     _ => true,
                 });
+                let lobby_before: Vec<String> = self.lobby_guests().map(|p| p.mri.clone()).collect();
                 self.roster = roster;
+                // GPUI's lobby chime: someone new waits and we may admit them.
+                let admit = self.can_manage() && !self.lobby && matches!(self.state, Some(CallState::Connected { .. } | CallState::Reconnecting { .. }));
+                if admit
+                    && self.lobby_guests().any(|p| !lobby_before.contains(&p.mri))
+                    && self.lobby_tone_at.is_none_or(|at| at.elapsed() >= LOBBY_TONE_THROTTLE)
+                {
+                    self.lobby_tone_at = Some(Instant::now());
+                    self.tones.push(CallTone::MeetingReminder);
+                }
                 if self
                     .pinned
                     .as_ref()
@@ -773,6 +870,7 @@ impl CallView {
             CallUpdate::ConsentRequired(required) => self.consent_required = required,
             CallUpdate::Capability(capability) => self.capability = capability,
             CallUpdate::MeetingChat(thread) => self.meeting_chat = Some(thread),
+            CallUpdate::MeetingTenant(tenant) => self.meeting_tenant = Some(tenant),
             CallUpdate::Reaction { mri, reaction } => {
                 self.frame_id = self.frame_id.wrapping_add(1);
                 if self.reactions.len() == 12 {
@@ -807,11 +905,12 @@ impl CallView {
     }
 
     /// What GPUI's record rights (`app_call_model::record_rights`) see of this call.
-    /// ponytail: the kind is taken as a meeting and the org recording policy and tenants are
-    /// not loaded, so role, organizer settings, meeting capability and a pending start block
-    /// here; the service still refuses what the org policy forbids.
     fn record_model(&self) -> CallModel {
         let mut model = CallModel::meeting("", false);
+        model.kind = self.kind();
+        model.recording_policy = self.recording_policy;
+        model.own_tenant.clone_from(&self.own_tenant);
+        model.meeting_tenant.clone_from(&self.meeting_tenant);
         if let Some(state) = &self.state { model.state = state.clone(); }
         let own = self.roster.iter().find(|person| person.mri == self.own_mri);
         model.organizer = own.is_some_and(|person| person.organizer);
@@ -822,6 +921,10 @@ impl CallView {
         model.record_pending = self.recording_pending;
         model.capability = self.capability;
         model
+    }
+
+    fn lobby_guests(&self) -> impl Iterator<Item = &RosterEntry> {
+        self.roster.iter().filter(|p| p.in_lobby)
     }
 
     fn can_manage(&self) -> bool {
@@ -1061,6 +1164,37 @@ fn color(hex: &str) -> Color {
 }
 fn style(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
+}
+
+fn record_key(label: &str) -> String {
+    format!("call-record-{}", label.to_lowercase().replace(' ', "-"))
+}
+
+/// A record action the call does not allow, greyed with GPUI's reason (`RecordBlock::reason`).
+fn blocked_record(label: &str, (block, feature): (RecordBlock, RecordFeature)) -> El {
+    // ponytail: no lock glyph (not in `icons::SOURCES`); the grey and the reason say it.
+    col()
+        .key(format!("{}-blocked", record_key(label)))
+        .label(format!("{label}: {}", block.reason(feature)))
+        .max_w(236.0)
+        .px(12.0)
+        .py(4.0)
+        .radius(6.0)
+        .fill(color("#3D3D3D"))
+        .child(text(label.to_owned()).font(style(13.0, 600.0)).color(color("#A0A0A0")))
+        .child(text(block.reason(feature)).font(style(11.0, 400.0)).color(color("#A0A0A0")).wrap())
+}
+
+/// The recording's file name, GPUI's call title: the call's chat, else whom we called.
+fn recording_title<A: Actions>(s: &UiState<A>) -> String {
+    let intro = s.calls.intro.as_ref();
+    intro
+        .and_then(|intro| intro.conversation.as_deref())
+        .and_then(|id| s.chats.iter().find(|chat| chat.id == id))
+        .map(|chat| chat.title.clone())
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| intro.map(|intro| intro.name.clone()))
+        .unwrap_or_else(|| "Meeting".into())
 }
 
 fn button<A: Actions + 'static>(
@@ -1618,16 +1752,24 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             .child(button::<A>("More", "call-more", |s, _| {
                 s.calls.show_reactions = !s.calls.show_reactions;
             }));
-        if let Some(thread) = &call.meeting_chat {
-            let thread = thread.clone();
-            controls = controls.child(button::<A>("Chat", "call-chat", move |s, tx| {
+        if let Some(thread) = call.chat_thread() {
+            let thread = thread.to_owned();
+            // GPUI's `call_chat_unread`: Rune knows whether the chat is unread, not how much.
+            let unread = !call.show_chat && s.chats.iter().any(|chat| chat.id == thread && chat.unread);
+            let chat = button::<A>("Chat", "call-chat", move |s, tx| {
                 s.calls.show_chat = !s.calls.show_chat;
-                // ponytail: the panel reuses the selected-chat views, so it selects the meeting
-                // chat, which the Chat screen then shows too.
+                // The panel reuses the selected-chat views. The call window has its own selection
+                // and its bridge follows the chat apart (`Bridge::open`); inline (demo) calls
+                // select the chat in the main window.
                 if s.calls.show_chat && s.selected.as_deref() != Some(thread.as_str()) {
                     crate::ui::open_chat(s, &thread, tx);
                 }
-            }));
+            });
+            controls = controls.child(if unread {
+                chat.child(el().key("call-chat-unread").w(8.0).h(8.0).radius(4.0).fill(color("#C4314B")))
+            } else {
+                chat
+            });
         }
         controls = controls.child(button::<A>("Leave", "call-leave", |s, _| {
             s.actions.call_command(CallCommand::Hangup)
@@ -1764,17 +1906,26 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 move |s, _| s.actions.call_command(CallCommand::SetCaptions(!enabled)),
             ));
         }
-        // GPUI's "Record and transcribe" menu: blocked actions are left out rather than greyed.
+        // GPUI's "Record and transcribe" menu: blocked actions are greyed with the reason.
         let record = call.record_model();
         if !s.read_only && !record.record_hidden() {
-            for (action, label) in record_actions(record.recording, record.transcribing) {
-                if record.action_block(action).is_some() { continue; }
-                let key = format!("call-record-{}", label.to_lowercase().replace(' ', "-"));
-                features = features.child(button::<A>(label, &key, move |s, _| match action {
-                    // An empty title names the file "Meeting" (`calling::recording`).
-                    RecordAction::Start(kind) => s.actions.call_command(CallCommand::StartRecording { kind, title: String::new() }),
-                    RecordAction::Stop(scope) => s.calls.confirm = Some(CallCommand::StopRecording { scope }),
-                }));
+            if let Some(blocked) = record.record_menu_block() {
+                features = features.child(blocked_record("Record and transcribe", blocked));
+            } else {
+                for (action, label) in record_actions(record.recording, record.transcribing) {
+                    if let Some(blocked) = record.action_block(action) {
+                        features = features.child(blocked_record(label, blocked));
+                        continue;
+                    }
+                    let key = record_key(label);
+                    features = features.child(button::<A>(label, &key, move |s, _| match action {
+                        RecordAction::Start(kind) => {
+                            let title = recording_title(s);
+                            s.actions.call_command(CallCommand::StartRecording { kind, title });
+                        }
+                        RecordAction::Stop(scope) => s.calls.confirm = Some(CallCommand::StopRecording { scope }),
+                    }));
+                }
             }
         }
         for reaction in calling::Reaction::ALL {
@@ -2292,7 +2443,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         {
             content = content.child(panels);
         }
-        if call.show_chat && s.selected.is_some() && s.selected == call.meeting_chat {
+        if call.show_chat && s.selected.is_some() && s.selected.as_deref() == call.chat_thread() {
             let composer = if s.read_only {
                 text("Read-only").font(style(13.0, 400.0)).color(color("#616161"))
             } else {
@@ -2763,17 +2914,42 @@ mod tests {
     fn recording_starts_from_the_more_menu_unless_the_role_or_meeting_forbids_it() {
         let mut state = connected(1);
         state.calls.apply(CallUpdate::Roster(vec![RosterEntry { mri: "me".into(), role: Some(calling::MeetingRole::Attendee), ..Default::default() }]));
+        state.calls.start(CallIntro { kind: CallKind::Meeting, conversation: Some("19:meeting".into()), name: "Meeting".into() });
+        state.chats.push(crate::types::ChatRow { id: "19:meeting".into(), title: "Weekly sync".into(), preview: String::new(), unread: false, when: String::new() });
         let mut rt = runtime(state);
         click(&mut rt, "call-more");
         assert!(rt.find("call-record-start-recording").is_none(), "attendees cannot record");
+        assert!(rt.find("call-record-record-and-transcribe-blocked").is_some(), "the menu stays, greyed");
         rt.update(|s, _| s.calls.apply(CallUpdate::Roster(vec![RosterEntry { mri: "me".into(), role: Some(calling::MeetingRole::Presenter), ..Default::default() }])));
         rt.frame(1.0);
         click(&mut rt, "call-record-record-audio-only");
-        assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("StartRecording { kind: AudioOnly, title: \"\" }"));
+        assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("StartRecording { kind: AudioOnly, title: \"Weekly sync\" }"));
         rt.update(|s, _| s.calls.apply(CallUpdate::Capability(calling::MeetingCapability { allow_cloud_recording: Some(false), ..Default::default() })));
         rt.frame(1.0);
         assert!(rt.find("call-record-start-recording").is_none(), "the meeting turned recording off");
+        assert!(rt.find("call-record-start-recording-blocked").is_some());
         assert!(rt.find("call-record-start-transcription-only").is_some());
+        rt.update(|s, _| {
+            s.calls.apply(CallUpdate::Capability(calling::MeetingCapability::default()));
+            s.calls.apply(CallUpdate::MeetingTenant("tenant-a".into()));
+            s.calls.recording_rights(None, Some("tenant-b".into()));
+        });
+        rt.frame(1.0);
+        assert!(rt.find("call-record-record-and-transcribe-blocked").is_some(), "guests from another org cannot record");
+    }
+
+    #[test]
+    fn the_org_call_policy_blocks_recording_direct_calls_but_not_meetings() {
+        let mut call = CallView::default();
+        call.start(CallIntro::of(&calling::CallSpec::People {
+            callees: vec![calling::Callee { mri: "8:orgid:bea".into(), display_name: "Bea".into() }],
+            thread_id: "19:chat".into(),
+        }));
+        call.apply(CallUpdate::State(CallState::Connected { since: Instant::now() }));
+        call.recording_rights(Some(chatsvc::RecordingPolicy { call_recording: false, ..Default::default() }), None);
+        assert_eq!(call.record_model().record_block(), Some(RecordBlock::CallPolicy));
+        call.intro.as_mut().expect("intro").kind = CallKind::Meeting;
+        assert_eq!(call.record_model().record_block(), None);
     }
 
     #[test]
@@ -2790,6 +2966,22 @@ mod tests {
         assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("send 19:meeting hello"));
         click(&mut rt, "call-chat");
         assert!(rt.find("call-chat-panel").is_none());
+    }
+
+    #[test]
+    fn people_calls_chat_in_their_chat_and_flag_unread_messages_on_the_chat_button() {
+        let mut state = connected(1);
+        state.calls.start(CallIntro::of(&calling::CallSpec::People {
+            callees: vec![calling::Callee { mri: "8:orgid:bea".into(), display_name: "Bea".into() }],
+            thread_id: "19:chat".into(),
+        }));
+        state.chats.push(crate::types::ChatRow { id: "19:chat".into(), title: "Bea".into(), preview: String::new(), unread: true, when: String::new() });
+        let mut rt = runtime(state);
+        assert!(rt.find("call-chat-unread").is_some());
+        click(&mut rt, "call-chat");
+        assert_eq!(rt.state.selected.as_deref(), Some("19:chat"));
+        assert!(rt.find("call-chat-panel").is_some());
+        assert!(rt.find("call-chat-unread").is_none(), "an open panel shows no badge");
     }
 
     #[test]
@@ -2886,6 +3078,55 @@ mod tests {
         call.apply(CallUpdate::State(CallState::Connected { since }));
         assert_eq!(call.tone(), None);
         assert_eq!(call.status(since + Duration::from_secs(3725)), "1:02:05");
+    }
+
+    #[test]
+    fn meetings_chime_on_join_lobby_and_leave_while_people_calls_chime_on_end() {
+        let meeting = calling::CallSpec::Meeting(calling::MeetingTarget {
+            thread_id: "19:meeting".into(),
+            tenant_id: "t".into(),
+            organizer_id: "me".into(),
+            meeting_data: None,
+        });
+        let mut call = CallView::default();
+        call.start(CallIntro::of(&meeting));
+        assert_eq!(call.tones, [CallTone::MeetingJoined]);
+        call.tones.clear();
+        call.apply(CallUpdate::State(CallState::Connecting));
+        call.apply(CallUpdate::State(CallState::Connected { since: Instant::now() }));
+        call.apply(CallUpdate::OwnIdentity { mri: "me".into() });
+        let me = RosterEntry { mri: "me".into(), organizer: true, ..Default::default() };
+        let guest = RosterEntry { mri: "guest".into(), in_lobby: true, ..Default::default() };
+        call.apply(CallUpdate::Roster(vec![me.clone(), guest.clone()]));
+        call.apply(CallUpdate::Roster(vec![me.clone(), guest, RosterEntry { mri: "late".into(), in_lobby: true, ..Default::default() }]));
+        assert_eq!(call.tones, [CallTone::MeetingReminder], "one chime per half minute");
+        call.tones.clear();
+        call.apply(CallUpdate::State(CallState::Ended { reason: calling::EndReason::LocalHangup }));
+        call.apply(CallUpdate::State(CallState::Ended { reason: calling::EndReason::LocalHangup }));
+        assert_eq!(call.tones, [CallTone::MeetingLeft]);
+
+        let people = calling::CallSpec::People {
+            callees: vec![calling::Callee { mri: "8:orgid:bea".into(), display_name: "Bea".into() }],
+            thread_id: "19:chat".into(),
+        };
+        let mut call = CallView::default();
+        call.start(CallIntro::of(&people));
+        assert!(call.tones.is_empty(), "people calls start silently");
+        assert_eq!(call.kind(), CallKind::Direct);
+        call.apply(CallUpdate::State(CallState::Connecting));
+        call.apply(CallUpdate::State(CallState::Ended { reason: calling::EndReason::Dropped }));
+        assert_eq!(call.tones, [CallTone::CallEnded]);
+
+        call.apply_ring(EngineEvent::Incoming(IncomingRing {
+            ring_id: 7,
+            caller: calling::Caller { mri: "8:orgid:cy".into(), display_name: "Cy".into() },
+            thread_id: Some("19:group".into()),
+            video: false,
+            is_group: true,
+            subject: None,
+        }));
+        call.apply(CallUpdate::State(CallState::Connecting));
+        assert_eq!(call.intro, Some(CallIntro { kind: CallKind::Direct, conversation: Some("19:group".into()), name: "Cy".into() }));
     }
 
     #[test]

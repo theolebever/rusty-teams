@@ -30,6 +30,8 @@ pub struct Bridge {
     updates: Receiver<Update>,
     // Kept alive so the backend's activity watch stays open. The view always counts as active.
     _activity: watch::Sender<bool>,
+    /// The call window's bridge: `open` follows the call chat and leaves the main chat alone.
+    call_chat: bool,
 }
 
 /// State shared by the view-facing calls and the event forwarder.
@@ -47,6 +49,8 @@ pub(crate) struct Shared {
     foreground: Mutex<(Option<String>, bool)>,
     engine: Mutex<Option<Arc<Engine>>>,
     open: Mutex<Option<String>>,
+    /// The chat shown beside the call in the call window, followed like the open one.
+    call_chat: Mutex<Option<String>>,
     open_generation: AtomicU64,
     live_retry: Mutex<Option<Arc<tokio::sync::Notify>>>,
     calendar_nudge: Mutex<Option<tokio_mpsc::UnboundedSender<()>>>,
@@ -78,12 +82,46 @@ impl Shared {
             .clone()
     }
 
+    /// GPUI's `refresh_recording_policy` and `apply_recording_rights`: the org recording policy
+    /// and, for a meeting, our own tenant (recording is closed to people from another org).
+    /// ponytail: read again for each call, cache like GPUI if it shows in the call setup time.
+    fn load_recording_rights(self: &Arc<Self>, meeting_chat: Option<String>) {
+        let Some(engine) = self.engine() else { return };
+        let shared = self.clone();
+        app_backend::runtime::handle().spawn(async move {
+            let policy = engine.recording_policy().await.ok();
+            let own_tenant = match meeting_chat {
+                Some(chat) => engine.own_tenant_id(&chat).await.ok(),
+                None => None,
+            };
+            shared.publish(Update::RecordingRights { policy, own_tenant });
+        });
+    }
+
     fn is_open(&self, conversation_id: &str) -> bool {
-        self.open
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_deref()
-            == Some(conversation_id)
+        [&self.open, &self.call_chat]
+            .iter()
+            .any(|open| open.lock().unwrap_or_else(PoisonError::into_inner).as_deref() == Some(conversation_id))
+    }
+
+    /// `open` for the call window's chat panel: shows the cached messages, marks them read and
+    /// fetches newer ones, without touching the main window's open chat.
+    fn open_call_chat(self: &Arc<Self>, conversation_id: &str) {
+        *self.call_chat.lock().unwrap_or_else(PoisonError::into_inner) = Some(conversation_id.to_owned());
+        let Some(engine) = self.engine() else { return };
+        self.publish_messages(&engine, conversation_id);
+        let (shared, conversation_id) = (self.clone(), conversation_id.to_owned());
+        app_backend::runtime::handle().spawn(async move {
+            if !shared.read_only && let Err(error) = engine.mark_read(&conversation_id).await {
+                app_backend::diagnostics::record(format!("Rune: call chat not marked read: {error}"));
+            }
+            match engine.fetch_newer(&conversation_id).await {
+                Ok(_) if shared.is_open(&conversation_id) => shared.publish_messages(&engine, &conversation_id),
+                Ok(_) => {}
+                Err(error) => shared.publish(Update::Status(format!("Could not refresh messages: {error}"))),
+            }
+            shared.publish_chats(&engine);
+        });
     }
 
     /// Publishes the chat list. False when the sidebar could not be read (the error is the status).
@@ -244,6 +282,7 @@ impl Bridge {
         let shared = Arc::new_cyclic(|weak: &std::sync::Weak<Shared>| {
             let weak = weak.clone();
             let video_weak = weak.clone();
+            let intro_weak = weak.clone();
             Shared {
             switcher_query: Mutex::default(),
             open_threads: Mutex::new(std::collections::HashSet::new()),
@@ -254,11 +293,17 @@ impl Bridge {
             calls: Mutex::new(None),
             call_control: crate::calls_backend::Calls::new(read_only, move |update| {
                 if let Some(shared) = weak.upgrade() { shared.publish(Update::Call(update)); }
-            }, move || { if let Some(shared) = video_weak.upgrade() { shared.publish(Update::VideoReady); } }),
+            }, move || { if let Some(shared) = video_weak.upgrade() { shared.publish(Update::VideoReady); } },
+            move |intro| {
+                let Some(shared) = intro_weak.upgrade() else { return };
+                shared.load_recording_rights(intro.conversation.clone().filter(|_| intro.kind == app_call_model::model::CallKind::Meeting));
+                shared.publish(Update::CallIntro(intro));
+            }),
             message_limit: Mutex::new(50),
             foreground: Mutex::new((None, false)),
             engine: Mutex::new(None),
             open: Mutex::new(None),
+            call_chat: Mutex::new(None),
             open_generation: AtomicU64::new(0),
             live_retry: Mutex::new(None),
             calendar_nudge: Mutex::new(None),
@@ -282,6 +327,7 @@ impl Bridge {
             shared,
             updates: receiver,
             _activity: activity_sender,
+            call_chat: false,
         }
     }
 
@@ -292,6 +338,7 @@ impl Bridge {
             shared: self.shared.clone(),
             updates,
             _activity: self._activity.clone(),
+            call_chat: true,
         }
     }
 
@@ -821,8 +868,19 @@ impl Actions for Bridge {
             shared.publish(Update::OutlookReminders { start, end, result });
         });
     }
+    fn load_live_meeting(&self, thread_id: &str) {
+        let Some(launcher) = self.shared.launcher() else { return };
+        let (shared, thread_id) = (self.shared.clone(), thread_id.to_owned());
+        app_backend::runtime::handle().spawn(async move {
+            let meeting = launcher.live_meeting(&thread_id).await;
+            shared.publish(Update::LiveMeeting { thread_id, meeting });
+        });
+    }
     fn load_devices(&self) { crate::settings_backend::list_devices(self.shared.clone()); }
-    fn accept_call(&self, ring_id: u64, video: bool) { self.shared.call_control.accept(ring_id, video); }
+    fn accept_call(&self, ring_id: u64, video: bool) {
+        self.shared.call_control.accept(ring_id, video);
+        self.shared.load_recording_rights(None);
+    }
     fn decline_call(&self, ring_id: u64) { self.shared.call_control.decline(ring_id); }
     fn load_image(&self, image: teams_core::ImageRef) { crate::media::load_image(self.shared.clone(), image); }
     fn download_file(&self, url: String, path: PathBuf) { crate::media::download_file(self.shared.clone(), url, path); }
@@ -967,6 +1025,7 @@ impl Actions for Bridge {
     }
 
     fn open(&self, conversation_id: &str) {
+        if self.call_chat { return self.shared.open_call_chat(conversation_id); }
         let generation = self.shared.open_generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.shared.open_threads.lock().unwrap_or_else(PoisonError::into_inner).clear();
         *self.shared.message_limit.lock().unwrap_or_else(PoisonError::into_inner) = 50;
@@ -998,8 +1057,8 @@ impl Actions for Bridge {
                 if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
                 if let Ok(Some(chat)) = engine.store().chat(&conversation_id) {
                     let ids: Vec<_> = chat.members.iter().filter(|member| !member.is_bot()).filter_map(|member| member.user_id.clone()).collect();
-                    if let Err(error) = engine.watch_presence(&ids).await { shared.publish(Update::Status(format!("Presence subscription unavailable: {error}"))); }
-                    if let Err(error) = engine.refresh_presence(&ids).await { shared.publish(Update::Status(format!("Presence unavailable: {error}"))); }
+                    watch_presence(&engine, &ids).await;
+
                     shared.publish_chats(&engine);
                 }
             });
@@ -1263,12 +1322,11 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                     .and_then(|json| agents::AgentSettings::from_json(&json).ok()).unwrap_or_default();
                 shared.publish(Update::AgentSettings(settings));
                 crate::settings_backend::refresh(shared.clone(), engine.clone());
-                let shared = shared.clone();
                 app_backend::runtime::handle().spawn(async move {
                     if let Ok(sidebar) = engine.sidebar() {
                         let ids: Vec<_> = sidebar.chats.iter().flat_map(|c| &c.members).filter(|m| !m.is_bot()).filter_map(|m| m.user_id.clone()).collect();
-                        if let Err(error) = engine.watch_presence(&ids).await { shared.publish(Update::Status(format!("Presence subscription unavailable: {error}"))); }
-                        if let Err(error) = engine.refresh_presence(&ids).await { shared.publish(Update::Status(format!("Presence unavailable: {error}"))); }
+                        watch_presence(&engine, &ids).await;
+
                     }
                 });
             }
@@ -1325,6 +1383,13 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
             _ => {}
         }
     }
+}
+
+/// Subscribes to and reads the presence of `ids`. As GPUI, a failure goes to diagnostics, not
+/// to a status toast that would repeat on every chat open.
+async fn watch_presence(engine: &Engine, ids: &[String]) {
+    if let Err(error) = engine.watch_presence(ids).await { app_backend::diagnostics::record(format!("Rune: presence subscription unavailable: {error}")); }
+    if let Err(error) = engine.refresh_presence(ids).await { app_backend::diagnostics::record(format!("Rune: presence unavailable: {error}")); }
 }
 
 async fn refresh_pins(shared: &Shared, engine: &Engine, id: &str) {

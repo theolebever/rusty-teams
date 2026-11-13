@@ -62,8 +62,10 @@ pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize
 }
 
 /// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts;
-/// loops the ringback or reconnecting tone of the current call (`CallView::tone`).
+/// loops the ringback or reconnecting tone of the current call (`CallView::tone`) and plays its
+/// joined, ended and lobby chimes.
 pub fn ring<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>) {
+    for tone in s.calls.tones.drain(..) { crate::sound::play(tone.file_name()); }
     let tone = s.calls.tone();
     if s.call_tone.as_ref().map(|(playing, _)| *playing) != tone {
         s.call_tone = tone.map(|tone| (tone, crate::sound::start(tone.file_name(), true)));
