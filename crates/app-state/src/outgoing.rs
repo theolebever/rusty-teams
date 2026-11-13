@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use gpui_kit::Image;
+use crate::inline_image::ImageData;
 use serde::{Deserialize, Serialize};
 use teams_core::{
     AnnouncementBanner,
@@ -16,7 +16,7 @@ use crate::remote_image::RemoteImage;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineImage {
     pub name: String,
-    pub image: Arc<Image>,
+    pub image: ImageData,
     pub dimensions: Option<(u32, u32)>,
 }
 
@@ -108,7 +108,7 @@ impl Outgoing {
                 .filter_map(|outgoing| match outgoing {
                     OutgoingImage::Inline(inline) => Some(HostedImage {
                         content_type: inline.image.format.mime_type().to_owned(),
-                        bytes: Arc::new(inline.image.bytes.clone()),
+                        bytes: Arc::new(inline.image.bytes.to_vec()),
                     }),
                     OutgoingImage::Remote(_) => None,
                 })

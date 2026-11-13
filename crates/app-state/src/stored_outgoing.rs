@@ -1,24 +1,11 @@
-use std::sync::Arc;
 
-use gpui_kit::{Image, ImageFormat};
 use serde::{Deserialize, Serialize};
 use store::{AttachmentImage, MessageImportance};
 use teams_core::{AnnouncementBanner, Draft, DraftLine, LinkPreview, MentionInput};
 
+use crate::inline_image::{ImageData, ImageFormat};
 use crate::remote_image::{RemoteImage, RemoteKind};
 use crate::outgoing::{InlineImage, Outgoing, OutgoingFile, OutgoingImage, ReplyPreview};
-
-const IMAGE_FORMATS: [ImageFormat; 9] = [
-    ImageFormat::Png,
-    ImageFormat::Jpeg,
-    ImageFormat::Webp,
-    ImageFormat::Gif,
-    ImageFormat::Svg,
-    ImageFormat::Bmp,
-    ImageFormat::Tiff,
-    ImageFormat::Ico,
-    ImageFormat::Pnm,
-];
 
 #[derive(Serialize, Deserialize)]
 enum StoredObject {
@@ -75,7 +62,7 @@ pub fn encode(outgoing: &Outgoing) -> Option<StoredOutgoing> {
                 images.push(AttachmentImage {
                     name: inline.name.clone(),
                     format: inline.image.format.mime_type().to_owned(),
-                    bytes: inline.image.bytes.clone(),
+                    bytes: inline.image.bytes.to_vec(),
                     width: inline.dimensions.map(|(width, _)| width),
                     height: inline.dimensions.map(|(_, height)| height),
                 });
@@ -118,12 +105,12 @@ pub fn encode(outgoing: &Outgoing) -> Option<StoredOutgoing> {
 }
 
 fn inline_image(stored: &AttachmentImage) -> Option<OutgoingImage> {
-    let format = IMAGE_FORMATS
+    let format = ImageFormat::ALL
         .into_iter()
         .find(|format| format.mime_type() == stored.format)?;
     Some(OutgoingImage::Inline(InlineImage {
         name: stored.name.clone(),
-        image: Arc::new(Image::from_bytes(format, stored.bytes.clone())),
+        image: ImageData::from_bytes(format, stored.bytes.clone()),
         dimensions: stored.width.zip(stored.height),
     }))
 }
@@ -203,7 +190,7 @@ mod tests {
             images: vec![
                 OutgoingImage::Inline(InlineImage {
                     name: "shot.png".to_owned(),
-                    image: Arc::new(Image::from_bytes(ImageFormat::Png, vec![1, 2, 3])),
+                    image: ImageData::from_bytes(ImageFormat::Png, vec![1, 2, 3]),
                     dimensions: Some((40, 30)),
                 }),
                 OutgoingImage::Remote(RemoteImage {

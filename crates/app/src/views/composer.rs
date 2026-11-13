@@ -3715,9 +3715,8 @@ mod tests {
 
     #[test]
     fn extras_carry_image_bytes_with_their_mime_type_and_the_file_references() {
-        use std::sync::Arc;
 
-        use gpui_kit::{Image, ImageFormat};
+        use crate::inline_image::{ImageData, ImageFormat};
         use teams_core::FileKind;
 
         use super::super::attachment_tray::InlineImage;
@@ -3733,7 +3732,7 @@ mod tests {
             edit: None,
             images: vec![OutgoingImage::Inline(InlineImage {
                 name: "pasted-image.png".into(),
-                image: Arc::new(Image::from_bytes(ImageFormat::Png, vec![1, 2, 3])),
+                image: ImageData::from_bytes(ImageFormat::Png, vec![1, 2, 3]),
                 dimensions: Some((1, 1)),
             })],
             files: vec![OutgoingFile {
@@ -3757,13 +3756,12 @@ mod tests {
     }
 
     fn placed_image(width: u32) -> crate::outgoing::OutgoingImage {
-        use std::sync::Arc;
 
-        use gpui_kit::{Image, ImageFormat};
+        use crate::inline_image::{ImageData, ImageFormat};
 
         crate::outgoing::OutgoingImage::Inline(super::super::attachment_tray::InlineImage {
             name: "pasted-image.png".into(),
-            image: Arc::new(Image::from_bytes(ImageFormat::Png, vec![width as u8])),
+            image: ImageData::from_bytes(ImageFormat::Png, vec![width as u8]),
             dimensions: Some((width, width)),
         })
     }

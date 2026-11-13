@@ -17,6 +17,7 @@ use store::Store;
 use app_base::agent_api::{extras, image_scale};
 
 use crate::backend::Engine;
+use crate::inline_image::ImageData;
 use crate::runtime;
 use pending::PendingProposal;
 use source::AppSource;
@@ -30,7 +31,7 @@ pub enum ProposalStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thumbnail {
-    pub image: Arc<Image>,
+    pub image: ImageData,
     pub dimensions: (u32, u32),
 }
 

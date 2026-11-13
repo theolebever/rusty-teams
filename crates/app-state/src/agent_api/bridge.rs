@@ -17,6 +17,7 @@ use super::image_scale::downscale;
 use super::source::AppSource;
 use super::{AgentApi, ProposalEntry, ProposalPicture, ProposalStatus, Thumbnail};
 use crate::backend::Engine;
+use crate::inline_image::{ImageData, ImageFormat};
 use crate::rows::reaction_glyph;
 use crate::runtime;
 
@@ -70,7 +71,7 @@ pub fn build_pictures(proposal: &Proposal) -> Vec<ProposalPicture> {
                     ImageFormat::Jpeg
                 };
                 Thumbnail {
-                    image: Arc::new(Image::from_bytes(format, scaled.bytes)),
+                    image: ImageData::from_bytes(format, scaled.bytes),
                     dimensions: (scaled.width, scaled.height),
                 }
             }),

@@ -10,9 +10,10 @@ use gpui_kit::*;
 use teams_core::{FileKind, FileReference, UploadedFile};
 
 use super::attachments::{file_badge, kind_description};
+use super::image_memory::gpui_image;
 use super::widgets::icon;
 use crate::format;
-use crate::inline_image::{InlineFormat, image_dimensions, sniff_inline_format};
+use crate::inline_image::{ImageData, InlineFormat, image_dimensions, sniff_inline_format};
 pub use crate::outgoing::{InlineImage, OutgoingFile, OutgoingImage};
 use crate::remote_image::{RemoteImage, image_source};
 use crate::theme;
@@ -61,7 +62,7 @@ pub fn inline_image(name: String, bytes: Vec<u8>) -> Option<InlineImage> {
     let dimensions = image_dimensions(format, &bytes);
     Some(InlineImage {
         name,
-        image: Arc::new(Image::from_bytes(format.image_format(), bytes)),
+        image: ImageData::from_bytes(format.image_format(), bytes),
         dimensions,
     })
 }
@@ -115,7 +116,7 @@ impl UploadState {
 pub enum ItemKind {
     Reading,
     Image {
-        image: Arc<Image>,
+        image: ImageData,
         dimensions: Option<(u32, u32)>,
     },
     Remote(RemoteImage),
@@ -154,7 +155,7 @@ impl TrayItem {
 #[derive(Debug, Clone)]
 pub enum PreviewImage {
     Inline {
-        image: Arc<Image>,
+        image: ImageData,
         dimensions: Option<(u32, u32)>,
     },
     Remote(RemoteImage),
@@ -320,7 +321,7 @@ impl AttachmentTray {
                 item.name = name;
                 item.size = size;
                 item.kind = ItemKind::Image {
-                    image: Arc::new(Image::from_bytes(format.image_format(), loaded.bytes)),
+                    image: ImageData::from_bytes(format.image_format(), loaded.bytes),
                     dimensions: loaded.dimensions,
                 };
                 None
@@ -772,7 +773,7 @@ pub fn inline_preview(
     let frame = match preview {
         Some(preview) => {
             let source = match preview {
-                PreviewImage::Inline { image, .. } => ImageSource::from(image),
+                PreviewImage::Inline { image, .. } => ImageSource::from(gpui_image(&image)),
                 PreviewImage::Remote(remote) => image_source(&remote.url),
             };
             frame.child(

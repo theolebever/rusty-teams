@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
-use std::sync::Arc;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Utc};
-use gpui_kit::Image;
+use crate::inline_image::ImageData;
 use store::{MessageImportance, MessageRecord};
 use teams_core::roster_event::{RosterEvent, roster_event};
 use teams_core::{
@@ -171,7 +170,7 @@ pub enum Delivery {
 /// An image of a message that is still being sent, shown from its local bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalImage {
-    pub image: Arc<Image>,
+    pub image: ImageData,
     pub size: Option<(u32, u32)>,
 }
 

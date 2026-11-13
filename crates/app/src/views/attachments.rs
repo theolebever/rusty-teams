@@ -1,4 +1,4 @@
-use crate::views::image_memory::{bounded, preview};
+use crate::views::image_memory::{bounded, gpui_image, preview};
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
@@ -92,7 +92,7 @@ fn sent_preview<'a>(images: &[ImageRef], position: usize, sent_previews: &'a [Lo
 }
 
 fn local_image(image: &LocalImage, id: ElementId) -> Stateful<Img> {
-    img(bounded(image.image.clone()))
+    img(gpui_image(&image.image))
         .id(id)
         .size_full()
         .rounded(px(IMAGE_RADIUS))
@@ -557,6 +557,7 @@ pub fn attachments_view(
 
 #[cfg(test)]
 mod tests {
+    use crate::inline_image::{ImageData, ImageFormat};
     use super::{
         IMAGE_FALLBACK, Placement, file_subtitle, fit_image, fit_image_within, local_image_index,
         placement, placements, sent_preview,
@@ -585,7 +586,7 @@ mod tests {
         let images = [image_ref("hosted-a"), image_ref(gif), image_ref("hosted-b")];
         let previews: Vec<LocalImage> = [(1, 1), (2, 2)]
             .into_iter()
-            .map(|size| LocalImage { image: std::sync::Arc::new(gpui_kit::Image::empty()), size: Some(size) })
+            .map(|size| LocalImage { image: ImageData::from_bytes(ImageFormat::Png, Vec::new()), size: Some(size) })
             .collect();
         let size_at = |position| sent_preview(&images, position, &previews).and_then(|preview| preview.size);
         assert_eq!(size_at(0), Some((1, 1)));

@@ -1,20 +1,67 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, AppContext, Entity, EntityId, Global, ImageCacheError, ImageCacheItem, ImageSource, RenderImage, Resource,
+    App, AppContext, Entity, EntityId, Global, Image, ImageCacheError, ImageCacheItem, ImageSource, RenderImage, Resource,
     Window, hash,
 };
 use image::imageops::FilterType;
 use image::{Frame, ImageFormat, ImageReader};
 
+use crate::inline_image::{self, ImageData};
+
 const BUDGET_BYTES: u64 = 48 * MEGABYTE;
+/// Encoded bytes kept as GPUI images for [`gpui_image`].
+const ENCODED_BUDGET_BYTES: usize = 32 * MEGABYTE as usize;
 const KEEP_RECENT: Duration = Duration::from_secs(10);
 const REPORT_EVERY: Duration = Duration::from_secs(60);
 const MEGABYTE: u64 = 1024 * 1024;
 const PREVIEW_EDGE: u32 = 720;
+
+thread_local! {
+    static ENCODED: RefCell<(HashMap<u64, Arc<Image>>, usize)> = RefCell::default();
+}
+
+/// The GPUI image for state-held bytes, reused by content id so GPUI's asset cache keeps hitting
+/// and the bytes are not copied on every frame.
+pub fn gpui_image(data: &ImageData) -> Arc<Image> {
+    ENCODED.with_borrow_mut(|(images, bytes)| {
+        if let Some(image) = images.get(&data.id) {
+            return image.clone();
+        }
+        // ponytail: drops every entry when full; an LRU if pasted photos churn it.
+        if *bytes + data.bytes.len() > ENCODED_BUDGET_BYTES {
+            images.clear();
+            *bytes = 0;
+        }
+        let image = Arc::new(Image {
+            format: gpui_format(data.format),
+            bytes: data.bytes.to_vec(),
+            id: data.id,
+        });
+        *bytes += data.bytes.len();
+        images.insert(data.id, image.clone());
+        image
+    })
+}
+
+pub fn gpui_format(format: inline_image::ImageFormat) -> gpui_kit::ImageFormat {
+    use inline_image::ImageFormat as Own;
+    match format {
+        Own::Png => gpui_kit::ImageFormat::Png,
+        Own::Jpeg => gpui_kit::ImageFormat::Jpeg,
+        Own::Webp => gpui_kit::ImageFormat::Webp,
+        Own::Gif => gpui_kit::ImageFormat::Gif,
+        Own::Svg => gpui_kit::ImageFormat::Svg,
+        Own::Bmp => gpui_kit::ImageFormat::Bmp,
+        Own::Tiff => gpui_kit::ImageFormat::Tiff,
+        Own::Ico => gpui_kit::ImageFormat::Ico,
+        Own::Pnm => gpui_kit::ImageFormat::Pnm,
+    }
+}
 
 /// An image source whose decoded pixels are freed again once the image has been off screen for a while and the budget is full.
 pub fn bounded(source: impl Into<ImageSource>) -> ImageSource {

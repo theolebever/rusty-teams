@@ -15,6 +15,7 @@ use crate::render::render_blocks;
 use crate::theme;
 use crate::views::attachment_tray::{Classification, OutgoingImage, classify, inline_image};
 use crate::views::composer::{Outgoing, ReplyPreview};
+use crate::views::image_memory::gpui_image;
 use crate::views::widgets::icon;
 
 const CARD_MARGIN_X: f32 = 20.;
@@ -147,7 +148,7 @@ fn thumbnails(pictures: &[ProposalPicture]) -> Div {
                 .rounded(px(THUMBNAIL_RADIUS))
                 .bg(theme::surface_raised())
                 .children(thumbnail.map(|thumbnail| {
-                    img(ImageSource::from(thumbnail.image.clone()))
+                    img(gpui_image(&thumbnail.image))
                         .size_full()
                         .object_fit(ObjectFit::Cover)
                 }))

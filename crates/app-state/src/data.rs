@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Image, ImageFormat};
+use crate::inline_image::{ImageData, ImageFormat};
 use store::{ChatRecord, MessageImportance, Store, is_bot_id};
 
 use teams_core::{Activity, Availability, ChatSectionSettings, FolderChange, is_notes_chat};
@@ -115,7 +115,7 @@ pub enum AvatarState {
     Pending,
     Missing,
     Ready(Arc<AvatarPhoto>),
-    Icon(Arc<Image>),
+    Icon(ImageData),
 }
 
 #[derive(Debug, Clone)]
@@ -570,7 +570,7 @@ pub fn cached_avatar(store: &Store, user_id: &str) -> Option<AvatarState> {
 pub fn avatar_state_from(content_type: &str, bytes: Vec<u8>, is_bot: bool) -> AvatarState {
     if image_format(content_type) == ImageFormat::Svg {
         if is_bot {
-            return AvatarState::Icon(Arc::new(Image::from_bytes(ImageFormat::Svg, bytes)));
+            return AvatarState::Icon(ImageData::from_bytes(ImageFormat::Svg, bytes));
         }
         return AvatarState::Missing;
     }

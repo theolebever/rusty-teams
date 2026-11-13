@@ -1,4 +1,4 @@
-use crate::views::image_memory::bounded;
+use crate::views::image_memory::{bounded, gpui_image};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -60,7 +60,7 @@ fn face_circle(directory: &Directory, face: &Face, size: f32, text_ratio: f32) -
         .and_then(|user_id| directory.avatar(user_id));
     match state {
         Some(AvatarState::Ready(photo)) => photo_disc(photo, size, size / 2.),
-        Some(AvatarState::Icon(image)) => img(ImageSource::Image(image.clone()))
+        Some(AvatarState::Icon(image)) => img(gpui_image(image))
             .size(px(size))
             .flex_none()
             .rounded_full()
@@ -156,7 +156,7 @@ pub fn bot_tile(directory: &Directory, face: &Face, size: f32) -> AnyElement {
             .into_any_element(),
         Some(AvatarState::Icon(image)) => tile
             .child(
-                img(ImageSource::Image(image.clone()))
+                img(gpui_image(image))
                     .size_full()
                     .rounded(px(radius))
                     .object_fit(ObjectFit::Cover),
