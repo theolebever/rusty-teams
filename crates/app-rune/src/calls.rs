@@ -489,6 +489,9 @@ pub struct CallView {
     transcribing: bool,
     consent_required: bool,
     capability: calling::MeetingCapability,
+    /// The meeting's chat thread (`CallUpdate::MeetingChat`), shown beside the stage.
+    meeting_chat: Option<String>,
+    show_chat: bool,
     reactions: Vec<(u64, String, calling::Reaction, Instant)>,
     own_mri: String,
 }
@@ -558,6 +561,8 @@ impl Default for CallView {
             transcribing: false,
             consent_required: false,
             capability: calling::MeetingCapability::default(),
+            meeting_chat: None,
+            show_chat: false,
             reactions: Vec::new(),
             own_mri: String::new(),
         }
@@ -681,6 +686,8 @@ impl CallView {
                     self.transcribing = false;
                     self.consent_required = false;
                     self.capability = calling::MeetingCapability::default();
+                    self.meeting_chat = None;
+                    self.show_chat = false;
                     self.reactions.clear();
                     self.local_share = None;
                     self.own_mri.clear();
@@ -765,6 +772,7 @@ impl CallView {
             CallUpdate::Transcribing(transcribing) => self.transcribing = transcribing,
             CallUpdate::ConsentRequired(required) => self.consent_required = required,
             CallUpdate::Capability(capability) => self.capability = capability,
+            CallUpdate::MeetingChat(thread) => self.meeting_chat = Some(thread),
             CallUpdate::Reaction { mri, reaction } => {
                 self.frame_id = self.frame_id.wrapping_add(1);
                 if self.reactions.len() == 12 {
@@ -1067,6 +1075,7 @@ fn button<A: Actions + 'static>(
         "call-share" | "stop-share" => Some("share"),
         "call-people" => Some("group"),
         "call-more" => Some("more_horiz"),
+        "call-chat" => Some("chat_bubble"),
         _ => None,
     };
     if let Some(symbol) = symbol {
@@ -1609,6 +1618,17 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             .child(button::<A>("More", "call-more", |s, _| {
                 s.calls.show_reactions = !s.calls.show_reactions;
             }));
+        if let Some(thread) = &call.meeting_chat {
+            let thread = thread.clone();
+            controls = controls.child(button::<A>("Chat", "call-chat", move |s, tx| {
+                s.calls.show_chat = !s.calls.show_chat;
+                // ponytail: the panel reuses the selected-chat views, so it selects the meeting
+                // chat, which the Chat screen then shows too.
+                if s.calls.show_chat && s.selected.as_deref() != Some(thread.as_str()) {
+                    crate::ui::open_chat(s, &thread, tx);
+                }
+            }));
+        }
         controls = controls.child(button::<A>("Leave", "call-leave", |s, _| {
             s.actions.call_command(CallCommand::Hangup)
         }));
@@ -2272,6 +2292,16 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         {
             content = content.child(panels);
         }
+        if call.show_chat && s.selected.is_some() && s.selected == call.meeting_chat {
+            let composer = if s.read_only {
+                text("Read-only").font(style(13.0, 400.0)).color(color("#616161"))
+            } else {
+                crate::view_composer::composer(s, true)
+            };
+            content = content.child(col().key("call-chat-panel").w(360.0).h_full().min_h(0.0).fill(color("#FFFFFF"))
+                .child(crate::view_messages::message_list(s, false))
+                .child(composer));
+        }
         return body.child(content);
     } else if call.ring.is_none() {
         body = body
@@ -2403,7 +2433,9 @@ mod tests {
                 .push(format!("call back {}", entry.call_id));
         }
         fn open(&self, _: &str) {}
-        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+        fn send(&self, target: crate::types::SendTarget, text: String, _: Vec<teams_core::FileReference>) {
+            self.actions.borrow_mut().push(format!("send {} {text}", target.conversation_id));
+        }
         fn join_call(&self, url: &str, video: bool) {
             self.actions
                 .borrow_mut()
@@ -2742,6 +2774,22 @@ mod tests {
         rt.frame(1.0);
         assert!(rt.find("call-record-start-recording").is_none(), "the meeting turned recording off");
         assert!(rt.find("call-record-start-transcription-only").is_some());
+    }
+
+    #[test]
+    fn the_meeting_chat_opens_beside_the_stage_and_sends_to_the_meeting_thread() {
+        let mut state = connected(1);
+        state.calls.apply(CallUpdate::MeetingChat("19:meeting".into()));
+        let mut rt = runtime(state);
+        click(&mut rt, "call-chat");
+        assert_eq!(rt.state.selected.as_deref(), Some("19:meeting"));
+        assert!(rt.find("call-chat-panel").is_some());
+        rt.update(|s, _| s.composer = TextEdit::new("hello"));
+        rt.frame(1.0);
+        click(&mut rt, "send");
+        assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("send 19:meeting hello"));
+        click(&mut rt, "call-chat");
+        assert!(rt.find("call-chat-panel").is_none());
     }
 
     #[test]
