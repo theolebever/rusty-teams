@@ -1,6 +1,4 @@
-# Tests per README "Quick start": `cargo test`. Linux and Windows are the supported
-# targets (README "Status"); macOS runs no tests here (its Ctrl/Cmd bindings fail the
-# key tests), it only builds - see build.yml.
+# Tests per README "Quick start": `cargo test`, on Windows, the target this fork focuses on.
 name: Test
 
 # Tests gate pushes to main; releases build from tags in build.yml.
@@ -21,36 +19,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux:
-    name: Linux
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    # webrtc-sys compiles its C++ against the hermetic libc++ inside the libwebrtc
-    # artifact, which needs a clang as new as that libc++ (clang 21 today, see
-    # check_clang_version in vendor/webrtc-sys/build.rs). The distro clang is older
-    # (18 on ubuntu-24.04), so setup-linux installs clang 21 and these point every
-    # compile and the final link at it.
-    env:
-      CC: clang-21
-      CXX: clang++-21
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang-21
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/setup-linux
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: test
-          # Tag and branch runs restore main's cache but never save their own: the
-          # repository's 10 GB cache quota only holds one cache per job.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Tests
-        run: cargo test
-
   windows:
     name: Windows
     runs-on: windows-latest

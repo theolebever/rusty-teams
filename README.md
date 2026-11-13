@@ -115,12 +115,12 @@ Sous Linux, la compilation GPUI nécessite notamment clang 21 ou plus récent po
 
 ### Binaires et CI
 
-Le workflow [Build de ce fork](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml) construit Rune. Chaque build produit le portable Windows `rusty-teams-rune.exe`, le binaire Linux et une application macOS universelle. Le portable Windows est téléchargeable dans l’artefact `teams-windows-amd64-portable`. L’installateur Windows est construit et envoyé comme artefact uniquement sur un tag.
+Le workflow [Build de ce fork](https://github.com/theolebever/rusty-teams/actions/workflows/build.yml) construit Rune. La CI ne cible plus que Windows. Chaque build produit le portable Windows `rusty-teams-rune.exe`. Le portable Windows est téléchargeable dans l’artefact `teams-windows-amd64-portable`. L’installateur Windows est construit et envoyé comme artefact uniquement sur un tag.
 
 | Workflow | Déclenchement | Contenu |
 |---|---|---|
-| [Test](.github/workflows/test.yml) | Push sur `main` ou lancement manuel | Tests du workspace, dont Rune, sous Linux et Windows. |
-| [Build](.github/workflows/build.yml) | Push sur `main`, push d’un tag ou lancement manuel | Compilation et empaquetage Rune sous Linux, Windows et macOS. Portable Windows à chaque build, installateur sur les tags, publication d’une release pour les tags commençant par `v`. |
+| [Test](.github/workflows/test.yml) | Push sur `main` ou lancement manuel | Tests du workspace, dont Rune, sous Windows. |
+| [Build](.github/workflows/build.yml) | Push sur `main`, push d’un tag ou lancement manuel | Compilation et empaquetage Rune sous Windows. Portable Windows à chaque build, installateur sur les tags, publication d’une release pour les tags commençant par `v`. |
 
 Le mécanisme de recherche de mises à jour GPUI référence encore les releases du dépôt original. Il reste à adapter à la distribution de ce fork.
 
