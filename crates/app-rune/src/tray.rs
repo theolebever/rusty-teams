@@ -68,18 +68,6 @@ fn create(shown: Shown, handler: &Handler) -> Option<Tray> {
         .ok()
 }
 
-fn toggle_sound<A: Actions>(s: &mut UiState<A>) {
-    let mut settings = s.settings.prefs.notify.clone();
-    settings.sounds.notification_sound = !settings.sounds.notification_sound;
-    crate::settings::change(s, crate::settings::Change::Notify(settings));
-}
-
-fn toggle_do_not_disturb<A: Actions>(s: &mut UiState<A>) {
-    let mut settings = s.settings.prefs.notify.clone();
-    settings.do_not_disturb = !settings.do_not_disturb;
-    crate::settings::change(s, crate::settings::Change::Notify(settings));
-}
-
 /// Puts the tray up for the app behind `handle`. False when the system has no tray.
 pub fn install<A: Actions + 'static>(s: &mut UiState<A>, handle: AppHandle<UiState<A>>) -> bool {
     let handler: Handler = Arc::new(move |event| match event {
@@ -87,8 +75,8 @@ pub fn install<A: Actions + 'static>(s: &mut UiState<A>, handle: AppHandle<UiSta
         TrayEvent::Activate { .. } => handle.open(),
         TrayEvent::Menu(id) => match id.as_str() {
             "open" => handle.open(),
-            "sound" => handle.update(|s, _| toggle_sound(s)),
-            "dnd" => handle.update(|s, _| toggle_do_not_disturb(s)),
+            "sound" => handle.update(|s, _| crate::settings::notify(s, |n| n.sounds.notification_sound = !n.sounds.notification_sound)),
+            "dnd" => handle.update(|s, _| crate::settings::notify(s, |n| n.do_not_disturb = !n.do_not_disturb)),
             "settings" => {
                 handle.open();
                 handle.update(|s, _| {

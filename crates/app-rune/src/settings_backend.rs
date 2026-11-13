@@ -52,11 +52,6 @@ fn republish(shared: &Shared, error: impl std::fmt::Display) {
     shared.publish(Update::Preferences(Box::new(load(&shared.store))));
 }
 
-fn me_mri(store: &Store) -> Option<String> {
-    let id = store.meta("me_user_id").ok().flatten()?;
-    Some(if id.starts_with("8:") { id } else { format!("8:orgid:{id}") })
-}
-
 /// Saves `change`; account writes run on the backend runtime and undo the local copy on failure.
 pub fn save(shared: &Arc<Shared>, change: Change) {
     let store = &shared.store;
@@ -67,7 +62,7 @@ pub fn save(shared: &Arc<Shared>, change: Change) {
             let previous = notify_settings::load(store);
             notify_settings::save(store, &settings);
             if previous.sounds == settings.sounds { return; }
-            let (Some(engine), Some(mri)) = (engine, me_mri(store)) else { return };
+            let (Some(engine), Some(mri)) = (engine, store.meta("me_user_id").ok().flatten().map(|id| chatsvc::members::user_mri(&id))) else { return };
             app_backend::runtime::handle().spawn(async move {
                 if let Err(error) = engine.save_sound_settings(&mri, &previous.sounds, &settings.sounds).await {
                     // Other notification settings may have changed since; undo only the sounds.
@@ -120,8 +115,5 @@ pub fn refresh(shared: Arc<Shared>, engine: Arc<Engine>) {
 
 /// Lists devices off the UI thread for the Devices pane.
 pub fn list_devices(shared: Arc<Shared>) {
-    app_backend::runtime::handle().spawn_blocking(move || {
-        shared.publish(Update::Call(calling::CallUpdate::Devices(calling::devices::list_devices(&calling::devices::shared_factory()))));
-        shared.publish(Update::Call(calling::CallUpdate::Cameras(calling::camera::list_cameras())));
-    });
+    crate::calls::list_devices(move |update| shared.publish(Update::Call(update)));
 }

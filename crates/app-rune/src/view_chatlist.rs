@@ -476,7 +476,7 @@ pub(crate) fn teams<A: Actions + 'static>(s: &UiState<A>) -> El {
     if !s.chatlist.pinned_channels.is_empty() {
         list = list.child(text("Pinned channels").font(ts(12.0, 600.0)).color(tone(p.text_soft)).padding(10.0));
         for id in &s.chatlist.pinned_channels {
-            if let Some(channel) = s.teams.iter().flat_map(|team| &team.channels).find(|channel| &channel.id == id) {
+            if let Some(channel) = s.channel(id) {
                 list = list.child(col().key(format!("pinned-channel-{id}")).w_full().child(channel_row(s, channel)));
             }
         }

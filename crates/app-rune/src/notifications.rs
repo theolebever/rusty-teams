@@ -61,11 +61,15 @@ pub fn ring<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>) {
     if !ringing { return; }
     let settings = &s.settings.prefs.notify;
     let in_call = s.calls.state.as_ref().is_some_and(calling::CallState::is_active);
-    let busy = matches!(s.own.status.availability.as_str(), "Busy" | "DoNotDisturb");
-    if let Some(tone) = rules::ringtone_for(settings, in_call, busy).filter(|_| !settings.do_not_disturb) {
+    if let Some(tone) = rules::ringtone_for(settings, in_call, own_busy(s)).filter(|_| !settings.do_not_disturb) {
         s.ringtone = Some(crate::sound::start(tone.file_name(), true));
     }
-    if !rune_notify::app_focused() { crate::taskbar::flash(); }
+    if rules::should_flash(settings, true, rune_notify::app_focused()) { crate::taskbar::flash(); }
+}
+
+/// Whether the user's own presence is Busy or Do not disturb.
+pub(crate) fn own_busy<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> bool {
+    matches!(s.own.status.availability.as_str(), "Busy" | "DoNotDisturb")
 }
 
 pub struct Notifications {

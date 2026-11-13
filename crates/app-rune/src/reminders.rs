@@ -64,13 +64,12 @@ pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
 /// The meeting chime, taskbar flash and system toast of a newly shown reminder.
 fn announce<A: Actions>(s: &UiState<A>, reminder: &Reminder) {
     let settings = &s.settings.prefs.notify;
-    let busy = matches!(s.own.status.availability.as_str(), "Busy" | "DoNotDisturb");
     let paused = s.own.paused_until.is_some_and(|until| Utc::now() < until);
     let silent = settings.do_not_disturb || paused || crate::notifications::system_quiet();
-    if app_backend::notify::rules::meeting_start_sound(settings, busy) && !silent {
+    if app_backend::notify::rules::meeting_start_sound(settings, crate::notifications::own_busy(s)) && !silent {
         crate::sound::play(app_backend::notify::sounds::CallTone::MeetingReminder.file_name());
     }
-    if !rune_notify::app_focused() { crate::taskbar::flash(); }
+    if app_backend::notify::rules::should_flash(settings, !silent, rune_notify::app_focused()) { crate::taskbar::flash(); }
     if !silent {
         rune_notify::post(&rune_notify::Notification::new(&reminder.key, reminder.subject.clone()).body(subtitle(reminder, Utc::now())));
     }

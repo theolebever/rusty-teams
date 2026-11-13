@@ -63,12 +63,16 @@ struct Candidate {
     target: Target,
 }
 
+/// Position in the recently opened list; never-opened conversations sort last.
+fn rank<A: Actions>(s: &UiState<A>, id: &str) -> usize {
+    s.nav.recent.iter().position(|recent| recent == id).unwrap_or(usize::MAX)
+}
+
 fn candidates<A: Actions>(s: &UiState<A>) -> Vec<Candidate> {
     let Some(switcher) = &s.nav.switcher else { return Vec::new() };
     let query = switcher.edit.text.trim().to_lowercase();
-    let rank = |id: &str| s.nav.recent.iter().position(|recent| recent == id).unwrap_or(usize::MAX);
     let mut chats: Vec<_> = s.chats.iter().filter(|chat| chat.title.to_lowercase().contains(&query)).collect();
-    chats.sort_by_key(|chat| rank(&chat.id));
+    chats.sort_by_key(|chat| rank(s, &chat.id));
     let mut found: Vec<_> = chats.into_iter().take(LIMIT).map(|chat| Candidate {
         title: chat.title.clone(), subtitle: chat.preview.clone(), highlights: vec![], group: "Chats", target: Target::Conversation(chat.id.clone(), false),
     }).collect();
@@ -84,7 +88,7 @@ fn candidates<A: Actions>(s: &UiState<A>) -> Vec<Candidate> {
     if query.chars().count() >= 2 {
         found.extend(switcher.results.messages.iter().filter_map(|message| {
             let chat = s.chats.iter().find(|chat| chat.id == message.conversation_id);
-            let channel = s.teams.iter().flat_map(|team| &team.channels).find(|channel| channel.id == message.conversation_id);
+            let channel = s.channel(&message.conversation_id);
             let title = chat.map(|chat| chat.title.as_str()).or_else(|| channel.map(|channel| channel.name.as_str()))?;
             let highlighted = split_highlights(message.highlighted_summary.as_deref().unwrap_or(&message.preview));
             Some(Candidate { title: format!("{} · {title}", message.sender_name.as_deref().unwrap_or("Unknown")),
@@ -171,8 +175,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, switcher: &Switcher) -> El {
 pub(crate) fn forward_candidates<A: Actions>(s: &UiState<A>, query: &str) -> Vec<(String, String)> {
     let mut all: Vec<(String, String)> = s.chats.iter().map(|chat| (chat.id.clone(), chat.title.clone())).collect();
     all.extend(s.visible_channels().map(|(_, channel)| (channel.id.clone(), format!("# {}", channel.name))));
-    let rank = |id: &str| s.nav.recent.iter().position(|recent| recent == id).unwrap_or(usize::MAX);
-    all.sort_by_key(|(id, _)| rank(id)); // stable: the rest keeps list order
+    all.sort_by_key(|(id, _)| rank(s, id)); // stable: the rest keeps list order
     let query = query.trim().to_lowercase();
     all.into_iter().filter(|(_, title)| title.to_lowercase().contains(&query)).take(LIMIT).collect()
 }

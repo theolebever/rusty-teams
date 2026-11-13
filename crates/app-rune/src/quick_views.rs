@@ -23,7 +23,7 @@ fn entry<A: Actions + 'static>(key: String, title: String, preview: String, conv
     col().key(key).w_full().padding(12.0).gap(4.0).radius(6.0).hover(tone(p.row_hover))
         .label(title.clone())
         .on_press_tx(move |s: &mut UiState<A>, tx| {
-            let channel = s.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == conversation);
+            let channel = s.channel(&conversation).is_some();
             crate::screens::navigate(s, if channel { crate::screens::Screen::Teams } else { crate::screens::Screen::Chat });
             ui::open_chat(s, &conversation, tx);
             if channel && root.is_some() { ui::select_thread(s, root.clone()); }

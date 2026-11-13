@@ -29,7 +29,7 @@ const PIN_INSET: f32 = 8.0;
 /// Meet now, the participant count and the icon buttons; then the search field when open, and
 /// the pinned-message bar when this conversation has a pinned message.
 pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bool) -> El {
-    let channel = s.teams.iter().flat_map(|team| &team.channels).find(|channel| channel.id == id);
+    let channel = s.channel(id);
     let title = s
         .chats
         .iter()

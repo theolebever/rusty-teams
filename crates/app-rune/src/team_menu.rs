@@ -48,7 +48,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     menu = menu.child(item("Copy link", "team-copy-link", move |s: &mut UiState<A>| s.actions.copy_team_link(&copy_id, is_channel)));
     if !s.read_only {
         if *channel {
-            let row = s.teams.iter().flat_map(|team| &team.channels).find(|row| &row.id == id)?;
+            let row = s.channel(id)?;
             let pinned = s.chatlist.pinned_channels.contains(id);
             let chat = id.clone();
             menu = menu.child(item(if pinned { "Unpin channel" } else { "Pin channel" }, "channel-pin", move |s: &mut UiState<A>| s.actions.set_channel_pinned(&chat, !pinned)));

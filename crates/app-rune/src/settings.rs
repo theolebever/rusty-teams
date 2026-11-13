@@ -7,10 +7,9 @@ use app_backend::notify::rules;
 use app_backend::notify::sounds::AlertSound;
 use app_backend::schemes;
 use calling::DeviceChoice;
-use rune::tok::Family;
 use rune::*;
 use teams_core::{ChatSettingChange, ChatSettingsDocument, EnterKeyBehavior};
-use crate::ui::text;
+use crate::ui::{text, ts};
 
 use crate::types::Actions;
 use crate::ui::UiState;
@@ -164,18 +163,14 @@ pub fn change<A: Actions>(s: &mut UiState<A>, change: Change) {
     s.actions.save_setting(change);
 }
 
-fn notify<A: Actions>(s: &mut UiState<A>, edit: impl FnOnce(&mut rules::Settings)) {
+pub(crate) fn notify<A: Actions>(s: &mut UiState<A>, edit: impl FnOnce(&mut rules::Settings)) {
     let mut settings = s.settings.prefs.notify.clone();
     edit(&mut settings);
     change(s, Change::Notify(settings));
 }
 
-fn style(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
-}
-
 fn caption(label: &str) -> El {
-    text(label.to_owned()).font(style(12.0, 600.0)).color(color("#616161")).pt(16.0)
+    text(label.to_owned()).font(ts(12.0, 600.0)).color(color("#616161")).pt(16.0)
 }
 
 fn switch(on: bool) -> El {
@@ -188,7 +183,7 @@ fn switch(on: bool) -> El {
 /// A setting row with a switch on the right; the whole row toggles.
 fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
     let row = row().key(key.to_owned()).w_full().min_h(40.0).px(12.0).gap(12.0).center_y().radius(6.0)
-        .child(text(title.to_owned()).font(style(14.0, 400.0)).color(color("#242424")).wrap().grow(1.0).min_w(0.0))
+        .child(text(title.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).wrap().grow(1.0).min_w(0.0))
         .child(switch(on));
     if enabled { row.hover(color("#EBEBEB")).on_press(press) } else { row.opacity(0.4) }
 }
@@ -197,27 +192,27 @@ fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool,
 fn choice<A: Actions + 'static>(key: String, label: &str, selected: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
     row().key(key).w_full().h(34.0).px(12.0).gap(10.0).center_y().radius(6.0).hover(color("#EBEBEB")).on_press(press)
         .child(text(if selected { "●" } else { "○" }).color(color(if selected { "#5B5FC7" } else { "#616161" })))
-        .child(text(label.to_owned()).font(style(14.0, 400.0)).color(color("#242424")).truncate())
+        .child(text(label.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).truncate())
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let query = s.settings.search.text.clone();
     let mut nav = col().key("settings-nav").w(260.0).h_full().padding(12.0).gap(2.0).fill(color("#F5F5F5"))
-        .child(text("Settings").font(style(20.0, 600.0)).color(color("#242424")).px(12.0).pb(12.0))
-        .child(text_input(&s.settings.search, style(14.0, 400.0)).key("settings-search").label("Search settings")
+        .child(text("Settings").font(ts(20.0, 600.0)).color(color("#242424")).px(12.0).pb(12.0))
+        .child(text_input(&s.settings.search, ts(14.0, 400.0)).key("settings-search").label("Search settings")
             .placeholder("Search settings", color("#616161")).color(color("#242424")).w_full()
             .on_edit(|s: &mut UiState<A>| &mut s.settings.search)
             .h(32.0).px(10.0).radius(6.0).fill(color("#FFFFFF")).mb(8.0));
     let shown: Vec<Section> = Section::ALL.into_iter().filter(|section| section.matches(&query)).collect();
     if shown.is_empty() {
-        nav = nav.child(text("No settings found").font(style(13.0, 400.0)).color(color("#616161")).px(12.0));
+        nav = nav.child(text("No settings found").font(ts(13.0, 400.0)).color(color("#616161")).px(12.0));
     }
     for section in &shown {
         let section = *section;
         let active = section == s.settings.section;
         let item = row().key(format!("settings-nav-{section:?}")).w_full().h(32.0).px(12.0).center_y().radius(6.0)
             .on_press(move |s: &mut UiState<A>| select(s, section))
-            .child(text(section.label()).font(style(14.0, if active { 600.0 } else { 400.0 })).color(color("#242424")).truncate());
+            .child(text(section.label()).font(ts(14.0, if active { 600.0 } else { 400.0 })).color(color("#242424")).truncate());
         nav = nav.child(if active { item.fill(color("#EBEBEB")) } else { item.hover(color("#EBEBEB")) });
     }
     // A search that hides the open section shows its first match instead.
@@ -234,7 +229,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(nav)
         .child(col().key("settings-pane").grow(1.0).min_w(0.0).h_full().scroll(ScrollSpec { stick_bottom: false })
             .child(col().w_full().max_w(720.0).padding(24.0).gap(4.0)
-                .child(text(section.label()).font(style(18.0, 600.0)).color(color("#242424")).pb(8.0))
+                .child(text(section.label()).font(ts(18.0, 600.0)).color(color("#242424")).pb(8.0))
                 .child(pane)))
 }
 
@@ -321,7 +316,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
     let mut pane = col().w_full()
         .child(caption("CHATS"))
         .child(toggle("settings-read-receipts", RECEIPTS, receipts, true, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::ReadReceipts(!receipts)))))
-        .child(text(ENTER).font(style(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0));
+        .child(text(ENTER).font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0));
     for (label, behavior) in [("Send the message", EnterKeyBehavior::Send), ("Start a new line (to send, select Send or use Ctrl+Enter).", EnterKeyBehavior::NewLine)] {
         pane = pane.child(choice(format!("settings-enter-{behavior:?}"), label, account.enter_key == behavior, move |s: &mut UiState<A>| {
             change(s, Change::Chat(ChatSettingChange::EnterKey(behavior)));
@@ -338,7 +333,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
                 if on { ids.retain(|chosen| chosen != id); } else if ids.len() < teams_core::DEFAULT_REACTION_SLOTS { ids.push(id.to_owned()); } else { return; }
                 change(s, Change::DefaultReactions(ids));
             })
-            .child(text(glyph).font(style(16.0, 400.0)));
+            .child(text(glyph).font(ts(16.0, 400.0)));
         reactions = reactions.child(if on { chip.fill(color("#E8EBFA")).border(1.0, color("#5B5FC7")) } else { chip.fill(color("#F5F5F5")).hover(color("#EBEBEB")) });
     }
     pane = pane.child(reactions).child(caption(&SKIN_TONE.to_uppercase()));
@@ -347,7 +342,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
         let glyph = chatsvc::reaction_glyph_for_key(&if tone == 0 { "like".to_owned() } else { format!("like-tone{tone}") }).unwrap_or_else(|| tone.to_string());
         let chip = row().key(format!("settings-skin-tone-{tone}")).h(32.0).w(36.0).center().radius(6.0)
             .on_press(move |s: &mut UiState<A>| change(s, Change::SkinTone(tone)))
-            .child(text(glyph).font(style(16.0, 400.0)));
+            .child(text(glyph).font(ts(16.0, 400.0)));
         tones = tones.child(if prefs.skin_tone == tone { chip.fill(color("#E8EBFA")).border(1.0, color("#5B5FC7")) } else { chip.hover(color("#EBEBEB")) });
     }
     pane.child(tones)
@@ -375,8 +370,8 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
 fn about() -> El {
     col().w_full()
         .child(caption("RUSTY TEAMS"))
-        .child(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(style(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0))
-        .child(text(format!("Build {}", app_backend::version::build_version())).font(style(14.0, 400.0)).color(color("#616161")).px(12.0).pt(4.0))
+        .child(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0))
+        .child(text(format!("Build {}", app_backend::version::build_version())).font(ts(14.0, 400.0)).color(color("#616161")).px(12.0).pt(4.0))
 }
 
 #[cfg(test)]

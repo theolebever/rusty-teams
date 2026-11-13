@@ -394,14 +394,7 @@ fn matches_filter(
         ActivityFilter::Replies => matches!(item.activity_type.as_str(), "reply" | "replyToReply" | "replyInChat" | "communityReply" | "communityReplyToReply"),
         ActivityFilter::Reactions => matches!(item.activity_type.as_str(), "reaction" | "reactionInChat" | "like" | "likeInChat" | "reactionInCommunity" | "reactionInSubCommunity"),
         ActivityFilter::MissedCalls => item.activity_type == "call" && item.activity_subtype == "missedCall",
-        ActivityFilter::Mentions => matches!(
-            item.activity_type.as_str(),
-            "mention"
-                | "mentionInChat"
-                | "mentionInCommunity"
-                | "mentionInSubCommunity"
-                | "communityMention"
-        ),
+        ActivityFilter::Mentions => crate::quick_views::is_mention(&item.activity_type),
     }
 }
 
@@ -544,7 +537,7 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
 fn activity_headline(item: &ActivityItem) -> (String, &'static str) {
     let actor = if item.source_user_name.trim().is_empty() { item.source_app_name.as_deref().unwrap_or("Teams") } else { &item.source_user_name };
     match item.activity_type.as_str() {
-        "mention" | "mentionInChat" | "mentionInCommunity" | "mentionInSubCommunity" | "communityMention" => (format!("{actor} mentioned you"), "alternate_email"),
+        kind if crate::quick_views::is_mention(kind) => (format!("{actor} mentioned you"), "alternate_email"),
         "reply" | "replyToReply" | "replyInChat" | "communityReply" | "communityReplyToReply" => (format!("{actor} replied"), "reply"),
         "reaction" | "reactionInChat" | "like" | "likeInChat" | "reactionInCommunity" | "reactionInSubCommunity" => (format!("{actor} reacted to your message"), "thumb_up"),
         "call" if item.activity_subtype == "missedCall" => (format!("Missed call from {actor}"), "call"),

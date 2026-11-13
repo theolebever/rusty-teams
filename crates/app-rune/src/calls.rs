@@ -147,6 +147,14 @@ impl Drop for Preview {
     }
 }
 
+/// Lists audio devices and cameras off the UI thread.
+pub(crate) fn list_devices(send: impl Fn(CallUpdate) + Send + 'static) {
+    app_backend::runtime::handle().spawn_blocking(move || {
+        send(CallUpdate::Devices(calling::devices::list_devices(&calling::devices::shared_factory())));
+        send(CallUpdate::Cameras(calling::camera::list_cameras()));
+    });
+}
+
 /// Dropping a capture joins its thread, so it happens off the UI thread.
 fn release(capture: Option<calling::capture::Capture>) {
     if let Some(capture) = capture {
@@ -470,7 +478,7 @@ pub struct CallView {
     hand: bool,
     captions: calling::CaptionState,
     caption: Option<calling::CaptionEntry>,
-    caption_history: Vec<calling::CaptionEntry>,
+    caption_history: std::collections::VecDeque<calling::CaptionEntry>,
     show_captions: bool,
     caption_language: Option<String>,
     recording: bool,
@@ -538,7 +546,7 @@ impl Default for CallView {
             hand: false,
             captions: calling::CaptionState::Off,
             caption: None,
-            caption_history: Vec::new(),
+            caption_history: std::collections::VecDeque::new(),
             show_captions: false,
             caption_language: None,
             recording: false,
@@ -740,9 +748,9 @@ impl CallView {
                 } else {
                     // shortcut: keep the last 200 utterances in memory; add persistent history only if requested.
                     if self.caption_history.len() == 200 {
-                        self.caption_history.remove(0);
+                        self.caption_history.pop_front();
                     }
-                    self.caption_history.push(caption.clone());
+                    self.caption_history.push_back(caption.clone());
                 }
                 self.caption = Some(caption);
             }
@@ -928,12 +936,7 @@ pub fn poll<A: Actions>(state: &mut UiState<A>, _: f64, tx: &mut Tx) -> bool {
         if state.calls.preview.is_none() {
             let preview = Preview::new();
             let sender = preview.sender.clone();
-            app_backend::runtime::handle().spawn_blocking(move || {
-                let _ = sender.send(CallUpdate::Devices(calling::devices::list_devices(
-                    &calling::devices::shared_factory(),
-                )));
-                let _ = sender.send(CallUpdate::Cameras(calling::camera::list_cameras()));
-            });
+            list_devices(move |update| { let _ = sender.send(update); });
             state.calls.preview = Some(preview);
         }
         let call = &mut state.calls;
@@ -1112,25 +1115,11 @@ fn health_indicator<A: Actions + 'static>(call: &CallView) -> El {
 
 fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
     let mut panel = col().key("call-device-list").gap(4.0);
-    for (kind, title, entries, selected) in [
-        (
-            "input",
-            "Microphone",
-            call.devices.input_entries(),
-            &call.selected_input,
-        ),
-        (
-            "output",
-            "Speaker",
-            call.devices.output_entries(),
-            &call.selected_output,
-        ),
-        (
-            "camera",
-            "Camera",
-            calling::camera_entries(&call.cameras),
-            &call.selected_camera,
-        ),
+    use crate::settings::Device;
+    for (device, kind, title, entries, selected) in [
+        (Device::Microphone, "input", "Microphone", call.devices.input_entries(), &call.selected_input),
+        (Device::Speaker, "output", "Speaker", call.devices.output_entries(), &call.selected_output),
+        (Device::Camera, "camera", "Camera", calling::camera_entries(&call.cameras), &call.selected_camera),
     ] {
         panel = panel.child(text(title).font(style(13.0, 700.0)).color(color("#242424")));
         for entry in entries {
@@ -1144,21 +1133,21 @@ fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
                 &label,
                 &format!("{kind}-{}", entry.label),
                 move |s, _| {
-                    let command = match kind {
-                        "input" => CallCommand::SelectInput(choice.clone()),
-                        "output" => CallCommand::SelectOutput(choice.clone()),
-                        _ => CallCommand::SelectCamera(choice.clone()),
+                    let command = match device {
+                        Device::Microphone => CallCommand::SelectInput(choice.clone()),
+                        Device::Speaker => CallCommand::SelectOutput(choice.clone()),
+                        Device::Camera => CallCommand::SelectCamera(choice.clone()),
                     };
                     if prejoin {
-                        match kind {
-                            "input" => s.calls.selected_input = choice.clone(),
-                            "output" => s.calls.selected_output = choice.clone(),
-                            _ => s.calls.selected_camera = choice.clone(),
+                        match device {
+                            Device::Microphone => s.calls.selected_input = choice.clone(),
+                            Device::Speaker => s.calls.selected_output = choice.clone(),
+                            Device::Camera => s.calls.selected_camera = choice.clone(),
                         }
                     } else {
                         s.actions.call_command(command);
                         // shortcut: the engine has no selected-camera update; confirm it when that event exists.
-                        if kind == "camera" {
+                        if device == Device::Camera {
                             s.calls.selected_camera = choice.clone();
                         }
                     }
@@ -1189,26 +1178,19 @@ fn effects_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
             }
         },
     ));
-    for (key, label, enabled) in [
-        ("mirror", "Mirror my video", call.effects.mirror),
-        ("framing", "Auto framing", call.effects.auto_framing),
-        (
-            "brightness",
-            "Adjust brightness",
-            call.effects.adjust_brightness,
-        ),
-        ("soft-focus", "Soft focus", call.effects.soft_focus),
-    ] {
+    type Field = fn(&mut calling::CameraEffects) -> &mut bool;
+    let effects: [(&str, &str, bool, Field); 4] = [
+        ("mirror", "Mirror my video", call.effects.mirror, |e| &mut e.mirror),
+        ("framing", "Auto framing", call.effects.auto_framing, |e| &mut e.auto_framing),
+        ("brightness", "Adjust brightness", call.effects.adjust_brightness, |e| &mut e.adjust_brightness),
+        ("soft-focus", "Soft focus", call.effects.soft_focus, |e| &mut e.soft_focus),
+    ];
+    for (key, label, enabled, field) in effects {
         panel = panel.child(button::<A>(
             &format!("{} {label}", if enabled { "✓" } else { "" }),
             &format!("effect-{key}"),
             move |s, _| {
-                match key {
-                    "mirror" => s.calls.effects.mirror = !enabled,
-                    "framing" => s.calls.effects.auto_framing = !enabled,
-                    "brightness" => s.calls.effects.adjust_brightness = !enabled,
-                    _ => s.calls.effects.soft_focus = !enabled,
-                }
+                *field(&mut s.calls.effects) = !enabled;
                 if !prejoin {
                     s.actions
                         .call_command(CallCommand::SetCameraEffects(s.calls.effects));
@@ -1223,14 +1205,11 @@ fn invite_draft<A: Actions>(s: &mut UiState<A>) -> &mut crate::new_chat::Draft {
     &mut s.chatlist.manage.add
 }
 
-fn reaction_glyph(reaction: &calling::Reaction) -> &str {
+/// The chat emoji of a call reaction; Teams has no chat emotion named "applause".
+fn reaction_glyph(reaction: &calling::Reaction) -> String {
     match reaction {
-        calling::Reaction::Like => "👍",
-        calling::Reaction::Heart => "❤",
-        calling::Reaction::Applause => "👏",
-        calling::Reaction::Laugh => "😆",
-        calling::Reaction::Surprised => "😮",
-        calling::Reaction::Other(name) => name,
+        calling::Reaction::Applause => "👏".to_owned(),
+        other => chatsvc::reactions::reaction_glyph_for_key(other.name()).unwrap_or_else(|| other.name().to_owned()),
     }
 }
 

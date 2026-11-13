@@ -20,14 +20,22 @@ pub struct State {
     pub working_dir: TextEdit,
     pub output: String,
     pub running: bool,
-    /// Tool steps of the current run, as the runner reports them.
+    /// The last `SHOWN_STEPS` tool steps of the current run, as the runner reports them.
     pub steps: Vec<String>,
     /// Newest first: this session's runs (no status), then the GPUI client's stored ones.
     pub runs: Vec<Run>,
     current: Run,
 }
 
+/// How many tool steps the panel lists.
+const SHOWN_STEPS: usize = 5;
+
 impl State {
+    pub fn step(&mut self, step: String) {
+        if self.steps.len() == SHOWN_STEPS { self.steps.remove(0); }
+        self.steps.push(step);
+    }
+
     pub fn finish(&mut self, result: String) {
         self.running = false;
         self.steps.clear();
@@ -76,7 +84,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
     if s.agent.running {
         content = content.child(crate::screens::button("Stop", "agent-stop", |s: &mut UiState<A>, _| s.actions.stop_agent()));
-        for step in s.agent.steps.iter().rev().take(5).rev() {
+        for step in &s.agent.steps {
             content = content.child(text(step.clone()).font(ts(13.0, 400.0)).color(c(MUTED)).truncate());
         }
     }

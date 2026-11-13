@@ -232,7 +232,7 @@ impl<A: Actions> UiState<A> {
             }
             Update::AgentSettings(settings) => self.agent.settings = settings,
             Update::AgentResult(result) => self.agent.finish(result),
-            Update::AgentProgress(step) => self.agent.steps.push(step),
+            Update::AgentProgress(step) => self.agent.step(step),
             Update::AgentRuns(runs) => self.agent.runs.extend(runs),
             Update::Details(details) => {
                 for (id, chat) in &details { self.member_counts.insert(id.clone(), chat.members.len()); }
@@ -373,7 +373,7 @@ impl<A: Actions> UiState<A> {
         let text = if self.selected.as_deref() == Some(id) && self.thread_root_id.is_none() {
             self.composer.text.clone()
         } else {
-            let target = SendTarget { conversation_id: id.to_owned(), thread_root_id: None, channel: self.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == id) };
+            let target = SendTarget { conversation_id: id.to_owned(), thread_root_id: None, channel: self.channel(id).is_some() };
             self.drafts.get(&target).cloned().or_else(|| self.actions.load_draft(id)).unwrap_or_default()
         };
         (!text.trim().is_empty()).then_some(text)
@@ -425,7 +425,7 @@ pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
 
 pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
     let conversation_id = s.selected.clone()?;
-    let channel = s.teams.iter().flat_map(|team| &team.channels).any(|channel| channel.id == conversation_id);
+    let channel = s.channel(&conversation_id).is_some();
     Some(SendTarget { conversation_id, thread_root_id: s.thread_root_id.clone(), channel })
 }
 

@@ -3,7 +3,7 @@
 //! shows the answer in place of the chat list until the box is cleared.
 
 use chrono::Local;
-use rune::tok::Family;
+use crate::ui::ts;
 use rune::*;
 use crate::ui::text;
 
@@ -213,21 +213,13 @@ fn title_of<A: Actions>(s: &UiState<A>, id: &str) -> String {
         .find(|chat| chat.id == id)
         .map(|chat| chat.title.clone())
         .or_else(|| {
-            s.teams
-                .iter()
-                .flat_map(|team| &team.channels)
-                .find(|channel| channel.id == id)
-                .map(|channel| format!("# {}", channel.name))
+            s.channel(id).map(|channel| format!("# {}", channel.name))
         })
         .unwrap_or_else(|| "Conversation".into())
 }
 
 fn c(s: &str) -> Color {
     crate::settings::color(s)
-}
-
-fn ts(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
 }
 
 #[cfg(test)]
