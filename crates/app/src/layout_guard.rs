@@ -745,7 +745,7 @@ mod frames {
             let state = cx.new(|_| AppState::new(store, mode));
             install_globals(&state, UserInput::new(), cx);
             crate::agents::install(state.clone(), cx);
-            demo::start_session(&state, cx);
+            state.update(cx, |state, cx| demo::start_session(state, cx));
             let shared_state = state.clone();
             let startup = Startup {
                 switcher_query: None,

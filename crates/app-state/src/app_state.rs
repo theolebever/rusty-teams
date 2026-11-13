@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use chatsvc::TypingEvent;
 use chrono::{DateTime, Utc};
+#[cfg(feature = "gpui")]
 use gpui_kit::{Entity, EventEmitter, Global};
 use store::{ChatRecord, Sidebar, Store};
 use teams_core::{
@@ -235,10 +236,13 @@ pub enum AgentNote {
     ClearCaptions(String),
 }
 
+#[cfg(feature = "gpui")]
 pub struct AppHandle(pub Entity<AppState>);
 
+#[cfg(feature = "gpui")]
 impl Global for AppHandle {}
 
+#[cfg(feature = "gpui")]
 impl EventEmitter<AppEvent> for AppState {}
 
 pub fn selection_for(sidebar: &Sidebar, conversation_id: &str) -> Option<Selection> {

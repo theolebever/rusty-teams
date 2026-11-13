@@ -1,16 +1,19 @@
+#[cfg(feature = "gpui")]
 use std::sync::Arc;
 
+#[cfg(feature = "gpui")]
 use gpui_kit::*;
 
+#[cfg(feature = "gpui")]
 use crate::backend::Engine;
 use crate::card_state::CardScope;
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "gpui"))]
 pub mod hosted;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "gpui"))]
 use app_base::task_dialog::sdk;
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "gpui"))]
 pub use hosted::install_host;
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -38,12 +41,12 @@ pub enum UrlDialogNext {
     },
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "gpui"))]
 pub fn open_url_dialog(dialog: UrlDialog, engine: Option<Arc<Engine>>, cx: &mut App) {
     hosted::open(dialog, engine, cx);
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "gpui"))]
 pub fn open_url_dialog(dialog: UrlDialog, _engine: Option<Arc<Engine>>, cx: &mut App) {
     cx.open_url(&dialog.fallback_url);
 }

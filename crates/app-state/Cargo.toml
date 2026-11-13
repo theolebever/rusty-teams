@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+default = ["gpui"]
+# GPUI host: the Host impl, AppHandle, agent runs and the agent API.
+gpui = ["dep:gpui-kit", "app-base/gpui"]
 test-support = []
 
 [lib]
@@ -18,13 +21,13 @@ tempfile.workspace = true
 [dependencies]
 app-backend.workspace = true
 agents.workspace = true
-app-base.workspace = true
+app-base = { workspace = true, default-features = false }
 app-call-model.workspace = true
 calling.workspace = true
 chatsvc.workspace = true
 chrono.workspace = true
 directories.workspace = true
-gpui-kit.workspace = true
+gpui-kit = { workspace = true, optional = true }
 graph.workspace = true
 log = "0.4"
 mcp.workspace = true

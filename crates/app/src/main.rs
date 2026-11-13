@@ -258,7 +258,7 @@ fn main() {
             .detach();
         agents::install(state.clone(), cx);
         if arguments.demo {
-            demo::start_session(&state, cx);
+            state.update(cx, |state, cx| demo::start_session(state, cx));
         }
         if let Some(mut receiver) = receiver {
             let state = state.clone();

@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, Local, TimeZone, Utc};
-use gpui_kit::{App, Entity};
 use store::{
     ChannelLayoutRecord, ChannelMentions, ChannelNotificationLevel, ChannelNotifications,
     ChannelRecord, ChannelTabRecord, ChatRecord, MemberRecord, MessageImportance, MessageRecord,
@@ -18,6 +17,7 @@ use teams_core::{
     TranslationStatus,
 };
 
+use crate::Host;
 use crate::app_state::{AppState, Selection};
 use crate::card_actions::{CardAnswer, CardTask};
 use crate::data::{AvatarState, FolderInfo, FolderKind, Person, PresenceKind};
@@ -695,12 +695,10 @@ pub fn read_message_ids(records: &[MessageRecord]) -> std::collections::HashSet<
         .collect()
 }
 
-pub fn start_session(state: &Entity<AppState>, cx: &mut App) {
-    state.update(cx, |state, cx| {
-        seed_directory(state);
-        state.demo_live_meetings();
-        state.select(first_selection(), cx);
-    });
+pub fn start_session(state: &mut AppState, cx: &mut dyn Host) {
+    seed_directory(state);
+    state.demo_live_meetings();
+    state.select(first_selection(), cx);
 }
 
 pub fn first_selection() -> Selection {

@@ -5,12 +5,19 @@ use mcp::ReactionProposal;
 use store::{Sidebar, Store};
 
 use super::{ProposalEntry, ProposalStatus, agent_label};
-use crate::activity::preview_label;
 use crate::app_state::chat_title;
-use crate::notify::preview_of;
+use crate::notify::{Preview, preview_of};
 use crate::rows::reaction_glyph;
 
 const EXCERPT_CHARACTERS: usize = 120;
+const IMAGE_LABEL: &str = "Image";
+
+fn preview_label(preview: &Preview) -> String {
+    match preview {
+        Preview::Text(text) => text.clone(),
+        Preview::Image => IMAGE_LABEL.to_owned(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingKind {

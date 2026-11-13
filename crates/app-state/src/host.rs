@@ -80,8 +80,10 @@ impl StateHandle {
     }
 }
 
+#[cfg(feature = "gpui")]
 pub use gpui_host::follow_state;
 
+#[cfg(feature = "gpui")]
 mod gpui_host {
     use std::time::Duration;
 

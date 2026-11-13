@@ -1,6 +1,8 @@
 pub mod activity;
 pub mod banner_image;
+#[cfg(feature = "gpui")]
 pub mod agent_api;
+#[cfg(feature = "gpui")]
 pub mod agents;
 pub mod app_state;
 pub use app_backend::backend;
