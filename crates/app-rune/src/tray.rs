@@ -115,8 +115,10 @@ fn shown<A: Actions>(s: &UiState<A>) -> Shown {
 /// Drops mentions that were read or are in front, then redraws the tray if anything changed.
 pub fn sync<A: Actions>(s: &mut UiState<A>) {
     let foreground = s.foreground_chat().map(str::to_owned);
-    let chats = &s.chats;
-    s.tray.mentions.retain(|id| chats.iter().any(|chat| chat.unread && chat.id == *id) && foreground.as_deref() != Some(id.as_str()));
+    let (chats, teams) = (&s.chats, &s.teams);
+    let unread = |id: &str| chats.iter().any(|chat| chat.unread && chat.id == id)
+        || teams.iter().flat_map(|team| &team.channels).any(|channel| channel.unread && channel.id == id);
+    s.tray.mentions.retain(|id| unread(id) && foreground.as_deref() != Some(id.as_str()));
     let shown = shown(s);
     if s.tray.shown == Some(shown) { return; }
     let previous = s.tray.shown.replace(shown);
@@ -157,5 +159,10 @@ mod tests {
         s.chats[0].unread = false;
         sync(&mut s);
         assert!(!shown(&s).mention);
+        let channel = crate::types::ChannelRow { hidden: false, id: "c".into(), name: "General".into(), unread: true };
+        s.teams = vec![crate::types::TeamRow { id: "t".into(), name: "T".into(), channels: vec![channel] }];
+        s.tray.mentions.insert("c".into());
+        sync(&mut s);
+        assert!(shown(&s).mention, "an unread channel keeps its mention");
     }
 }

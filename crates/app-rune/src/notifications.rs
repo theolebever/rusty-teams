@@ -15,7 +15,8 @@ pub fn clicked(click: &rune_notify::Click) -> Option<crate::types::Update> {
 /// Drains the same pending open request used by a person's profile card.
 pub fn open_pending<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>, tx: &mut rune::Tx) -> bool {
     let Some(id) = s.profile.chat_request.take() else { return false };
-    crate::screens::navigate(s, crate::screens::Screen::Chat);
+    let screen = if s.channel(&id).is_some() { crate::screens::Screen::Teams } else { crate::screens::Screen::Chat };
+    crate::screens::navigate(s, screen);
     crate::ui::open_chat(s, &id, tx);
     true
 }
@@ -37,14 +38,14 @@ pub fn environment(engine: &Engine, chat_in_foreground: bool, native_in_call: bo
 }
 
 #[cfg(windows)]
-fn system_quiet() -> bool {
+pub(crate) fn system_quiet() -> bool {
     use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_QUIET_TIME, QUNS_RUNNING_D3D_FULL_SCREEN};
     // SAFETY: the API has no arguments and reports the current shell notification state.
     unsafe { SHQueryUserNotificationState() }.map_or(true, |state| matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE | QUNS_QUIET_TIME))
 }
 
 #[cfg(not(windows))]
-fn system_quiet() -> bool { false }
+pub(crate) fn system_quiet() -> bool { false }
 
 /// What the taskbar button counts: unread chats and the Activity bell, as GPUI's badge.
 pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize {
@@ -55,7 +56,7 @@ pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize
 /// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts.
 pub fn ring<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>) {
     let ringing = s.calls.ring.is_some();
-    if ringing == s.ringtone.is_some() { return; }
+    if ringing == std::mem::replace(&mut s.was_ringing, ringing) { return; }
     s.ringtone = None;
     if !ringing { return; }
     let settings = &s.settings.prefs.notify;

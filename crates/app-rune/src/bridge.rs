@@ -97,7 +97,7 @@ impl Shared {
                 }))).collect();
                 match engine.pinned_channels() {
                     Ok(pinned) => self.publish(Update::TeamMetadata { teams, channels, pinned }),
-                    Err(error) => self.publish(Update::Status(format!("Pinned channels unavailable: {error}"))),
+                    Err(error) => app_backend::diagnostics::record(format!("Rune: pinned channels unavailable: {error}")),
                 }
                 let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
                 let pictures = sidebar.chats.iter().filter(|chat| chat.kind != "oneOnOne").map(|chat| teams_core::chat_picture_key(&chat.id));
@@ -333,8 +333,7 @@ impl Bridge {
 
 impl Actions for Bridge {
     fn set_notification_pause(&self, until: Option<DateTime<Utc>>) {
-        let Some(engine) = self.shared.engine() else { return };
-        match engine.store().set_meta("notify_paused_until", &until.map(|time| time.to_rfc3339()).unwrap_or_default()) {
+        match self.shared.store.set_meta("notify_paused_until", &until.map(|time| time.to_rfc3339()).unwrap_or_default()) {
             Ok(()) => self.shared.publish(Update::NotificationPause(until)),
             Err(error) => self.shared.publish(Update::Status(format!("Could not pause notifications: {error}"))),
         }
@@ -510,7 +509,9 @@ impl Actions for Bridge {
             Err(error) => { self.shared.publish(Update::AgentResult(error.to_string())); return; }
         };
         settings.remember_working_dir(id, working_dir);
-        let _ = engine.store().set_meta(agents::SETTINGS_KEY, &settings.to_json());
+        if let Err(error) = engine.store().set_meta(agents::SETTINGS_KEY, &settings.to_json()) {
+            app_backend::diagnostics::record(format!("Rune: agent settings not saved: {error}"));
+        }
         self.shared.publish(Update::AgentSettings(settings));
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let mut running = self.shared.agent_stop.lock().unwrap_or_else(PoisonError::into_inner);
@@ -609,6 +610,7 @@ impl Actions for Bridge {
 
     fn meet_now(&self, id: &str) {
         if self.shared.read_only { return; }
+        if !id.is_empty() { return self.call_chat(id); }
         let launcher = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let Some(launcher) = launcher else { self.shared.publish(Update::MeetingReady(Err("Not connected yet".into()))); return };
         let subject = self.shared.engine().and_then(|engine| engine.store().chat(id).ok().flatten()).map(|chat| chat.title)
@@ -805,6 +807,7 @@ impl Actions for Bridge {
     fn load_image(&self, image: teams_core::ImageRef) { crate::media::load_image(self.shared.clone(), image); }
     fn download_file(&self, url: String, path: PathBuf) { crate::media::download_file(self.shared.clone(), url, path); }
     fn join_call(&self, url: &str, video: bool) { self.shared.call_control.join(url, video); }
+    fn calling_ready(&self) -> bool { self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).is_some() }
     fn call_command(&self, command: calling::CallCommand) { self.shared.call_control.command(command); }
     fn take_video(&self) -> Vec<(calling::VideoKey, Arc<calling::VideoPicture>)> { self.shared.call_control.take_video() }
     fn load_older(&self, conversation_id: &str) {
@@ -970,7 +973,7 @@ impl Actions for Bridge {
                 }
                 refresh_pins(&shared, &engine, &conversation_id).await;
                 if let Err(error) = engine.refresh_receipts(&conversation_id).await {
-                    shared.publish(Update::Status(format!("Read receipts unavailable: {error}")));
+                    app_backend::diagnostics::record(format!("Rune: read receipts unavailable: {error}"));
                 }
                 if shared.is_open(&conversation_id) { shared.publish_messages(&engine, &conversation_id); }
                 if let Ok(Some(chat)) = engine.store().chat(&conversation_id) {
@@ -1085,7 +1088,36 @@ impl Actions for Bridge {
     }
 }
 
+/// The people a chat call rings: everyone but me and bots, for 1:1 and group chats only.
+fn chat_callees(chat: &ChatRecord, me: &str) -> Result<Vec<calling::Callee>, &'static str> {
+    if me.is_empty() || teams_core::is_notes_chat(&chat.id)
+        || !(chat.kind.eq_ignore_ascii_case("oneOnOne") || chat.kind.eq_ignore_ascii_case("group")) {
+        return Err("This chat is not available for calling");
+    }
+    let callees: Vec<calling::Callee> = chat.members.iter().filter(|m| !m.is_bot()).filter_map(|m| {
+        let user = m.user_id.as_deref().filter(|user| *user != me)?;
+        Some(calling::Callee { mri: format!("8:orgid:{user}"), display_name: m.display_name.clone() })
+    }).collect();
+    if callees.is_empty() { Err("This chat has no callable participants") } else { Ok(callees) }
+}
+
 impl Bridge {
+    /// Rings the chat's members with video on, like the GPUI header call button.
+    fn call_chat(&self, id: &str) {
+        let Some(engine) = self.shared.engine() else { self.shared.publish(Update::Status("Not connected yet".into())); return };
+        match engine.store().chat(id) {
+            Ok(Some(chat)) => {
+                let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
+                match chat_callees(&chat, &me) {
+                    Ok(callees) => self.shared.call_control.start_with_video(calling::CallSpec::People { callees, thread_id: id.to_owned() }, true),
+                    Err(why) => self.shared.publish(Update::Status(why.into())),
+                }
+            }
+            Ok(None) => self.shared.publish(Update::Status("Chat is not available yet".into())),
+            Err(error) => self.shared.publish(Update::Status(format!("Could not start call: {error}"))),
+        }
+    }
+
     fn send_to(&self, target: SendTarget, composed: crate::types::Composed, files: Vec<teams_core::FileReference>) {
         let crate::types::Composed { text, mentions, gifs, reply } = composed;
         if text.trim().is_empty() && files.is_empty() && gifs.is_empty() {
@@ -1505,6 +1537,15 @@ mod tests {
             last_message_at: at,
             ..ChatRecord::default()
         }
+    }
+
+    #[test]
+    fn chat_calls_ring_the_other_members() {
+        let member = |id: &str| store::MemberRecord { user_id: Some(id.into()), display_name: id.into() };
+        let group = ChatRecord { kind: "group".into(), members: vec![member("me"), member("ann"), member("28:bot")], ..chat("19:g", None) };
+        let callees = chat_callees(&group, "me").expect("group is callable");
+        assert_eq!(callees.iter().map(|c| c.mri.as_str()).collect::<Vec<_>>(), ["8:orgid:ann"]);
+        assert!(chat_callees(&ChatRecord { kind: "meeting".into(), ..group }, "me").is_err());
     }
 
     #[test]

@@ -9,11 +9,13 @@ use crate::ui::UiState;
 pub struct CallWindow {
     app: AppHandle<UiState<Bridge>>,
     shown: bool,
+    /// The prejoin choices went to the call window for the call now starting.
+    prepared: bool,
 }
 
 impl CallWindow {
     pub fn new(app: AppHandle<UiState<Bridge>>) -> Self {
-        Self { app, shown: false }
+        Self { app, shown: false, prepared: false }
     }
 
     pub fn open(&self) {
@@ -66,17 +68,22 @@ impl CallWindow {
     }
 
     pub fn sync(&mut self, call: &CallView) {
+        // An ended call keeps the window, so copy on each start rather than on the window edge.
+        let starting = matches!(call.state, Some(CallState::Connecting)) || call.ring.is_some();
+        if starting && !self.prepared {
+            let camera = call.selected_camera.clone();
+            let blur = call.background_blur;
+            let effects = call.effects;
+            self.app.update(move |state, _| {
+                state.calls.selected_camera = camera;
+                state.calls.background_blur = blur;
+                state.calls.effects = effects;
+            });
+        }
+        self.prepared = starting;
         let wanted = needs_window(call);
         if wanted != self.shown {
             if wanted {
-                let camera = call.selected_camera.clone();
-                let blur = call.background_blur;
-                let effects = call.effects;
-                self.app.update(move |state, _| {
-                    state.calls.selected_camera = camera;
-                    state.calls.background_blur = blur;
-                    state.calls.effects = effects;
-                });
                 self.app.open();
             } else {
                 self.app.hide();

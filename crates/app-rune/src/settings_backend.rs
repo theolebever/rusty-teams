@@ -70,7 +70,9 @@ pub fn save(shared: &Arc<Shared>, change: Change) {
             let (Some(engine), Some(mri)) = (engine, me_mri(store)) else { return };
             app_backend::runtime::handle().spawn(async move {
                 if let Err(error) = engine.save_sound_settings(&mri, &previous.sounds, &settings.sounds).await {
-                    notify_settings::save(&shared.store, &rules::Settings { sounds: previous.sounds, ..settings });
+                    // Other notification settings may have changed since; undo only the sounds.
+                    let current = notify_settings::load(&shared.store);
+                    notify_settings::save(&shared.store, &rules::Settings { sounds: previous.sounds, ..current });
                     republish(&shared, error);
                 }
             });
@@ -84,7 +86,7 @@ pub fn save(shared: &Arc<Shared>, change: Change) {
         Change::DefaultReactions(ids) => account(shared, engine.map(|engine| async move { engine.set_default_reactions(&ids).await })),
         Change::Device(device, choice) => {
             let value = match &choice { DeviceChoice::SystemDefault => DEFAULT_DEVICE, DeviceChoice::Device(key) => key };
-            let _ = store.set_meta(device_key(device), value);
+            if let Err(error) = store.set_meta(device_key(device), value) { return republish(&shared, error); }
             if device == Device::Camera && let Some(launcher) = shared.launcher() { launcher.set_default_camera(choice); }
         }
     }

@@ -113,7 +113,7 @@ impl Preview {
     }
 
     fn start(&mut self, choice: &calling::DeviceChoice) {
-        self.capture = None;
+        release(self.capture.take());
         self.camera = Some(choice.clone());
         let hub = self.hub.clone();
         let settings = self.settings.clone();
@@ -138,6 +138,19 @@ impl Preview {
                 let _ = self.sender.send(CallUpdate::Notice(error.to_string()));
             }
         }
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        release(self.capture.take());
+    }
+}
+
+/// Dropping a capture joins its thread, so it happens off the UI thread.
+fn release(capture: Option<calling::capture::Capture>) {
+    if let Some(capture) = capture {
+        app_backend::runtime::handle().spawn_blocking(move || drop(capture));
     }
 }
 
@@ -930,7 +943,7 @@ pub fn poll<A: Actions>(state: &mut UiState<A>, _: f64, tx: &mut Tx) -> bool {
         if call.video && preview.camera.as_ref() != Some(&call.selected_camera) {
             preview.start(&call.selected_camera);
         } else if !call.video {
-            preview.capture = None;
+            release(preview.capture.take());
             preview.camera = None;
             call.surfaces.remove(&VideoKey::LocalCamera);
         }

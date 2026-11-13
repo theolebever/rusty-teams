@@ -65,11 +65,13 @@ pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
 fn announce<A: Actions>(s: &UiState<A>, reminder: &Reminder) {
     let settings = &s.settings.prefs.notify;
     let busy = matches!(s.own.status.availability.as_str(), "Busy" | "DoNotDisturb");
-    if app_backend::notify::rules::meeting_start_sound(settings, busy) && !settings.do_not_disturb {
+    let paused = s.own.paused_until.is_some_and(|until| Utc::now() < until);
+    let silent = settings.do_not_disturb || paused || crate::notifications::system_quiet();
+    if app_backend::notify::rules::meeting_start_sound(settings, busy) && !silent {
         crate::sound::play(app_backend::notify::sounds::CallTone::MeetingReminder.file_name());
     }
     if !rune_notify::app_focused() { crate::taskbar::flash(); }
-    if !settings.do_not_disturb {
+    if !silent {
         rune_notify::post(&rune_notify::Notification::new(&reminder.key, reminder.subject.clone()).body(subtitle(reminder, Utc::now())));
     }
 }

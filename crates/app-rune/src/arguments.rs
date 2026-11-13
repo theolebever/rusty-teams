@@ -66,6 +66,8 @@ impl Command {
                 crate::ui::open_chat(s, &id, tx);
             }
             Self::Switcher => crate::switcher::open(s, tx),
+            // A cold start parses `--join` before calling connects; retry each frame until it does.
+            Self::Join(url) if !s.actions.calling_ready() => s.launch_command = Some(Self::Join(url)),
             Self::Join(url) => {
                 if !s.read_only { s.actions.join_call(&url, false); }
             }

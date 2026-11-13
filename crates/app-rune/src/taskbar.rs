@@ -59,8 +59,9 @@ pub fn set_badge(count: usize) {
         // created and released here, and the taskbar copies the icon it is given.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            let Ok(taskbar) = CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER) else { return };
-            if taskbar.HrInit().is_err() { return; }
+            // On a COM failure, forget the count so the next frame retries.
+            let Ok(taskbar) = CoCreateInstance::<_, ITaskbarList3>(&TaskbarList, None, CLSCTX_INPROC_SERVER) else { SHOWN.store(usize::MAX, Ordering::Relaxed); return };
+            if taskbar.HrInit().is_err() { SHOWN.store(usize::MAX, Ordering::Relaxed); return; }
             let Some(badge) = badge_for(count) else {
                 let _ = taskbar.SetOverlayIcon(hwnd, HICON::default(), w!(""));
                 return;

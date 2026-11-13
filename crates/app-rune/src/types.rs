@@ -281,6 +281,8 @@ pub trait Actions {
     fn mark_activity_read(&self, _id: &str) {}
     fn mark_all_activity_read(&self) {}
     fn join_call(&self, _url: &str, _video: bool) {}
+    /// Whether the call launcher exists, so `join_call` can work.
+    fn calling_ready(&self) -> bool { true }
     fn call_command(&self, _command: calling::CallCommand) {}
     fn take_video(&self) -> Vec<(calling::VideoKey, std::sync::Arc<calling::VideoPicture>)> { Vec::new() }
     fn accept_call(&self, _ring_id: u64, _video: bool) {}

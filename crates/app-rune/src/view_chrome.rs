@@ -149,7 +149,7 @@ pub fn rail<A: Actions + 'static>(s: &UiState<A>) -> El {
     let mut rail = col().key("rail").w(RAIL_WIDTH).h_full().fill(tone(active_palette().surface)).items_center().gap(2.0);
     let activity = &s.screens.activity;
     let activity_unread = activity.items.iter().filter(|item| activity.counts_for_bell(item)).count();
-    let channels = s.teams.iter().flat_map(|team| &team.channels).filter(|channel| channel.unread && !channel.hidden).count();
+    let channels = s.visible_channels().filter(|(_, channel)| channel.unread).count();
     for item in rail_items(activity_unread, unread, channels, usize::from(s.agent.running)) {
         rail = rail.child(rail_item::<A>(item, s.screens.screen == item.screen));
     }

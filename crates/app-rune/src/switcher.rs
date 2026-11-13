@@ -72,7 +72,7 @@ fn candidates<A: Actions>(s: &UiState<A>) -> Vec<Candidate> {
     let mut found: Vec<_> = chats.into_iter().take(LIMIT).map(|chat| Candidate {
         title: chat.title.clone(), subtitle: chat.preview.clone(), highlights: vec![], group: "Chats", target: Target::Conversation(chat.id.clone(), false),
     }).collect();
-    found.extend(s.teams.iter().flat_map(|team| team.channels.iter().map(move |channel| (team, channel)))
+    found.extend(s.visible_channels()
         .filter(|(team, channel)| format!("{} {}", team.name, channel.name).to_lowercase().contains(&query)).take(LIMIT)
         .map(|(team, channel)| Candidate { title: channel.name.clone(), subtitle: team.name.clone(), highlights: vec![], group: "Channels", target: Target::Conversation(channel.id.clone(), true) }));
     found.extend(switcher.results.people.iter().filter_map(|person| {
@@ -170,7 +170,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, switcher: &Switcher) -> El {
 /// `(id, title)` of the chats and visible channels matching `query`, recent ones first, at most `LIMIT`.
 pub(crate) fn forward_candidates<A: Actions>(s: &UiState<A>, query: &str) -> Vec<(String, String)> {
     let mut all: Vec<(String, String)> = s.chats.iter().map(|chat| (chat.id.clone(), chat.title.clone())).collect();
-    all.extend(s.teams.iter().flat_map(|team| &team.channels).filter(|channel| !channel.hidden).map(|channel| (channel.id.clone(), format!("# {}", channel.name))));
+    all.extend(s.visible_channels().map(|(_, channel)| (channel.id.clone(), format!("# {}", channel.name))));
     let rank = |id: &str| s.nav.recent.iter().position(|recent| recent == id).unwrap_or(usize::MAX);
     all.sort_by_key(|(id, _)| rank(id)); // stable: the rest keeps list order
     let query = query.trim().to_lowercase();

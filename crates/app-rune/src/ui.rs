@@ -82,6 +82,8 @@ pub struct UiState<A: Actions> {
     pub(crate) launch_command: Option<crate::arguments::Command>,
     /// The incoming call ringtone, stopped when dropped (`notifications::ring`).
     pub(crate) ringtone: Option<crate::sound::Handle>,
+    /// Whether a call rang at the last frame, so a silent ring flashes once (`notifications::ring`).
+    pub(crate) was_ringing: bool,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
     pub nav: crate::shortcuts::NavState,
     pub global_search: crate::search::SearchState,
@@ -111,6 +113,7 @@ impl<A: Actions> UiState<A> {
             tray: Default::default(),
             launch_command: None,
             ringtone: None,
+            was_ringing: false,
             nav: Default::default(),
             details: HashMap::new(),
             typing: HashMap::new(),
@@ -168,6 +171,17 @@ impl<A: Actions> UiState<A> {
         } else {
             None
         }
+    }
+
+    /// Channels the user has not hidden, in teams they have not hidden.
+    pub(crate) fn visible_channels(&self) -> impl Iterator<Item = (&crate::types::TeamRow, &crate::types::ChannelRow)> {
+        self.teams.iter()
+            .filter(|team| !self.chatlist.team_details.get(&team.id).is_some_and(|details| details.hidden))
+            .flat_map(|team| team.channels.iter().filter(|channel| !channel.hidden).map(move |channel| (team, channel)))
+    }
+
+    pub(crate) fn channel(&self, id: &str) -> Option<&crate::types::ChannelRow> {
+        self.teams.iter().flat_map(|team| &team.channels).find(|channel| channel.id == id)
     }
 
     pub fn apply(&mut self, update: Update) {
@@ -303,7 +317,8 @@ impl<A: Actions> UiState<A> {
                 }
                 Err(error) => self.toast.show(format!("Could not create meeting: {error}")),
             },
-            Update::CalendarRefresh => crate::screens::reload_calendar(self),
+            Update::CalendarRefresh if self.screens.screen == crate::screens::Screen::Calendar => crate::screens::reload_calendar(self),
+            Update::CalendarRefresh => {}
             Update::Agenda(events) => self.screens.agenda = events,
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
@@ -575,6 +590,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         calls: RefCell<Vec<String>>,
+        calling_offline: std::cell::Cell<bool>,
     }
 
     impl Actions for Fake {
@@ -596,6 +612,8 @@ mod tests {
             self.calls.borrow_mut().push(format!("undo {conversation_id} {message_id}"));
         }
         fn retry_live(&self) { self.calls.borrow_mut().push("retry live".into()); }
+        fn calling_ready(&self) -> bool { !self.calling_offline.get() }
+        fn join_call(&self, url: &str, _: bool) { self.calls.borrow_mut().push(format!("join {url}")); }
         fn load_calendar(&self, _: chrono::NaiveDate) { self.calls.borrow_mut().push("calendar".into()); }
     }
 
@@ -675,6 +693,18 @@ mod tests {
     }
 
     #[test]
+    fn a_join_command_waits_until_calling_connects() {
+        let mut rt = rt();
+        rt.state.actions.calling_offline.set(true);
+        let join = crate::arguments::Command::Join("https://teams.microsoft.com/l/meetup-join/x".into());
+        rt.update(|s, tx| join.run(s, tx));
+        assert!(calls(&rt).is_empty());
+        rt.state.actions.calling_offline.set(false);
+        rt.update(|s, tx| { if let Some(command) = s.launch_command.take() { command.run(s, tx); } });
+        assert_eq!(calls(&rt), ["join https://teams.microsoft.com/l/meetup-join/x"]);
+    }
+
+    #[test]
     fn switching_screens_shows_the_new_pane_at_once_without_a_fade() {
         let mut rt = rt();
         click(&mut rt, "nav-Teams");
@@ -702,6 +732,9 @@ mod tests {
         assert!(rt.find("live-retry").is_some());
         apply(&mut rt, Update::Live(app_backend::backend::LiveState::Live));
         assert!(rt.find("connection-banner").is_none());
+        apply(&mut rt, Update::CalendarRefresh);
+        assert_eq!(calls(&rt), ["retry live"], "a closed calendar does not reload");
+        rt.update(|s, _| s.screens.screen = crate::screens::Screen::Calendar);
         apply(&mut rt, Update::CalendarRefresh);
         apply(&mut rt, Update::Agenda(vec![]));
         assert_eq!(calls(&rt), ["retry live", "calendar"]);

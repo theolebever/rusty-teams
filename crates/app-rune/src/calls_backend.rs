@@ -202,6 +202,8 @@ impl Calls {
                         }
                         state.commands = Some(handle.commands.clone());
                         state.joining = false;
+                        // Prejoin choices queued while answering belong to no meeting; drop them.
+                        state.prejoin.clear();
                     }
                     forward(handle, state, publish, frames).await
                 }

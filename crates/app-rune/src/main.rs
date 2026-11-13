@@ -268,7 +268,7 @@ fn main() {
     state.call_window = Some(call_window::CallWindow::new(call_handle));
     let has_tray = tray::install(&mut state, app.handle());
     let app = app.init(move || state);
-    let app = if hidden { app.windowless() } else { app };
+    let app = if hidden && has_tray { app.windowless() } else { app };
     if has_tray { app.keep_running().run() } else { app.run() }
 }
 
