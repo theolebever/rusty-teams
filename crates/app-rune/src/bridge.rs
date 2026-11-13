@@ -801,6 +801,18 @@ impl Actions for Bridge {
             if let Err(error) = written { app_backend::diagnostics::record(format!("Rune: Outlook reminder not saved: {error}")); }
         });
     }
+    fn load_reminders(&self, start: DateTime<Utc>, end: DateTime<Utc>) {
+        let launcher = self.shared.launcher();
+        let shared = self.shared.clone();
+        app_backend::runtime::handle().spawn(async move {
+            let result = match launcher {
+                Some(launcher) => launcher.reminder_view(start, end).await,
+                None => Err("calling is not connected yet".to_owned()),
+            };
+            if let Err(error) = &result { app_backend::diagnostics::record(format!("Rune: Outlook reminders not read: {error}")); }
+            shared.publish(Update::OutlookReminders { start, end, result });
+        });
+    }
     fn load_devices(&self) { crate::settings_backend::list_devices(self.shared.clone()); }
     fn accept_call(&self, ring_id: u64, video: bool) { self.shared.call_control.accept(ring_id, video); }
     fn decline_call(&self, ring_id: u64) { self.shared.call_control.decline(ring_id); }

@@ -323,6 +323,7 @@ impl<A: Actions> UiState<A> {
             Update::CalendarRefresh if self.screens.screen == crate::screens::Screen::Calendar => crate::screens::reload_calendar(self),
             Update::CalendarRefresh => {}
             Update::Agenda(events) => self.screens.agenda = events,
+            Update::OutlookReminders { start, end, result } => self.reminders.outlook_mut().apply(start, end, result),
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
                     self.search_results = Some(rows);

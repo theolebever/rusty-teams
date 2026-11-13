@@ -185,6 +185,8 @@ pub enum Update {
     CalendarRefresh,
     /// Calendar events of the agenda window (next seven days), raw from the backend.
     Agenda(Vec<chatsvc::CalendarEvent>),
+    /// Answer to `load_reminders`: the Outlook reminders of that range.
+    OutlookReminders { start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>, result: Result<Vec<chatsvc::Reminder>, String> },
     Search { conversation_id: String, query: String, rows: Vec<MessageRow> },
     /// Answer to the chat-list search box (`search.rs`).
     GlobalSearch(crate::search::Results),
@@ -272,6 +274,8 @@ pub trait Actions {
     fn save_setting(&self, _change: crate::settings::Change) {}
     /// Snoozes the Outlook reminder of a meeting until a time, or dismisses it (`None`).
     fn write_reminder(&self, _event_id: &str, _snooze_until: Option<chrono::DateTime<chrono::Utc>>) {}
+    /// Reads the Outlook reminders between two times, answered with `Update::OutlookReminders`.
+    fn load_reminders(&self, _start: chrono::DateTime<chrono::Utc>, _end: chrono::DateTime<chrono::Utc>) {}
     /// Lists audio devices and cameras, answered with `Update::Call(Devices | Cameras)`.
     fn load_devices(&self) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}

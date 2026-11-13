@@ -1,12 +1,13 @@
 //! Meeting reminders: the GPUI meeting toast model (`state::call::reminder::MeetingToasts`)
 //! decides what shows; this module draws its oldest toast as one card with Join, Snooze and
-//! Dismiss. Snooze and Dismiss are written to the Outlook reminder.
-//! ponytail: no `reminder_view` poll, so a reminder snoozed in Outlook still shows here.
+//! Dismiss. Snooze and Dismiss are written to the Outlook reminder, and a reminder snoozed or
+//! dismissed in Outlook is hidden here (`reminder_view` polled near a meeting, as GPUI).
 
 use std::collections::HashSet;
 
 use chrono::{DateTime, Local, Offset, Utc};
 use rune::*;
+use state::call::outlook_reminders::ReminderWrite;
 use state::call::reminder::{MeetingToast, subtitle};
 
 use crate::screens::{button, color, style};
@@ -20,6 +21,7 @@ fn shown<A: Actions>(s: &UiState<A>) -> Option<&MeetingToast> {
 /// Brings the toasts up to date with the agenda. True when the card changed.
 pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
     let before = shown(s).map(|toast| toast.id);
+    if let Some((start, end)) = s.reminders.outlook_mut().poll_range(&s.screens.agenda, now) { s.actions.load_reminders(start, end); }
     // ponytail: no live-meeting lookup, so a meeting never reaches the Live phase here.
     let update = s.reminders.update(&s.screens.agenda, &HashSet::new(), now, true);
     let after = shown(s).cloned();
@@ -50,12 +52,16 @@ fn card_subtitle(toast: &MeetingToast) -> String {
 
 fn snooze<A: Actions>(s: &mut UiState<A>) {
     let Some(id) = shown(s).map(|toast| toast.id) else { return };
-    if let Some(toast) = s.reminders.snooze(id) { s.actions.write_reminder(&toast.event_id, Some(toast.start)); }
+    let Some(toast) = s.reminders.snooze(id) else { return };
+    s.reminders.outlook_mut().note(&toast.event_id, ReminderWrite::Snooze(toast.start));
+    s.actions.write_reminder(&toast.event_id, Some(toast.start));
 }
 
 fn dismiss<A: Actions>(s: &mut UiState<A>) {
     let Some(id) = shown(s).map(|toast| toast.id) else { return };
-    if let Some(toast) = s.reminders.dismiss(id) { s.actions.write_reminder(&toast.event_id, None); }
+    let Some(toast) = s.reminders.dismiss(id) else { return };
+    s.reminders.outlook_mut().note(&toast.event_id, ReminderWrite::Dismiss);
+    s.actions.write_reminder(&toast.event_id, None);
 }
 
 /// Opens the prejoin of the shown reminder's meeting; false when none shows.
@@ -92,11 +98,12 @@ mod tests {
     use std::cell::RefCell;
 
     #[derive(Default)]
-    struct Fake(RefCell<Vec<(String, bool)>>);
+    struct Fake(RefCell<Vec<(String, bool)>>, RefCell<Vec<(DateTime<Utc>, DateTime<Utc>)>>);
     impl Actions for Fake {
         fn open(&self, _: &str) {}
         fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn write_reminder(&self, event_id: &str, snooze_until: Option<DateTime<Utc>>) { self.0.borrow_mut().push((event_id.into(), snooze_until.is_some())); }
+        fn load_reminders(&self, start: DateTime<Utc>, end: DateTime<Utc>) { self.1.borrow_mut().push((start, end)); }
     }
 
     fn meeting(id: &str, start: DateTime<Utc>) -> CalendarEvent {
@@ -132,5 +139,25 @@ mod tests {
         rt.update(move |s, _| { poll(s, now + Duration::minutes(6)); });
         assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("soon"), "snooze ran out");
         assert_eq!(*rt.state.actions.0.borrow(), [("soon".to_owned(), true)]);
+    }
+
+    #[test]
+    fn a_reminder_dismissed_in_outlook_leaves_and_one_snoozed_there_waits() {
+        let now = Utc::now();
+        let mut state = UiState::new(Fake::default());
+        state.settings.prefs.notify.do_not_disturb = true;
+        state.screens.agenda = vec![meeting("gone", now + Duration::minutes(3)), meeting("later", now + Duration::minutes(4))];
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
+        rt.update(move |s, _| assert!(poll(s, now)));
+        let (start, end) = rt.state.actions.1.borrow()[0];
+        assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("gone"));
+        let reminders = vec![chatsvc::Reminder { event_id: "later".into(), fire_time: now + Duration::minutes(2) }];
+        rt.update(move |s, _| s.apply(crate::types::Update::OutlookReminders { start, end, result: Ok(reminders) }));
+        rt.update(move |s, _| { poll(s, now + Duration::seconds(1)); });
+        rt.frame(1.0);
+        assert!(rt.find("meeting-reminder").is_none(), "dismissed in Outlook, later snoozed there");
+        assert_eq!(rt.state.actions.1.borrow().len(), 1, "polls at most once a minute");
+        rt.update(move |s, _| { poll(s, now + Duration::minutes(2)); });
+        assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("later"));
     }
 }
