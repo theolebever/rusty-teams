@@ -169,7 +169,7 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpui"))]
 mod tests {
     use std::sync::Arc;
     use std::time::Instant;
