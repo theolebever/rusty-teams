@@ -76,7 +76,7 @@ pub struct UiState<A: Actions> {
     pub(crate) compose: crate::view_composer::Compose,
     pub agent: crate::agent_panel::State,
     pub settings: crate::settings::State,
-    pub reminders: crate::reminders::State,
+    pub reminders: state::call::reminder::MeetingToasts,
     pub tray: crate::tray::State,
     /// The launch option of the first process, run at the first poll (`arguments::Command`).
     pub(crate) launch_command: Option<crate::arguments::Command>,

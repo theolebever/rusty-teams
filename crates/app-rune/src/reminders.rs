@@ -1,121 +1,94 @@
-//! Meeting reminders: from five minutes before an online meeting until five minutes after its
-//! start, a card offers Join, Snooze and Dismiss, as the GPUI meeting toast does
-//! (`app_state::call::reminder`). Snooze and Dismiss are written to the Outlook reminder.
+//! Meeting reminders: the GPUI meeting toast model (`state::call::reminder::MeetingToasts`)
+//! decides what shows; this module draws its oldest toast as one card with Join, Snooze and
+//! Dismiss. Snooze and Dismiss are written to the Outlook reminder.
 //! ponytail: no `reminder_view` poll, so a reminder snoozed in Outlook still shows here.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-use chatsvc::{CalendarEvent, ResponseType};
-use chrono::{DateTime, Duration, Local, Utc};
+use chrono::{DateTime, Local, Offset, Utc};
 use rune::*;
+use state::call::reminder::{MeetingToast, subtitle};
 
 use crate::screens::{button, color, style};
 use crate::types::Actions;
 use crate::ui::{UiState, text};
 
-const LEAD_MINUTES: i64 = 5;
-const GRACE_MINUTES: i64 = 5;
-const SNOOZE_MINUTES: i64 = 5;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reminder {
-    key: String,
-    event_id: String,
-    subject: String,
-    start: DateTime<Utc>,
-    join_url: String,
+fn shown<A: Actions>(s: &UiState<A>) -> Option<&MeetingToast> {
+    s.reminders.entries().first()
 }
 
-#[derive(Default)]
-pub struct State {
-    pub shown: Option<Reminder>,
-    /// Event keys answered here, with when they may show again (`None`: never).
-    quiet: HashMap<String, Option<DateTime<Utc>>>,
-}
-
-fn key(event: &CalendarEvent) -> String {
-    format!("{}@{}", event.object_id, event.start.timestamp())
-}
-
-fn due(event: &CalendarEvent, now: DateTime<Utc>) -> bool {
-    let eligible = event.online && !event.cancelled && !event.all_day && event.join_url.is_some() && event.response != ResponseType::Declined;
-    eligible && now >= event.start - Duration::minutes(LEAD_MINUTES) && now < event.end.min(event.start + Duration::minutes(GRACE_MINUTES))
-}
-
-/// Shows the next due reminder and hides one that is over. True when the card changed.
+/// Brings the toasts up to date with the agenda. True when the card changed.
 pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
-    let quiet = &s.reminders.quiet;
-    let next = s.screens.agenda.iter()
-        .filter(|event| due(event, now))
-        .find(|event| quiet.get(&key(event)).is_none_or(|until| until.is_some_and(|until| now >= until)))
-        .map(|event| Reminder {
-            key: key(event),
-            event_id: event.object_id.clone(),
-            subject: event.subject.clone(),
-            start: event.start,
-            join_url: event.join_url.clone().unwrap_or_default(),
-        });
-    if next.as_ref().map(|r| &r.key) == s.reminders.shown.as_ref().map(|r| &r.key) { return false; }
-    if let Some(reminder) = &next { announce(s, reminder); }
-    s.reminders.shown = next;
-    true
+    let before = shown(s).map(|toast| toast.id);
+    // ponytail: no live-meeting lookup, so a meeting never reaches the Live phase here.
+    let update = s.reminders.update(&s.screens.agenda, &HashSet::new(), now, true);
+    let after = shown(s).cloned();
+    if update.changed && after.as_ref().map(|toast| toast.id) != before {
+        if let Some(toast) = &after { announce(s, toast, update.chime); }
+    }
+    update.changed
 }
 
-/// The meeting chime, taskbar flash and system toast of a newly shown reminder.
-fn announce<A: Actions>(s: &UiState<A>, reminder: &Reminder) {
+/// The taskbar flash and system toast of a newly shown reminder, and the meeting chime when
+/// the model asks for one (from the meeting's start on).
+fn announce<A: Actions>(s: &UiState<A>, toast: &MeetingToast, chime: bool) {
     let settings = &s.settings.prefs.notify;
     let paused = app_backend::notify::pause::is_paused(s.own.paused_until, Utc::now());
     let silent = settings.do_not_disturb || paused || crate::notifications::system_quiet();
-    if app_backend::notify::rules::meeting_start_sound(settings, crate::notifications::own_busy(s)) && !silent {
+    if chime && app_backend::notify::rules::meeting_start_sound(settings, crate::notifications::own_busy(s)) && !silent {
         crate::sound::play(app_backend::notify::sounds::CallTone::MeetingReminder.file_name());
     }
     if app_backend::notify::rules::should_flash(settings, !silent, rune_notify::app_focused()) { crate::taskbar::flash(); }
     if !silent {
-        rune_notify::post(&rune_notify::Notification::new(&reminder.key, reminder.subject.clone()).body(subtitle(reminder, Utc::now())));
+        rune_notify::post(&rune_notify::Notification::new(&toast.event_key, toast.subject.clone()).body(card_subtitle(toast)));
     }
 }
 
-fn subtitle(reminder: &Reminder, now: DateTime<Utc>) -> String {
-    let clock = reminder.start.with_timezone(&Local).format("%H:%M");
-    if now >= reminder.start { format!("{clock} - started") } else { format!("{clock} - starting soon") }
+fn card_subtitle(toast: &MeetingToast) -> String {
+    subtitle(toast, Utc::now(), Local::now().offset().fix())
 }
 
-fn answer<A: Actions>(s: &mut UiState<A>, until: Option<DateTime<Utc>>) {
-    let Some(reminder) = s.reminders.shown.take() else { return };
-    s.reminders.quiet.insert(reminder.key, until);
-    s.actions.write_reminder(&reminder.event_id, until);
+fn snooze<A: Actions>(s: &mut UiState<A>) {
+    let Some(id) = shown(s).map(|toast| toast.id) else { return };
+    if let Some(toast) = s.reminders.snooze(id) { s.actions.write_reminder(&toast.event_id, Some(toast.start)); }
+}
+
+fn dismiss<A: Actions>(s: &mut UiState<A>) {
+    let Some(id) = shown(s).map(|toast| toast.id) else { return };
+    if let Some(toast) = s.reminders.dismiss(id) { s.actions.write_reminder(&toast.event_id, None); }
 }
 
 /// Opens the prejoin of the shown reminder's meeting; false when none shows.
 pub fn join<A: Actions>(s: &mut UiState<A>) -> bool {
     if s.read_only { return false; }
     // Joining hides the card here only; the Outlook reminder is left as it is.
-    let Some(reminder) = s.reminders.shown.take() else { return false };
-    s.calls.link = TextEdit::new(&reminder.join_url);
+    let Some(toast) = shown(s).map(|toast| toast.id).and_then(|id| s.reminders.dismiss_for_good(id)) else { return false };
+    s.calls.link = TextEdit::new(&toast.join_url);
     s.screens.screen = crate::screens::Screen::Calls;
-    s.reminders.quiet.insert(reminder.key, None);
     true
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
-    let reminder = s.reminders.shown.as_ref()?;
+    let toast = shown(s)?;
     let mut actions = row().gap(8.0);
     if !s.read_only {
         actions = actions.child(button::<A>("Join", "reminder-join", |s, _| { join(s); }));
     }
     let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(10.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
-        .role("alert").label(reminder.subject.clone())
-        .child(text(reminder.subject.clone()).font(style(15.0, 600.0)).color(color("#242424")).truncate())
-        .child(text(subtitle(reminder, Utc::now())).font(style(13.0, 400.0)).color(color("#616161")))
+        .role("alert").label(toast.subject.clone())
+        .child(text(toast.subject.clone()).font(style(15.0, 600.0)).color(color("#242424")).truncate())
+        .child(text(card_subtitle(toast)).font(style(13.0, 400.0)).color(color("#616161")))
         .child(actions
-            .child(button::<A>("Snooze", "reminder-snooze", |s, _| answer(s, Some(Utc::now() + Duration::minutes(SNOOZE_MINUTES)))))
-            .child(button::<A>("Dismiss", "reminder-dismiss", |s, _| answer(s, None))));
+            .child(button::<A>("Snooze", "reminder-snooze", |s, _| snooze(s)))
+            .child(button::<A>("Dismiss", "reminder-dismiss", |s, _| dismiss(s))));
     Some(el().pin(None, None, Some(16.0), Some(16.0)).child(card))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chatsvc::{CalendarEvent, ResponseType};
+    use chrono::Duration;
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -144,7 +117,7 @@ mod tests {
         let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
         rt.update(move |s, _| assert!(poll(s, now)));
         rt.frame(1.0);
-        assert_eq!(rt.state.reminders.shown.as_ref().map(|r| r.event_id.as_str()), Some("soon"));
+        assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("soon"));
         let click = |rt: &mut Runtime<UiState<Fake>>, key: &str| {
             let (x, y) = rt.find(key).expect("reminder button");
             rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(1.0 / 60.0);
@@ -152,12 +125,12 @@ mod tests {
         click(&mut rt, "reminder-snooze");
         rt.update(move |s, _| { poll(s, now); });
         rt.frame(1.0);
-        assert_eq!(rt.state.reminders.shown.as_ref().map(|r| r.event_id.as_str()), Some("next"));
+        assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("next"));
         click(&mut rt, "reminder-join");
         assert_eq!(rt.state.screens.screen, crate::screens::Screen::Calls);
         assert!(rt.state.calls.link.text.ends_with("/next"));
         rt.update(move |s, _| { poll(s, now + Duration::minutes(6)); });
-        assert_eq!(rt.state.reminders.shown.as_ref().map(|r| r.event_id.as_str()), Some("soon"), "snooze ran out");
+        assert_eq!(shown(&rt.state).map(|r| r.event_id.as_str()), Some("soon"), "snooze ran out");
         assert_eq!(*rt.state.actions.0.borrow(), [("soon".to_owned(), true)]);
     }
 }
