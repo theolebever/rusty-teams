@@ -1,6 +1,6 @@
 use teams_core::{Draft, MentionInput};
 
-use crate::render::{Block, layout_blocks};
+use crate::blocks::{Block, layout_blocks};
 
 const BODY_PREVIEW_CHARACTERS: usize = 1200;
 
@@ -29,7 +29,7 @@ pub fn body_blocks(text: &str, mentions: &[mcp::ProposalMention]) -> Vec<Block> 
 #[cfg(test)]
 mod tests {
     use super::{BODY_PREVIEW_CHARACTERS, body_blocks, body_preview};
-    use crate::render::Block;
+    use crate::blocks::Block;
 
     #[test]
     fn the_card_body_renders_markdown_like_a_sent_message() {

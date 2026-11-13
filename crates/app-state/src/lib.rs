@@ -62,7 +62,7 @@ pub mod typing;
 mod warm_chats;
 pub mod urgent_ack;
 
-pub use app_ui_kit::render;
+pub use app_base::blocks;
 pub use host::{Host, StateHandle};
 pub use app_base::{
     APP_NAME, appearance, autostart, avatar_image, channel_files, crash_log, demo_cards, demo_chart_cards, demo_gifs,

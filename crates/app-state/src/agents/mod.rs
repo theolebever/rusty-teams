@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub use app_base::agents::{lanes, settings_problems};
-pub use app_ui_kit::{settings_controls, spinner};
 use agents::{AgentAction, Environment};
 use directories::ProjectDirs;
 use gpui_kit::*;

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use teams_core::{FileCard, QuoteInfo};
 
-use crate::render::{Block, layout_blocks};
+use crate::blocks::{Block, layout_blocks};
 use crate::rows::{Delivery, LocalImage, MessageRow, Receipt, Series};
 use crate::outgoing::{Outgoing, OutgoingImage};
 

@@ -1,5 +1,20 @@
 use chrono::{DateTime, Utc};
 
+/// How a chat or channel shows that it has unread messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    None,
+    Silent,
+    Dot,
+    Count(u32),
+}
+
+impl Unread {
+    pub fn is_unread(self) -> bool {
+        self != Unread::None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadTrigger {
     Open,

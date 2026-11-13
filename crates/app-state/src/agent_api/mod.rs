@@ -45,7 +45,7 @@ pub struct ProposalPicture {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProposalEntry {
     pub proposal: Proposal,
-    pub body: Arc<Vec<crate::render::Block>>,
+    pub body: Arc<Vec<crate::blocks::Block>>,
     pub mention_labels: Vec<String>,
     pub images: Vec<ProposalPicture>,
     pub status: ProposalStatus,

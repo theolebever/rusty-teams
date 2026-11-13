@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use app_ui_kit::widgets::Unread;
+use app_base::read_state::Unread;
 use chrono::{DateTime, FixedOffset, Utc};
 use store::{
     ChannelNotificationLevel, ChannelRecord, ChatRecord, MessageImportance, Sidebar, SidebarTeam,

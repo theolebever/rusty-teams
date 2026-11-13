@@ -23,8 +23,8 @@ use crate::call_rows::{CallClock, CallNames, CallSource, CallTimeline, call_card
 use crate::card_state::CardOverride;
 use crate::format;
 use crate::reaction_model::{Reactor, UNKNOWN_REACTOR};
-use crate::render::blocks::{Inline, strip_image_placeholders};
-use crate::render::{Block, layout_blocks};
+use crate::blocks::{Inline, strip_image_placeholders};
+use crate::blocks::{Block, layout_blocks};
 use crate::translation::{TranslationContext, TranslationLine};
 
 const POST_VISIBLE_REPLIES: usize = 3;

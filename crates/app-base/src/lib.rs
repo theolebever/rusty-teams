@@ -2,6 +2,7 @@ pub mod agent_api;
 pub mod agents;
 pub mod assets;
 pub mod avatar_image;
+pub mod blocks;
 pub mod channel_files;
 pub mod demo_cards;
 pub mod demo_chart_cards;

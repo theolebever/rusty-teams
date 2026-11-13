@@ -5,6 +5,7 @@ mod settings_section;
 mod start_dialog;
 mod start_dialog_pickers;
 
+pub use app_ui_kit::{settings_controls, spinner};
 pub use state::agents::*;
 pub use agents_panel::{AgentsPanel, AgentsPanelEvent};
 pub use run_chip::run_chip;

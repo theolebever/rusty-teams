@@ -1,4 +1,4 @@
-pub mod blocks;
+pub use app_base::blocks;
 pub mod elements;
 mod flow_text;
 pub mod hooks;
