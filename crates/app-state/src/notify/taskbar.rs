@@ -12,18 +12,24 @@ pub fn taskbar_badge_count(sidebar: &Sidebar, feed: &Feed, adaptive_rail: bool) 
         .flat_map(|team| team.channels.iter())
         .map(|channel| channel.id.as_str())
         .collect();
-    let channels_with_mentions = if adaptive_rail {
-        feed.unread_entries()
-            .filter(|entry| {
-                entry.is_personal_mention() && channel_ids.contains(entry.conversation_id.as_str())
-            })
-            .map(|entry| entry.conversation_id.as_str())
-            .collect::<HashSet<_>>()
-            .len()
+    let channels = if adaptive_rail {
+        channels_with_mentions(feed, &channel_ids)
     } else {
         0
     };
-    feed.bell_count() + unread_chat_count(&sidebar.chats) as usize + channels_with_mentions
+    feed.bell_count() + unread_chat_count(&sidebar.chats) as usize + channels
+}
+
+/// Channels of `channel_ids` with an unread @mention of the user, which the adaptive rail adds
+/// to the taskbar badge.
+pub fn channels_with_mentions(feed: &Feed, channel_ids: &HashSet<&str>) -> usize {
+    feed.unread_entries()
+        .filter(|entry| {
+            entry.is_personal_mention() && channel_ids.contains(entry.conversation_id.as_str())
+        })
+        .map(|entry| entry.conversation_id.as_str())
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 #[cfg(test)]

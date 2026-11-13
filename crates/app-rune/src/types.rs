@@ -185,6 +185,8 @@ pub enum Update {
     CalendarRefresh,
     /// Calendar events of the agenda window (next seven days), raw from the backend.
     Agenda(Vec<chatsvc::CalendarEvent>),
+    /// The chat list section settings; the adaptive rail adds channel mentions to the badge.
+    SectionSettings(teams_core::ChatSectionSettings),
     /// Answer to `load_reminders`: the Outlook reminders of that range.
     OutlookReminders { start: chrono::DateTime<chrono::Utc>, end: chrono::DateTime<chrono::Utc>, result: Result<Vec<chatsvc::Reminder>, String> },
     Search { conversation_id: String, query: String, rows: Vec<MessageRow> },

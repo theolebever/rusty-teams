@@ -121,6 +121,7 @@ impl Shared {
                 self.publish(Update::Details(details));
                 self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now())));
                 self.publish(Update::Teams(team_rows(sidebar.teams)));
+                self.publish(Update::SectionSettings(teams_core::stored_section_settings(engine.store())));
                 match engine.chat_folders() {
                     Ok(folders) => self.publish(Update::Folders(folders)),
                     Err(error) => self.publish(Update::Status(format!("Sections unavailable: {error}"))),

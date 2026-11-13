@@ -45,10 +45,20 @@ pub(crate) fn system_quiet() -> bool {
 #[cfg(not(windows))]
 pub(crate) fn system_quiet() -> bool { false }
 
-/// What the taskbar button counts: unread chats and the Activity bell, as GPUI's badge.
+/// What the taskbar button counts, as GPUI's `taskbar_badge_count`: unmuted unread chats, the
+/// Activity bell and, with the adaptive rail on, each channel with an unread @mention.
 pub fn badge_count<A: crate::types::Actions>(s: &crate::ui::UiState<A>) -> usize {
     let activity = &s.screens.activity;
-    s.chats.iter().filter(|chat| chat.unread).count() + activity.items.iter().filter(|item| activity.counts_for_bell(item)).count()
+    let muted = |id: &str| s.details.get(id).is_some_and(|details| details.muted);
+    let chats = s.chats.iter().filter(|chat| chat.unread && !muted(&chat.id)).count();
+    let bell = activity.items.iter().filter(|item| activity.counts_for_bell(item)).count();
+    let channels = if s.section_settings.adaptive_rail() {
+        let ids = s.teams.iter().flat_map(|team| &team.channels).map(|channel| channel.id.as_str()).collect();
+        state::notify::taskbar::channels_with_mentions(&state::activity::server::feed_of(activity, 0), &ids)
+    } else {
+        0
+    };
+    chats + bell + channels
 }
 
 /// Rings while a call comes in (`rules::ringtone_for`) and flashes the taskbar when it starts;
@@ -161,5 +171,20 @@ mod tests {
         assert_eq!(rt.state.composer.text, "unsent");
         assert!(clicked(&rune_notify::Click::default()).is_none());
         assert!(clicked(&rune_notify::Click { id: String::new(), info: vec![("conversation_id".into(), " ".into())] }).is_none());
+    }
+
+    #[test]
+    fn the_badge_skips_muted_chats_and_counts_channel_mentions_with_the_adaptive_rail() {
+        use crate::types::{ChannelRow, ChatDetails, ChatRow, TeamRow, Update};
+        let mut s = UiState::new(Fake::default());
+        let chat = |id: &str| ChatRow { id: id.into(), title: id.into(), preview: String::new(), unread: true, when: String::new() };
+        s.apply(Update::Chats(vec![chat("open"), chat("muted")]));
+        s.details.insert("muted".into(), ChatDetails { muted: true, ..Default::default() });
+        s.apply(Update::Teams(vec![TeamRow { id: "team".into(), name: "Team".into(), channels: vec![ChannelRow { hidden: false, id: "channel".into(), name: "General".into(), unread: true }] }]));
+        let mention = teams_core::ActivityItem { message_id: "m".into(), source_thread_id: "channel".into(), activity_type: "mention".into(), activity_subtype: "person".into(), version_ms: 1, ..Default::default() };
+        s.apply(Update::Activity(teams_core::ActivitySnapshot { items: vec![mention], ..Default::default() }));
+        assert_eq!(badge_count(&s), 1);
+        s.apply(Update::SectionSettings(teams_core::ChatSectionSettings { adaptive_rail: Some(true), ..Default::default() }));
+        assert_eq!(badge_count(&s), 2);
     }
 }

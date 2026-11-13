@@ -85,6 +85,8 @@ pub struct UiState<A: Actions> {
     /// Whether a call rang at the last frame, so a silent ring flashes once (`notifications::ring`).
     pub(crate) was_ringing: bool,
     /// The looping ringback or reconnecting tone of the current call (`notifications::ring`).
+    /// Chat list section settings (`teams_core::stored_section_settings`), for the badge.
+    pub(crate) section_settings: teams_core::ChatSectionSettings,
     pub(crate) call_tone: Option<(app_backend::notify::sounds::CallTone, crate::sound::Handle)>,
     /// Switcher, find bar, shortcuts dialog and jump bar (`shortcuts.rs`).
     pub nav: crate::shortcuts::NavState,
@@ -117,6 +119,7 @@ impl<A: Actions> UiState<A> {
             ringtone: None,
             was_ringing: false,
             call_tone: None,
+            section_settings: Default::default(),
             nav: Default::default(),
             details: HashMap::new(),
             typing: HashMap::new(),
@@ -323,6 +326,7 @@ impl<A: Actions> UiState<A> {
             Update::CalendarRefresh if self.screens.screen == crate::screens::Screen::Calendar => crate::screens::reload_calendar(self),
             Update::CalendarRefresh => {}
             Update::Agenda(events) => self.screens.agenda = events,
+            Update::SectionSettings(settings) => self.section_settings = settings,
             Update::OutlookReminders { start, end, result } => self.reminders.outlook_mut().apply(start, end, result),
             Update::Search { conversation_id, query, rows } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.search.text.trim() == query {
