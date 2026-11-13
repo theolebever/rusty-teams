@@ -14,7 +14,6 @@ mod emoji_picker;
 mod gif_picker;
 mod mentions;
 mod calls;
-mod gallery;
 mod call_window;
 mod window_icon;
 mod calls_backend;

@@ -1,25 +1,11 @@
 use chrono::{DateTime, Local, Utc};
-use store::Store;
 
 use crate::Host;
 use crate::app_state::AppState;
 use crate::own_status::until_label;
 
-const META_KEY: &str = "notify_paused_until";
+pub use app_backend::notify::pause::{META_KEY, is_paused, load};
 pub const PAUSE_LABEL: &str = "Pause notifications";
-
-pub fn load(store: &Store) -> Option<DateTime<Utc>> {
-    store
-        .meta(META_KEY)
-        .ok()
-        .flatten()
-        .and_then(|text| DateTime::parse_from_rfc3339(&text).ok())
-        .map(|until| until.with_timezone(&Utc))
-}
-
-pub fn is_paused(until: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    until.is_some_and(|until| now < until)
-}
 
 pub fn menu_label(until: Option<DateTime<Utc>>, now: DateTime<Local>) -> String {
     match until.filter(|until| now.with_timezone(&Utc) < *until) {

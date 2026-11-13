@@ -494,6 +494,7 @@ version = "0.3.0"
 dependencies = [
  "agents",
  "app-backend",
+ "app-call-model",
  "calling",
  "chatsvc",
  "chrono",

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::gallery::{self, Rotation};
+use app_call_model::stage_layout::{self as gallery, VisibleRotation as Rotation};
 use crate::types::Actions;
 use crate::ui::UiState;
 
@@ -814,7 +814,7 @@ impl CallView {
             .map(|p| p.mri.clone())
             .collect();
         self.rotation
-            .update(now, &members, &self.speaking, gallery::GALLERY_MAX);
+            .update(now, &members, &[], &self.speaking, gallery::GALLERY_MAX);
         self.page = self.page.min(gallery::gallery_pages(members.len(), 0) - 1);
     }
 
@@ -909,13 +909,7 @@ impl CallView {
             .into(),
             Some(CallState::Reconnecting { .. }) => "Reconnecting...".into(),
             Some(CallState::Connected { since }) => {
-                let seconds = now.saturating_duration_since(*since).as_secs();
-                let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-                if hours > 0 {
-                    format!("{hours}:{minutes:02}:{seconds:02}")
-                } else {
-                    format!("{minutes:02}:{seconds:02}")
-                }
+                app_call_model::model::format_elapsed(now.saturating_duration_since(*since))
             }
             _ => "Call".into(),
         }
@@ -1090,11 +1084,15 @@ fn health_indicator<A: Actions + 'static>(call: &CallView) -> El {
     let Some(health) = &call.health else {
         return el();
     };
-    let (lit, label, tint) = match health.level {
-        calling::NetworkLevel::Good => (3, "Network: Good", "#FFFFFF"),
-        calling::NetworkLevel::Poor => (2, "Network: Poor", "#FFAA44"),
-        calling::NetworkLevel::Bad => (1, "Network: Bad", "#FFB3BE"),
+    let (lit, tint) = match health.level {
+        calling::NetworkLevel::Good => (3, "#FFFFFF"),
+        calling::NetworkLevel::Poor => (2, "#FFAA44"),
+        calling::NetworkLevel::Bad => (1, "#FFB3BE"),
     };
+    let label = format!(
+        "Network: {}",
+        app_call_model::health::level_text(health.level)
+    );
     let mut bars = row()
         .key("call-health")
         .label(label)
@@ -2012,8 +2010,11 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 gallery = gallery.grow(0.0).h(120.0).min_h(120.0).max_h(120.0);
             }
         } else if !people.is_empty() {
-            let (columns, width, height) =
-                gallery::gallery_grid(people.len(), call.stage_size, 12.0);
+            let gallery::GalleryGrid {
+                columns,
+                tile_width: width,
+                tile_height: height,
+            } = gallery::gallery_grid(people.len(), call.stage_size.0, call.stage_size.1, 12.0);
             for group in people.chunks(columns) {
                 let mut tiles = row().w_full().h(height).gap(12.0).center();
                 for (person, _) in group {

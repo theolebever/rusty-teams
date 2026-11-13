@@ -333,7 +333,7 @@ impl Bridge {
 
 impl Actions for Bridge {
     fn set_notification_pause(&self, until: Option<DateTime<Utc>>) {
-        match self.shared.store.set_meta("notify_paused_until", &until.map(|time| time.to_rfc3339()).unwrap_or_default()) {
+        match self.shared.store.set_meta(app_backend::notify::pause::META_KEY, &until.map(|time| time.to_rfc3339()).unwrap_or_default()) {
             Ok(()) => self.shared.publish(Update::NotificationPause(until)),
             Err(error) => self.shared.publish(Update::Status(format!("Could not pause notifications: {error}"))),
         }
@@ -1237,8 +1237,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 if let Some(id) = pending { shared.publish(Update::OpenChat(id)); }
                 if let Some(activity) = teams_core::stored_activity_feed(engine.store()) { shared.publish(Update::Activity(activity)); }
                 shared.publish(Update::Appearance(app_backend::appearance::load(engine.store())));
-                let paused_until = engine.store().meta("notify_paused_until").ok().flatten()
-                    .and_then(|value| DateTime::parse_from_rfc3339(&value).ok()).map(|until| until.with_timezone(&Utc));
+                let paused_until = app_backend::notify::pause::load(engine.store());
                 shared.publish(Update::NotificationPause(paused_until));
                 let settings = engine.store().meta(agents::SETTINGS_KEY).ok().flatten()
                     .and_then(|json| agents::AgentSettings::from_json(&json).ok()).unwrap_or_default();

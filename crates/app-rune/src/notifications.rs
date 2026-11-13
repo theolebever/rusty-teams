@@ -24,9 +24,7 @@ pub fn open_pending<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>, tx:
 pub fn environment(engine: &Engine, chat_in_foreground: bool, native_in_call: bool) -> Environment {
     let store = engine.store();
     let presence = store.meta("me_user_id").ok().flatten().and_then(|id| engine.presence(&id));
-    let paused = store.meta("notify_paused_until").ok().flatten()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
-        .is_some_and(|until| Utc::now() < until);
+    let paused = app_backend::notify::pause::is_paused(app_backend::notify::pause::load(store), Utc::now());
     Environment {
         chat_in_foreground,
         system_quiet: system_quiet(),

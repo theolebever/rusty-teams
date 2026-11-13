@@ -1219,7 +1219,7 @@ pub(super) mod tests {
 
     use super::super::fixtures::finished_run;
     use super::{
-        AgentRun, AgentRuns, RunState, SessionTarget, StartOptions, Utc, api_retry_text,
+        AgentRun, AgentRuns, RunState, StartOptions, Utc, api_retry_text,
         format_elapsed, needs_dialog, run_store,
     };
     use crate::app_state::{AppState, Mode};

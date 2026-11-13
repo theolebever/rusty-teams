@@ -15,6 +15,7 @@ embed-resource = "3"
 [dependencies]
 agents.workspace = true
 app-backend.workspace = true
+app-call-model.workspace = true
 calling.workspace = true
 chatsvc.workspace = true
 chrono.workspace = true

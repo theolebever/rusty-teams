@@ -250,7 +250,7 @@ fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
                     s.own.menu = false; s.own.submenu = None;
                 }));
             }
-            if s.own.paused_until.is_some_and(|until| Utc::now() < until) {
+            if app_backend::notify::pause::is_paused(s.own.paused_until, Utc::now()) {
                 menu = menu.child(item("pause-resume", None, "Resume notifications", false, |s: &mut UiState<A>| {
                     s.actions.set_notification_pause(None); s.own.menu = false; s.own.submenu = None;
                 }));
