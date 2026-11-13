@@ -2,10 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui_kit::{
-    DispatchPhase, IntoElement, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ScrollWheelEvent,
-    canvas,
-};
 use tokio::sync::watch;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
@@ -38,7 +34,11 @@ impl UserInput {
     }
 }
 
-pub fn input_probe(input: Arc<UserInput>) -> impl IntoElement {
+#[cfg(feature = "gpui")]
+pub fn input_probe(input: Arc<UserInput>) -> impl gpui_kit::IntoElement {
+    use gpui_kit::{
+        DispatchPhase, KeyDownEvent, MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, canvas,
+    };
     canvas(
         |_, _, _| {},
         move |_, _, window, _| {

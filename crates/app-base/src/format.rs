@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc, Weekday};
 
-use crate::theme;
+use app_backend::schemes::AVATAR_PALETTE;
 
 const BADGE_CAP: u32 = 99;
 const WEEKDAY_WINDOW_DAYS: i64 = 6;
@@ -119,7 +119,7 @@ pub fn palette_index(key: &str) -> usize {
         hash ^= u32::from(byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    hash as usize % theme::avatar_palette_len()
+    hash as usize % AVATAR_PALETTE.len()
 }
 
 pub fn initials(name: &str) -> String {
@@ -369,7 +369,7 @@ mod tests {
             "",
             "00000000-0000-0000-0000-000000000001",
         ] {
-            assert!(palette_index(key) < theme::avatar_palette_len());
+            assert!(palette_index(key) < AVATAR_PALETTE.len());
         }
     }
 

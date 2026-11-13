@@ -108,7 +108,7 @@ impl ColorScheme {
     }
 }
 
-const AVATAR_PALETTE: [u32; 6] = [0x9a4a22, 0x44606e, 0x8a3434, 0x4f6a3c, 0x6a4f7a, 0x2f6b63];
+pub const AVATAR_PALETTE: [u32; 6] = [0x9a4a22, 0x44606e, 0x8a3434, 0x4f6a3c, 0x6a4f7a, 0x2f6b63];
 
 const DARK_BASE: Palette = Palette {
     shade: Shade::Dark,

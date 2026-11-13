@@ -5,6 +5,11 @@ version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["gpui"]
+# GPUI host glue: theme, zoom, assets, image loaders and input probes.
+gpui = ["dep:gpui-kit"]
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
@@ -18,7 +23,7 @@ chrono.workspace = true
 directories.workspace = true
 futures-channel = "0.3"
 futures-util = { workspace = true, features = ["io"] }
-gpui-kit.workspace = true
+gpui-kit = { workspace = true, optional = true }
 log = "0.4"
 mcp.workspace = true
 serde.workspace = true
@@ -49,6 +54,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
     "Win32_System_Kernel",
     "Win32_System_SystemServices",
     "Win32_System_DataExchange",

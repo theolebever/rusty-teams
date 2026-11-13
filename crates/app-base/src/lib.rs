@@ -1,6 +1,8 @@
 pub mod agent_api;
 pub mod agents;
+#[cfg(feature = "gpui")]
 pub mod assets;
+#[cfg(feature = "gpui")]
 pub mod avatar_image;
 pub mod blocks;
 pub mod channel_files;
@@ -14,8 +16,10 @@ pub mod downloads;
 pub mod emoji;
 pub mod emoticons;
 pub mod format;
+#[cfg(feature = "gpui")]
 pub mod frame_log;
 pub mod fuzzy;
+#[cfg(feature = "gpui")]
 pub mod image_clipboard;
 pub mod image_view_math;
 pub mod inline_image;
@@ -29,10 +33,12 @@ pub mod schedule_time;
 pub mod single_instance;
 pub mod stickers;
 pub mod task_dialog;
+#[cfg(feature = "gpui")]
 pub mod theme;
 pub mod translation;
 pub mod updater;
 pub mod user_activity;
 pub use app_backend::{appearance, autostart, crash_log, diagnostics, presence_link, runtime, version};
+#[cfg(feature = "gpui")]
 pub mod zoom;
 pub const APP_NAME: &str = "Rusty Teams";

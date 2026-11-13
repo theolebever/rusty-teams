@@ -66,7 +66,7 @@ pub use app_base::blocks;
 pub use host::{Host, StateHandle};
 pub use app_base::{
     APP_NAME, appearance, autostart, avatar_image, channel_files, crash_log, demo_cards, demo_chart_cards, demo_gifs,
-    demo_input_cards, demo_library, demo_recap, diagnostics, downloads, format, frame_log, fuzzy,
-    emoticons, image_clipboard, image_view_math, inline_image, presence_link, read_state, recap, remote_image, runtime, schedule_time,
-    single_instance, stickers, theme, translation, updater, user_activity, zoom,
+    demo_input_cards, demo_library, demo_recap, diagnostics, downloads, format, fuzzy,
+    emoticons, image_view_math, inline_image, presence_link, read_state, recap, remote_image, runtime, schedule_time,
+    single_instance, stickers, translation, updater, user_activity,
 };

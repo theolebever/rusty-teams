@@ -14,6 +14,7 @@ pub mod notify;
 mod settings;
 mod views;
 
+pub use app_base::{frame_log, image_clipboard, theme, zoom};
 pub use app_ui_kit::render;
 pub use state::*;
 

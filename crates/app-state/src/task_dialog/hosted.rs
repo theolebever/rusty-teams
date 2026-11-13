@@ -9,7 +9,8 @@ use super::sdk::{self, Effect, HostContext, HostPage};
 use super::{UrlDialog, UrlDialogNext};
 use crate::app_state::{AppHandle, AppState};
 use crate::backend::Engine;
-use crate::{notify, runtime, theme};
+use app_base::theme;
+use crate::{notify, runtime};
 
 static HOST: OnceLock<Arc<WebViewTransport>> = OnceLock::new();
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "gpui")]
 mod strip;
 
 use std::collections::HashSet;
@@ -6,10 +7,12 @@ use std::time::Duration;
 
 use teams_core::EmoticonTag;
 
+#[cfg(feature = "gpui")]
 pub use strip::{StripImages, StripLoader, StripSource, split_strip};
 
 const CATALOG: &str = include_str!("../../../app/assets/emoticons.tsv");
 const ASSET_BASE: &str = chatsvc::teams_cdn::EMOTICON_BASE_URL;
+#[cfg(feature = "gpui")]
 const ASSET_SIZE: u32 = 100;
 const FRAMES_PER_SECOND: u64 = 24;
 const VARIATION_SELECTOR: char = '\u{fe0f}';
@@ -34,6 +37,7 @@ pub struct ResolvedEmoticon {
 }
 
 impl ResolvedEmoticon {
+    #[cfg(feature = "gpui")]
     pub fn strip_source(&self) -> StripSource {
         let tone = match self.tone {
             Some(tone) if self.emoticon.diverse => format!("_s{}", tone + 1),
@@ -216,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gpui")]
     fn urls_use_the_100_strip_with_etag_and_tone_only_for_diverse_emoticons() {
         let heart = resolve(None, "❤️").unwrap();
         assert!(

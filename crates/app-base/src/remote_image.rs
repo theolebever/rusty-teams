@@ -1,4 +1,3 @@
-use gpui_kit::{ImageSource, SharedString};
 use teams_core::{Gif, ImageRef};
 
 use crate::stickers::Sticker;
@@ -82,7 +81,9 @@ pub fn capped(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// Web URLs load through the app's HTTP client, anything else is a local file (demo mode).
-pub fn image_source(location: &str) -> ImageSource {
+#[cfg(feature = "gpui")]
+pub fn image_source(location: &str) -> gpui_kit::ImageSource {
+    use gpui_kit::{ImageSource, SharedString};
     if location.starts_with("https://") {
         ImageSource::from(SharedString::from(location.to_owned()))
     } else {
