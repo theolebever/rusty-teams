@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use app_call_model::model::CallModel;
+use app_call_model::recording_menu::{RecordAction, record_actions};
 use app_call_model::stage_layout::{self as gallery, VisibleRotation as Rotation};
 use crate::types::Actions;
 use crate::ui::UiState;
@@ -486,6 +488,7 @@ pub struct CallView {
     recording_audio_only: bool,
     transcribing: bool,
     consent_required: bool,
+    capability: calling::MeetingCapability,
     reactions: Vec<(u64, String, calling::Reaction, Instant)>,
     own_mri: String,
 }
@@ -554,6 +557,7 @@ impl Default for CallView {
             recording_audio_only: false,
             transcribing: false,
             consent_required: false,
+            capability: calling::MeetingCapability::default(),
             reactions: Vec::new(),
             own_mri: String::new(),
         }
@@ -676,6 +680,7 @@ impl CallView {
                     self.recording_audio_only = false;
                     self.transcribing = false;
                     self.consent_required = false;
+                    self.capability = calling::MeetingCapability::default();
                     self.reactions.clear();
                     self.local_share = None;
                     self.own_mri.clear();
@@ -759,6 +764,7 @@ impl CallView {
             CallUpdate::RecordingAudioOnly(audio) => self.recording_audio_only = audio,
             CallUpdate::Transcribing(transcribing) => self.transcribing = transcribing,
             CallUpdate::ConsentRequired(required) => self.consent_required = required,
+            CallUpdate::Capability(capability) => self.capability = capability,
             CallUpdate::Reaction { mri, reaction } => {
                 self.frame_id = self.frame_id.wrapping_add(1);
                 if self.reactions.len() == 12 {
@@ -790,6 +796,24 @@ impl CallView {
         if layout_changed {
             self.refresh_gallery(Instant::now());
         }
+    }
+
+    /// What GPUI's record rights (`app_call_model::record_rights`) see of this call.
+    /// ponytail: the kind is taken as a meeting and the org recording policy and tenants are
+    /// not loaded, so role, organizer settings, meeting capability and a pending start block
+    /// here; the service still refuses what the org policy forbids.
+    fn record_model(&self) -> CallModel {
+        let mut model = CallModel::meeting("", false);
+        if let Some(state) = &self.state { model.state = state.clone(); }
+        let own = self.roster.iter().find(|person| person.mri == self.own_mri);
+        model.organizer = own.is_some_and(|person| person.organizer);
+        model.own_role = own.and_then(|person| person.role);
+        model.lobby = self.lobby;
+        model.recording = self.recording;
+        model.transcribing = self.transcribing;
+        model.record_pending = self.recording_pending;
+        model.capability = self.capability;
+        model
     }
 
     fn can_manage(&self) -> bool {
@@ -1617,7 +1641,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 CallCommand::EndMeeting => "End the meeting for everyone?",
                 CallCommand::RemoveParticipant { .. } => "Remove this person from the meeting?",
                 CallCommand::MuteAll => "Mute everyone?",
-                CallCommand::StopRecording { .. } => "Stop recording?",
+                CallCommand::StopRecording { scope } => RecordAction::Stop(*scope).confirm_title().unwrap_or("Stop recording?"),
                 _ => "Continue?",
             };
             body = body.child(
@@ -1629,10 +1653,12 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     .wrap()
                     .child(text(prompt).font(style(14.0, 600.0)).color(rgb(0xFFFFFF)))
                     .child(button::<A>("Confirm", "call-confirm-yes", |s, _| {
-                        if let Some(command) = s.calls.confirm.take()
-                            && s.calls.can_manage()
-                            && !s.calls.lobby
-                        {
+                        let Some(command) = s.calls.confirm.take() else { return };
+                        let allowed = match &command {
+                            CallCommand::StopRecording { scope } => s.calls.record_model().action_allowed(RecordAction::Stop(*scope)),
+                            _ => s.calls.can_manage() && !s.calls.lobby,
+                        };
+                        if allowed {
                             s.actions.call_command(command);
                         }
                     }))
@@ -1718,19 +1744,18 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 move |s, _| s.actions.call_command(CallCommand::SetCaptions(!enabled)),
             ));
         }
-        if call.recording && call.can_manage() {
-            let scope = if call.transcribing {
-                calling::StopScope::RecordingOnly
-            } else {
-                calling::StopScope::Both
-            };
-            features = features.child(button::<A>(
-                "Stop recording",
-                "call-record-stop",
-                move |s, _| {
-                    s.calls.confirm = Some(CallCommand::StopRecording { scope });
-                },
-            ));
+        // GPUI's "Record and transcribe" menu: blocked actions are left out rather than greyed.
+        let record = call.record_model();
+        if !s.read_only && !record.record_hidden() {
+            for (action, label) in record_actions(record.recording, record.transcribing) {
+                if record.action_block(action).is_some() { continue; }
+                let key = format!("call-record-{}", label.to_lowercase().replace(' ', "-"));
+                features = features.child(button::<A>(label, &key, move |s, _| match action {
+                    // An empty title names the file "Meeting" (`calling::recording`).
+                    RecordAction::Start(kind) => s.actions.call_command(CallCommand::StartRecording { kind, title: String::new() }),
+                    RecordAction::Stop(scope) => s.calls.confirm = Some(CallCommand::StopRecording { scope }),
+                }));
+            }
         }
         for reaction in calling::Reaction::ALL {
             let label = reaction.name().to_owned();
@@ -2703,6 +2728,23 @@ mod tests {
     }
 
     #[test]
+    fn recording_starts_from_the_more_menu_unless_the_role_or_meeting_forbids_it() {
+        let mut state = connected(1);
+        state.calls.apply(CallUpdate::Roster(vec![RosterEntry { mri: "me".into(), role: Some(calling::MeetingRole::Attendee), ..Default::default() }]));
+        let mut rt = runtime(state);
+        click(&mut rt, "call-more");
+        assert!(rt.find("call-record-start-recording").is_none(), "attendees cannot record");
+        rt.update(|s, _| s.calls.apply(CallUpdate::Roster(vec![RosterEntry { mri: "me".into(), role: Some(calling::MeetingRole::Presenter), ..Default::default() }])));
+        rt.frame(1.0);
+        click(&mut rt, "call-record-record-audio-only");
+        assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("StartRecording { kind: AudioOnly, title: \"\" }"));
+        rt.update(|s, _| s.calls.apply(CallUpdate::Capability(calling::MeetingCapability { allow_cloud_recording: Some(false), ..Default::default() })));
+        rt.frame(1.0);
+        assert!(rt.find("call-record-start-recording").is_none(), "the meeting turned recording off");
+        assert!(rt.find("call-record-start-transcription-only").is_some());
+    }
+
+    #[test]
     fn stopping_recording_requires_organizer_confirmation() {
         let mut state = connected(1);
         state.calls.roster.push(RosterEntry {
@@ -2714,7 +2756,7 @@ mod tests {
         state.calls.apply(CallUpdate::Transcribing(true));
         let mut rt = runtime(state);
         click(&mut rt, "call-more");
-        click(&mut rt, "call-record-stop");
+        click(&mut rt, "call-record-stop-recording");
         assert!(rt.state.actions.actions.borrow().is_empty());
         click(&mut rt, "call-confirm-yes");
         assert_eq!(
