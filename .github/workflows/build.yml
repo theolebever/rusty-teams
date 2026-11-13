@@ -25,9 +25,6 @@ jobs:
     name: Windows
     runs-on: windows-latest
     timeout-minutes: 90
-    # rust-lld links much faster than link.exe on a binary this size.
-    env:
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
     defaults:
       run:
         shell: bash
