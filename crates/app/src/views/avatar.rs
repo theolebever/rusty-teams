@@ -2,15 +2,18 @@ use crate::views::image_memory::{bounded, gpui_image};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 
-use crate::avatar_image::{AvatarPhoto, TEXTURE_MARGIN, device_span};
+use crate::avatar_image::{TEXTURE_MARGIN, device_span, square_texture, with_edge_margin};
 use crate::card_state::BotIdentity;
 use crate::data::{AvatarState, Directory, Presence, PresenceKind};
 use crate::format;
+use crate::inline_image::ImageData;
 use crate::sidebar_model::{AvatarSpec, Face};
 use crate::theme;
 use crate::views::profile_card::opens_profile;
@@ -73,7 +76,43 @@ fn face_circle(directory: &Directory, face: &Face, size: f32, text_ratio: f32) -
     }
 }
 
-fn photo_disc(photo: &Arc<AvatarPhoto>, size: f32, radius: f32) -> AnyElement {
+/// Avatar textures kept across photos and sizes; the least recently drawn goes first.
+const MAX_TEXTURES: usize = 256;
+
+thread_local! {
+    static TEXTURES: RefCell<(HashMap<(u64, u32), (Arc<RenderImage>, u64)>, u64)> = RefCell::default();
+}
+
+/// The texture of `photo` at `side` device pixels, and the one it pushed out of the cache.
+fn photo_texture(
+    photo: &ImageData,
+    side: u32,
+) -> Option<(Arc<RenderImage>, Option<Arc<RenderImage>>)> {
+    TEXTURES.with_borrow_mut(|(textures, clock)| {
+        *clock += 1;
+        if let Some((image, used)) = textures.get_mut(&(photo.id, side)) {
+            *used = *clock;
+            return Some((image.clone(), None));
+        }
+        let pixels = with_edge_margin(&square_texture(&photo.bytes, side)?, TEXTURE_MARGIN);
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
+        // ponytail: O(n) scan for the oldest on overflow; fine at this size.
+        let evicted = (textures.len() >= MAX_TEXTURES)
+            .then(|| {
+                textures
+                    .iter()
+                    .min_by_key(|(_, (_, used))| *used)
+                    .map(|(key, _)| *key)
+            })
+            .flatten()
+            .and_then(|key| textures.remove(&key))
+            .map(|(image, _)| image);
+        textures.insert((photo.id, side), (image.clone(), *clock));
+        Some((image, evicted))
+    })
+}
+
+fn photo_disc(photo: &ImageData, size: f32, radius: f32) -> AnyElement {
     let photo = photo.clone();
     canvas(
         |_, _, _| {},
@@ -84,10 +123,10 @@ fn photo_disc(photo: &Arc<AvatarPhoto>, size: f32, radius: f32) -> AnyElement {
                 f32::from(bounds.right()),
                 scale_factor,
             );
-            let Some(texture) = photo.texture(side) else {
+            let Some((texture, evicted)) = photo_texture(&photo, side) else {
                 return;
             };
-            if let Some(evicted) = texture.evicted {
+            if let Some(evicted) = evicted {
                 cx.drop_image(evicted, Some(window));
             }
             let margin = px(TEXTURE_MARGIN as f32 / scale_factor);
@@ -95,7 +134,7 @@ fn photo_disc(photo: &Arc<AvatarPhoto>, size: f32, radius: f32) -> AnyElement {
                 bounds,
                 bounds.dilate(margin),
                 Corners::all(px(radius)),
-                texture.image,
+                texture,
                 0,
                 false,
             );
@@ -406,7 +445,26 @@ pub fn member_stack(
 
 #[cfg(test)]
 mod tests {
-    use super::presence_size;
+    use super::{MAX_TEXTURES, photo_texture, presence_size};
+    use crate::inline_image::{ImageData, ImageFormat};
+
+    #[test]
+    fn photo_textures_are_cached_per_side_and_evict_the_least_recent() {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 100, 50, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let photo = ImageData::from_bytes(ImageFormat::Png, png);
+        let (first, evicted) = photo_texture(&photo, 1).unwrap();
+        assert!(evicted.is_none());
+        for side in 2..=MAX_TEXTURES as u32 {
+            assert!(photo_texture(&photo, side).unwrap().1.is_none());
+        }
+        let (again, _) = photo_texture(&photo, 1).unwrap();
+        assert_eq!(first.id, again.id);
+        let (_, evicted) = photo_texture(&photo, 1000).unwrap();
+        assert_ne!(evicted.expect("a full cache evicts").id, first.id);
+    }
 
     #[test]
     fn presence_dot_scales_with_the_avatar() {

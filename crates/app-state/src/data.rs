@@ -9,7 +9,7 @@ use store::{ChatRecord, MessageImportance, Store, is_bot_id};
 use teams_core::{Activity, Availability, ChatSectionSettings, FolderChange, is_notes_chat};
 use tokio::sync::oneshot;
 
-use crate::avatar_image::AvatarPhoto;
+use crate::avatar_image;
 use crate::backend::Engine;
 use crate::runtime;
 
@@ -114,7 +114,8 @@ impl Presence {
 pub enum AvatarState {
     Pending,
     Missing,
-    Ready(Arc<AvatarPhoto>),
+    /// Photo bytes; the view makes textures from them.
+    Ready(ImageData),
     Icon(ImageData),
 }
 
@@ -574,8 +575,8 @@ pub fn avatar_state_from(content_type: &str, bytes: Vec<u8>, is_bot: bool) -> Av
         }
         return AvatarState::Missing;
     }
-    match AvatarPhoto::from_bytes(bytes) {
-        Some(photo) => AvatarState::Ready(Arc::new(photo)),
+    match avatar_image::photo(image_format(content_type), bytes) {
+        Some(photo) => AvatarState::Ready(photo),
         None => AvatarState::Missing,
     }
 }

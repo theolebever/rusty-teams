@@ -1,63 +1,30 @@
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
 
-use gpui_kit::RenderImage;
 use image::imageops::FilterType;
-use image::{Frame, ImageFormat, ImageReader, RgbaImage};
+use image::{ImageFormat as Codec, ImageReader, RgbaImage};
 
-const MAX_TEXTURES: usize = 8;
+use crate::inline_image::{ImageData, ImageFormat};
+
 const SOURCE_SIDE: u32 = 240;
 const SOURCE_LIMIT: u32 = 2 * SOURCE_SIDE;
 pub const TEXTURE_MARGIN: u32 = 2;
 
-pub struct AvatarPhoto {
-    bytes: Vec<u8>,
-    textures: Mutex<Vec<(u32, Arc<RenderImage>)>>,
-}
-
-pub struct Texture {
-    pub image: Arc<RenderImage>,
-    pub evicted: Option<Arc<RenderImage>>,
-}
-
-impl AvatarPhoto {
-    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
-        let (width, height) = ImageReader::new(Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()?
-            .into_dimensions()
-            .ok()?;
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let bytes = if width.max(height) > SOURCE_LIMIT {
-            shrunk_source(&bytes)?
-        } else {
-            bytes
-        };
-        Some(Self {
-            bytes,
-            textures: Mutex::new(Vec::new()),
-        })
+/// The bytes a view draws an avatar from: the original when it decodes, shrunk to
+/// [`SOURCE_SIDE`] (as PNG) when it is large. Views turn it into textures with [`square_texture`].
+pub fn photo(format: ImageFormat, bytes: Vec<u8>) -> Option<ImageData> {
+    let (width, height) = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if width == 0 || height == 0 {
+        return None;
     }
-
-    pub fn texture(&self, side: u32) -> Option<Texture> {
-        let mut textures = self.textures.lock().ok()?;
-        if let Some(position) = textures.iter().position(|(cached, _)| *cached == side) {
-            let entry = textures.remove(position);
-            let image = entry.1.clone();
-            textures.push(entry);
-            return Some(Texture {
-                image,
-                evicted: None,
-            });
-        }
-        let pixels = with_edge_margin(&square_texture(&self.bytes, side)?, TEXTURE_MARGIN);
-        let image = Arc::new(RenderImage::new(vec![Frame::new(pixels)]));
-        let evicted = (textures.len() >= MAX_TEXTURES).then(|| textures.remove(0).1);
-        textures.push((side, image.clone()));
-        Some(Texture { image, evicted })
-    }
+    Some(if width.max(height) > SOURCE_LIMIT {
+        ImageData::from_bytes(ImageFormat::Png, shrunk_source(&bytes)?)
+    } else {
+        ImageData::from_bytes(format, bytes)
+    })
 }
 
 fn shrunk_source(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -67,7 +34,7 @@ fn shrunk_source(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let mut encoded = Vec::new();
     source
-        .write_to(&mut Cursor::new(&mut encoded), ImageFormat::Png)
+        .write_to(&mut Cursor::new(&mut encoded), Codec::Png)
         .ok()?;
     Some(encoded)
 }
@@ -121,7 +88,7 @@ mod tests {
         let mut encoded = Vec::new();
         image::DynamicImage::ImageRgba8(source)
             .to_rgb8()
-            .write_to(&mut Cursor::new(&mut encoded), ImageFormat::Jpeg)
+            .write_to(&mut Cursor::new(&mut encoded), Codec::Jpeg)
             .unwrap();
         encoded
     }
@@ -171,33 +138,15 @@ mod tests {
     }
 
     #[test]
-    fn textures_are_cached_per_side_and_evict_the_oldest() {
-        let photo = AvatarPhoto::from_bytes(solid_jpeg(48, 48)).unwrap();
-        let first = photo.texture(32).unwrap();
-        let again = photo.texture(32).unwrap();
-        assert_eq!(first.image.id, again.image.id);
-        assert!(again.evicted.is_none());
-        for side in 33..33 + MAX_TEXTURES as u32 - 1 {
-            assert!(photo.texture(side).unwrap().evicted.is_none());
-        }
-        let overflow = photo.texture(100).unwrap();
-        assert_eq!(overflow.evicted.map(|image| image.id), Some(first.image.id));
-    }
-
-    #[test]
     fn large_originals_are_kept_at_the_source_side() {
-        let photo = AvatarPhoto::from_bytes(solid_jpeg(1200, 900)).unwrap();
+        let photo = photo(ImageFormat::Jpeg, solid_jpeg(1200, 900)).unwrap();
+        assert_eq!(photo.format, ImageFormat::Png);
         let dimensions = image::load_from_memory(&photo.bytes)
             .unwrap()
             .to_rgba8()
             .dimensions();
         assert_eq!(dimensions, (SOURCE_SIDE, SOURCE_SIDE));
-        let texture = photo.texture(20).unwrap().image;
-        let raw = texture.as_bytes(0).unwrap().to_vec();
-        let padded_side = 20 + 2 * TEXTURE_MARGIN;
-        let Rgba([blue, _, red, _]) = *RgbaImage::from_raw(padded_side, padded_side, raw)
-            .unwrap()
-            .get_pixel(10, 10);
+        let Rgba([blue, _, red, _]) = *square_texture(&photo.bytes, 20).unwrap().get_pixel(10, 10);
         assert!(
             blue.abs_diff(50) <= 3 && red.abs_diff(200) <= 3,
             "{blue} {red}"
@@ -206,6 +155,6 @@ mod tests {
 
     #[test]
     fn garbage_bytes_fall_back() {
-        assert!(AvatarPhoto::from_bytes(b"not an image".to_vec()).is_none());
+        assert!(photo(ImageFormat::Jpeg, b"not an image".to_vec()).is_none());
     }
 }

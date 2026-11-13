@@ -2,7 +2,6 @@ pub mod agent_api;
 pub mod agents;
 #[cfg(feature = "gpui")]
 pub mod assets;
-#[cfg(feature = "gpui")]
 pub mod avatar_image;
 pub mod blocks;
 pub mod channel_files;
