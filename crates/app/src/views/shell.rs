@@ -988,7 +988,7 @@ impl Render for AppShell {
             .map(|dialog| (dialog.scope.clone(), dialog.card.clone()))
         {
             self.state.update(cx, |state, cx| {
-                state.ensure_card_inputs(&dialog.0, &dialog.1, window, cx)
+                super::card_fields::ensure_card_inputs(state, &dialog.0, &dialog.1, window, cx)
             });
         }
         if let Some(me) = self.state.read(cx).directory.me.clone() {

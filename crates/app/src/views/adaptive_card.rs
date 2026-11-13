@@ -141,7 +141,7 @@ pub fn ensure_cards_inputs(
     app.update(cx, |state, cx| {
         for (index, card) in cards.iter().enumerate() {
             let scope = CardScope::message(conversation_id, message_id, index);
-            state.ensure_card_inputs(&scope, card, window, cx);
+            super::card_fields::ensure_card_inputs(state, &scope, card, window, cx);
         }
     });
 }
@@ -378,7 +378,7 @@ fn element_view(
         CardElement::Carousel(carousel) => carousel_view(carousel, id, context),
         CardElement::Actions(actions) => actions_view(actions, id, context).into_any_element(),
         CardElement::Input(input) => {
-            input_view(input, context.scope, context.state, &context.inputs)
+            input_view(input, context.scope, context.state, &context.inputs, context.cx)
         }
         CardElement::Rating(display) => rating_display_view(display),
         CardElement::Chart(chart) => chart_view(chart),

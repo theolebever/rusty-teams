@@ -14,9 +14,10 @@ use teams_core::{
     RatingColor, RatingDisplay, RatingInput, RatingSize, RatingStyle, ToggleInput,
 };
 
+use super::card_fields::{InputField, input_field};
 use super::widgets::{icon, symbol};
 use crate::app_state::AppHandle;
-use crate::card_inputs::{InputField, inline_action_key, uses_select};
+use crate::card_inputs::{inline_action_key, uses_select};
 use crate::card_state::{ActionPhase, CardScope, CardState};
 use crate::theme;
 
@@ -40,6 +41,7 @@ pub fn input_view(
     scope: &CardScope,
     state: &CardState,
     inputs: &[CardInput],
+    cx: &App,
 ) -> AnyElement {
     let key = scope.input_key(&input.id);
     let error = state.input_error(&key).map(str::to_owned);
@@ -75,7 +77,7 @@ pub fn input_view(
                 } else {
                     transparent_black()
                 })
-                .child(control_view(input, &key, scope, state, inputs)),
+                .child(control_view(input, &key, scope, state, inputs, cx)),
         )
         .when_some(error, |column, error| {
             column.child(
@@ -94,6 +96,7 @@ fn control_view(
     scope: &CardScope,
     state: &CardState,
     inputs: &[CardInput],
+    cx: &App,
 ) -> AnyElement {
     let current = state.input_value(key).to_owned();
     match &input.kind {
@@ -102,7 +105,7 @@ fn control_view(
         CardInputKind::Choice(choice) if !uses_select(choice) => {
             choices_view(choice, key, &current, scope)
         }
-        _ => match state.input_field(key) {
+        _ => match input_field(key, cx) {
             Some(InputField::Line(field)) => {
                 let inline = match &input.kind {
                     CardInputKind::Text(text) => text.inline_action.as_ref(),

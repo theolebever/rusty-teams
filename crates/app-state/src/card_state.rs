@@ -3,10 +3,6 @@ use std::time::Duration;
 
 use teams_core::AdaptiveCard;
 
-use gpui_kit::App;
-
-use crate::card_inputs::{FieldHandle, InputField};
-
 const DIALOG_KEY: &str = "task-dialog";
 pub const DONE_HOLD: Duration = Duration::from_millis(1600);
 pub const MAX_REASON_CHARS: usize = 160;
@@ -90,7 +86,6 @@ pub struct CardState {
     overrides: HashMap<(String, String), CardOverride>,
     input_values: HashMap<String, String>,
     input_errors: HashMap<String, String>,
-    input_fields: HashMap<String, FieldHandle>,
     refreshed: HashSet<(String, String)>,
     refreshes_in_flight: usize,
 }
@@ -124,37 +119,18 @@ impl CardState {
             .retain(|key, _| !key.starts_with(card_key));
         self.input_errors
             .retain(|key, _| !key.starts_with(card_key));
-        self.input_fields
-            .retain(|key, _| !key.starts_with(card_key));
     }
 
     pub fn has_input(&self, input_key: &str) -> bool {
         self.input_values.contains_key(input_key)
     }
 
-    pub fn seed_input(&mut self, input_key: String, value: String, field: Option<FieldHandle>) {
-        if let Some(field) = field {
-            self.input_fields.insert(input_key.clone(), field);
-        }
+    pub fn seed_input(&mut self, input_key: String, value: String) {
         self.input_values.insert(input_key, value);
     }
 
     pub fn input_value(&self, input_key: &str) -> &str {
         self.input_values.get(input_key).map_or("", String::as_str)
-    }
-
-    pub fn input_text(&self, input_key: &str, cx: &App) -> String {
-        match self.input_fields.get(input_key) {
-            Some(handle) => handle
-                .field
-                .text(cx)
-                .unwrap_or_else(|| self.input_value(input_key).to_owned()),
-            None => self.input_value(input_key).to_owned(),
-        }
-    }
-
-    pub fn input_field(&self, input_key: &str) -> Option<&InputField> {
-        self.input_fields.get(input_key).map(|handle| &handle.field)
     }
 
     pub fn set_input_value(&mut self, input_key: &str, value: String) -> bool {

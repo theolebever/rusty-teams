@@ -8,11 +8,11 @@ use serde_json::json;
 use store::Store;
 use teams_core::AdaptiveCard;
 
-use crate::card_inputs::InputField;
 use crate::app_state::{AppHandle, AppState, Mode};
 use crate::card_actions::CardTask;
 use crate::card_state::{CardScope, Surface};
 use crate::views::adaptive_card::card_view;
+use crate::views::card_fields::{InputField, ensure_card_inputs, input_field};
 
 struct Harness {
     app: Entity<AppState>,
@@ -23,7 +23,7 @@ struct Harness {
 impl Render for Harness {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.app.update(cx, |state, cx| {
-            state.ensure_card_inputs(&self.scope, &self.card, window, cx)
+            ensure_card_inputs(state, &self.scope, &self.card, window, cx)
         });
         card_view(&self.card, &self.scope, cx)
     }
@@ -95,9 +95,9 @@ fn open_card(
     (window_cx, app, scope, card)
 }
 
-fn focus_name_field(cx: &mut VisualTestContext, app: &Entity<AppState>, scope: &CardScope) {
+fn focus_name_field(cx: &mut VisualTestContext, scope: &CardScope) {
     let key = scope.input_key("name");
-    let field = cx.update(|_, cx| app.read(cx).cards.input_field(&key).cloned());
+    let field = cx.update(|_, cx| input_field(&key, cx).cloned());
     let Some(InputField::Line(line)) = field else {
         panic!("name is a single line field");
     };
@@ -129,13 +129,8 @@ fn error_of(cx: &mut VisualTestContext, app: &Entity<AppState>, key: &str) -> Op
     cx.update(|_, cx| app.read(cx).cards.input_error(key).map(str::to_owned))
 }
 
-fn type_name(
-    cx: &mut VisualTestContext,
-    app: &Entity<AppState>,
-    scope: &CardScope,
-    text: &str,
-) {
-    focus_name_field(cx, app, scope);
+fn type_name(cx: &mut VisualTestContext, scope: &CardScope, text: &str) {
+    focus_name_field(cx, scope);
     cx.simulate_input(text);
 }
 
@@ -159,7 +154,7 @@ fn sent_value(task: Option<CardTask>) -> serde_json::Value {
 #[gpui_kit::test]
 fn typed_text_and_toggle_are_sent_with_the_action_data(cx: &mut TestAppContext) {
     let (cx, app, scope, card) = open(cx, Surface::Message);
-    type_name(cx, &app, &scope, "Ada");
+    type_name(cx, &scope, "Ada");
     switch_agree(cx, &app, &scope);
     let sent = sent_value(task_for(cx, &app, &scope, &card, 0));
     assert_eq!(
@@ -174,7 +169,7 @@ fn an_empty_required_input_blocks_the_send_until_it_changes(cx: &mut TestAppCont
     assert!(task_for(cx, &app, &scope, &card, 0).is_none());
     let key = scope.input_key("name");
     assert_eq!(error_of(cx, &app, &key).as_deref(), Some("Name needed"));
-    type_name(cx, &app, &scope, "A");
+    type_name(cx, &scope, "A");
     assert_eq!(error_of(cx, &app, &key), None);
     assert!(task_for(cx, &app, &scope, &card, 0).is_some());
 }
@@ -189,7 +184,7 @@ fn associated_inputs_none_skips_collection_and_validation(cx: &mut TestAppContex
 #[gpui_kit::test]
 fn a_dialog_submit_carries_the_collected_values(cx: &mut TestAppContext) {
     let (cx, app, scope, card) = open(cx, Surface::Dialog);
-    type_name(cx, &app, &scope, "Ada");
+    type_name(cx, &scope, "Ada");
     let sent = sent_value(task_for(cx, &app, &scope, &card, 0));
     assert_eq!(
         sent,
@@ -199,25 +194,22 @@ fn a_dialog_submit_carries_the_collected_values(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn typing_past_the_max_length_is_ignored(cx: &mut TestAppContext) {
-    let (cx, app, scope, _) = open_card(cx, Surface::Message, typed_card());
+    let (cx, _, scope, _) = open_card(cx, Surface::Message, typed_card());
     let key = scope.input_key("code");
-    let field = cx.update(|_, cx| app.read(cx).cards.input_field(&key).cloned());
+    let field = cx.update(|_, cx| input_field(&key, cx).cloned());
     let Some(InputField::Line(line)) = field else {
         panic!("code is a single line field");
     };
     cx.update(|window, cx| line.update(cx, |state, cx| state.focus(window, cx)));
     cx.simulate_input("abcdef");
-    assert_eq!(
-        cx.update(|_, cx| app.read(cx).cards.input_text(&key, cx)),
-        "abc"
-    );
+    assert_eq!(cx.update(|_, cx| line.read(cx).value().to_string()), "abc");
 }
 
 #[gpui_kit::test]
 fn blur_validation_shows_the_error_message(cx: &mut TestAppContext) {
     let (cx, app, scope, card) = open_card(cx, Surface::Message, typed_card());
     let key = scope.input_key("code");
-    let field = cx.update(|_, cx| app.read(cx).cards.input_field(&key).cloned());
+    let field = cx.update(|_, cx| input_field(&key, cx).cloned());
     let Some(InputField::Line(line)) = field else {
         panic!("code is a single line field");
     };
