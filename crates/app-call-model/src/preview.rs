@@ -8,8 +8,9 @@ use calling::camera::start_camera;
 use calling::capture::Capture;
 use calling::video_frame::picture_from_i420;
 use calling::video_pattern::{PatternKind, pattern_frame};
-use calling::{BackgroundChoice, CallUpdate, CameraEffects, DeviceChoice, VideoHub, VideoKey};
-use gpui_kit::*;
+use calling::{
+    BackgroundChoice, CallUpdate, CameraEffects, DeviceChoice, VideoHub, VideoKey, VideoPicture,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::background::{BackgroundLibrary, BackgroundPick};
@@ -123,12 +124,11 @@ impl CameraPreview {
         self.blur.set_enabled(enabled);
     }
 
-    pub fn take_frames(&mut self, cx: &mut App) {
+    pub fn take_frames(&mut self) {
         self.pictures.apply(&self.hub);
-        super::pictures::release_retired(cx);
     }
 
-    pub fn image(&self, now: Instant) -> Option<Arc<RenderImage>> {
+    pub fn image(&self, now: Instant) -> Option<&Arc<VideoPicture>> {
         self.pictures.live(&VideoKey::LocalCamera, now)
     }
 
@@ -154,10 +154,9 @@ impl CameraPreview {
         self.counted = (now, total);
     }
 
-    pub fn stop(&mut self, cx: &mut App) {
+    pub fn stop(&mut self) {
         self.release_capture();
         self.pictures.clear();
-        super::pictures::release_retired(cx);
         self.fps = None;
     }
 

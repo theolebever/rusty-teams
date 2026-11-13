@@ -16,6 +16,7 @@ use super::call_extras::{CameraMenu, background_items};
 use super::call_view::{device_items, round_control};
 use crate::app_state::AppState;
 use crate::call::{AudioChoice, CameraPreview, JoinOptions, PendingJoin};
+use crate::views::video_texture::{Slot, texture};
 use crate::theme;
 
 const CONTENT_WIDTH: f32 = 560.;
@@ -93,7 +94,10 @@ impl PrejoinView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&app, |view, _, cx| view.sync_background(cx));
-        let release = cx.on_release(|view, cx| view.preview.stop(cx));
+        let release = cx.on_release(|view, cx| {
+            view.preview.stop();
+            crate::views::video_texture::release(cx);
+        });
         let (preview, mut updates) = CameraPreview::new();
         let state = app.read(cx);
         preview.set_effects(state.call_effects);
@@ -168,7 +172,8 @@ impl PrejoinView {
     }
 
     fn take_frames(&mut self, cx: &mut Context<Self>) {
-        self.preview.take_frames(cx);
+        self.preview.take_frames();
+        crate::views::video_texture::release(cx);
         cx.notify();
     }
 
@@ -220,7 +225,8 @@ impl PrejoinView {
         if self.options.camera_on {
             self.restart_preview();
         } else {
-            self.preview.stop(cx);
+            self.preview.stop();
+            crate::views::video_texture::release(cx);
         }
         cx.notify();
     }
@@ -258,7 +264,8 @@ impl PrejoinView {
     }
 
     fn join(&mut self, cx: &mut Context<Self>) {
-        self.preview.stop(cx);
+        self.preview.stop();
+        crate::views::video_texture::release(cx);
         let options = self.options.clone();
         self.app
             .update(cx, |state, cx| state.confirm_prejoin(options, cx));
@@ -281,7 +288,8 @@ impl PrejoinView {
             .options
             .camera_on
             .then(|| self.preview.image(Instant::now()))
-            .flatten();
+            .flatten()
+            .and_then(|picture| texture(Slot::Preview, picture));
         let me = state.directory.me.clone();
         let face = match (&image, self.options.camera_on) {
             (Some(image), _) => img(ImageSource::Render(image.clone()))

@@ -100,7 +100,7 @@ fn speaker_video(
 ) -> Option<std::sync::Arc<RenderImage>> {
     let call = state.call.as_ref()?;
     (tile.has_video || model.is_one_to_one())
-        .then(|| call.pictures.live(&VideoKey::Person(tile.mri.clone()), now))
+        .then(|| crate::views::video_texture::call_texture(&call.pictures, &VideoKey::Person(tile.mri.clone()), now))
         .flatten()
 }
 
@@ -164,7 +164,7 @@ pub(super) fn self_view(state: &AppState, model: &CallModel, now: Instant) -> Op
         .call
         .as_ref()
         .filter(|_| model.camera_on)
-        .and_then(|call| call.pictures.live(&VideoKey::LocalCamera, now))?;
+        .and_then(|call| crate::views::video_texture::call_texture(&call.pictures, &VideoKey::LocalCamera, now))?;
     Some(
         div()
             .absolute()

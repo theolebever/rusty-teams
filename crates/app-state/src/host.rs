@@ -91,14 +91,11 @@ mod gpui_host {
     use crate::app_state::{AgentNote, AppEvent, AppState};
     use crate::{agent_api, task_dialog};
 
-    /// Carries out the events that need GPUI-only parts: the agent API, hosted task
-    /// dialogs and the textures of call pictures that are no longer shown.
+    /// Carries out the events that need GPUI-only parts: the agent API and hosted
+    /// task dialogs.
     pub fn follow_state(state: &Entity<AppState>, cx: &mut App) {
-        cx.subscribe(state, |state, event: &AppEvent, cx| {
-            app_call_model::pictures::release_retired(cx);
-            forward(state, event, cx);
-        })
-        .detach();
+        cx.subscribe(state, |state, event: &AppEvent, cx| forward(state, event, cx))
+            .detach();
     }
 
     fn forward(state: Entity<AppState>, event: &AppEvent, cx: &mut App) {

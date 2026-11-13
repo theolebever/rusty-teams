@@ -213,7 +213,7 @@ pub fn render_stage(
 ) -> Option<AnyElement> {
     let call = state.call.as_ref()?;
     let label = call.model.sharing_label()?;
-    let image = call.pictures.live(&VideoKey::Screen, Instant::now());
+    let image = crate::views::video_texture::call_texture(&call.pictures, &VideoKey::Screen, Instant::now());
     let share_stage = &call.share_stage;
     let toggle_app = app.clone();
     let wheel_app = app.clone();

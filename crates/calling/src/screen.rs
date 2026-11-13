@@ -11,7 +11,7 @@ use crate::video_frame::VideoPicture;
 use crate::error::{Error, Result};
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShareKind {
     Screen,
     Window,

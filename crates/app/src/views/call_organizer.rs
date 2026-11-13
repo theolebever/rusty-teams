@@ -716,7 +716,7 @@ pub fn render_focus_stage(
             VideoKey::Person(tile.mri.clone()),
         )
     };
-    let image: Option<Arc<RenderImage>> = call.pictures.live(&key, now);
+    let image: Option<Arc<RenderImage>> = crate::views::video_texture::call_texture(&call.pictures, &key, now);
     let avatar_only = image.is_none();
     let (picture_size, picture) = match image {
         Some(image) => {

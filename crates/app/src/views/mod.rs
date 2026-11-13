@@ -36,6 +36,7 @@ pub mod card_carousel;
 mod card_input_tests;
 pub mod card_code_block;
 pub mod card_fields;
+pub mod video_texture;
 pub mod card_icon;
 pub mod card_input;
 pub mod card_media;

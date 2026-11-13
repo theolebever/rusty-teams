@@ -8,7 +8,7 @@ use calling::{
     AttendeeLimits, CallCommand, CallState, CallUpdate, CameraDevice, CaptionEntry, CaptionState, ContentShare,
     DeviceChoice, DeviceLists, EndKind, EndReason, HoldState, MeetingCapability, MeetingRole,
     MeetingTarget, Progress, Reaction, Replacement, RosterEntry, ShareKind, ShareSource, SpeakingDetector, StatsSample, VideoHub,
-    VideoWant,
+    VideoPicture, VideoWant,
 };
 use teams_core::RecordingPolicy;
 use tokio::sync::mpsc::UnboundedSender;
@@ -298,7 +298,7 @@ pub struct CallModel {
     pub camera: DeviceChoice,
     pub local_share: Option<String>,
     pub share_sources: Vec<ShareSource>,
-    pub share_thumbnails: Vec<(ShareSource, Arc<gpui_kit::RenderImage>)>,
+    pub share_thumbnails: Vec<(ShareSource, Arc<VideoPicture>)>,
     pub last_sample: Option<StatsSample>,
     pub share_sound: bool,
     pub own_hand: Option<u64>,
@@ -511,10 +511,8 @@ impl CallModel {
                 self.share_sources = sources;
             }
             CallUpdate::ShareThumbnail { source, picture } => {
-                if let Some(image) = crate::pictures::render_image((*picture).clone()) {
-                    self.share_thumbnails.retain(|(known, _)| *known != source);
-                    self.share_thumbnails.push((source, image));
-                }
+                self.share_thumbnails.retain(|(known, _)| *known != source);
+                self.share_thumbnails.push((source, picture));
             }
             CallUpdate::ShareSound(active) => self.share_sound = active,
             CallUpdate::OwnHand(rank) => self.own_hand = rank,
@@ -1206,11 +1204,11 @@ impl CallModel {
             .collect()
     }
 
-    pub fn share_thumbnail(&self, source: &ShareSource) -> Option<Arc<gpui_kit::RenderImage>> {
+    pub fn share_thumbnail(&self, source: &ShareSource) -> Option<&Arc<VideoPicture>> {
         self.share_thumbnails
             .iter()
             .find(|(known, _)| known == source)
-            .map(|(_, image)| image.clone())
+            .map(|(_, picture)| picture)
     }
 
     pub fn windows(&self) -> Vec<&ShareSource> {

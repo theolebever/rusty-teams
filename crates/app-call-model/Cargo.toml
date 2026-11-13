@@ -6,7 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dev-dependencies]
-gpui-kit = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [dependencies]
@@ -17,7 +16,6 @@ calling.workspace = true
 chatsvc.workspace = true
 chrono.workspace = true
 directories.workspace = true
-gpui-kit.workspace = true
 graph.workspace = true
 log = "0.4"
 mcp.workspace = true

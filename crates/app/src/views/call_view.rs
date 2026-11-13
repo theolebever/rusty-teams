@@ -639,7 +639,7 @@ fn share_items(
         } else {
             format!("Share screen {}", index + 1)
         };
-        let thumbnail = model.share_thumbnail(source);
+        let thumbnail = share_texture(model, source);
         let source = source.clone();
         let app = app.clone();
         popup = popup.item(
@@ -657,7 +657,7 @@ fn share_items(
     }
     for source in windows.into_iter().take(MAX_WINDOW_ITEMS) {
         let label = source.label();
-        let thumbnail = model.share_thumbnail(source);
+        let thumbnail = share_texture(model, source);
         let source = source.clone();
         let app = app.clone();
         popup = popup.item(
@@ -1092,8 +1092,11 @@ fn person_tile_body(
         .as_ref()
         .filter(|_| remote.has_video || model.is_one_to_one())
         .and_then(|call| {
-            call.pictures
-                .live(&VideoKey::Person(remote.mri.clone()), now)
+            crate::views::video_texture::call_texture(
+                &call.pictures,
+                &VideoKey::Person(remote.mri.clone()),
+                now,
+            )
         });
     if let Some(image) = video {
         return video_tile(
@@ -1180,7 +1183,7 @@ fn own_tile_body(
     let self_view = state
         .call
         .as_ref()
-        .and_then(|call| call.pictures.live(&VideoKey::LocalCamera, now));
+        .and_then(|call| crate::views::video_texture::call_texture(&call.pictures, &VideoKey::LocalCamera, now));
     if let Some(image) = self_view {
         return video_tile(
             size,
@@ -1523,4 +1526,9 @@ mod tests {
         let stage = name_plate_metrics(TileSize { width: 640., height: 360., avatar: 96. });
         assert_eq!((stage.text_size, stage.inset), (12., 8.));
     }
+}
+
+fn share_texture(model: &CallModel, source: &calling::ShareSource) -> Option<Arc<RenderImage>> {
+    use crate::views::video_texture::{Slot, texture};
+    texture(Slot::Share(source.kind, source.id), model.share_thumbnail(source)?)
 }

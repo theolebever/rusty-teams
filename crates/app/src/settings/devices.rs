@@ -83,7 +83,10 @@ pub struct DevicesView {
 impl DevicesView {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let app_subscription = cx.observe(&app, |view, _, cx| view.sync_preview_block(cx));
-        let release = cx.on_release(|view, cx| view.preview.stop(cx));
+        let release = cx.on_release(|view, cx| {
+            view.preview.stop();
+            crate::views::video_texture::release(cx);
+        });
         let (preview, mut updates) = CameraPreview::new();
         let state = app.read(cx);
         let demo = state.mode.demo;
@@ -140,7 +143,8 @@ impl DevicesView {
     }
 
     fn take_frames(&mut self, cx: &mut Context<Self>) {
-        self.preview.take_frames(cx);
+        self.preview.take_frames();
+        crate::views::video_texture::release(cx);
         cx.notify();
     }
 
@@ -182,7 +186,8 @@ impl DevicesView {
         }
         self.preview_blocked = blocked;
         if blocked {
-            self.preview.stop(cx);
+            self.preview.stop();
+            crate::views::video_texture::release(cx);
         } else {
             self.start_preview(cx);
         }
@@ -389,7 +394,10 @@ impl DevicesView {
                 })
             })
             .collect();
-        let image = self.preview.image(Instant::now());
+        let image = self
+            .preview
+            .image(Instant::now())
+            .and_then(|picture| crate::views::video_texture::texture(crate::views::video_texture::Slot::Preview, picture));
         v_flex()
             .w_full()
             .child(

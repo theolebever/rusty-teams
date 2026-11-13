@@ -25,7 +25,7 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 use store::Store;
 
-use crate::app_state::{AppState, Mode};
+use crate::app_state::{AppEvent, AppState, Mode};
 use crate::call::remote_command::{
     ADMIT_ALL_FLAG, CALL_FLAG, HANG_UP_FLAG, JOIN_FLAG, RemoteCommand, UNMUTE_FLAG,
 };
@@ -252,6 +252,8 @@ fn main() {
         views::shell::install_globals(&state, user_input, cx);
         agent_api::init(state.read(cx).store.clone(), arguments.demo, cx);
         host::follow_state(&state, cx);
+        cx.subscribe(&state, |_, _: &AppEvent, cx| views::video_texture::release(cx))
+            .detach();
         agents::install(state.clone(), cx);
         if arguments.demo {
             demo::start_session(&state, cx);
