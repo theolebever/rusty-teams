@@ -146,6 +146,8 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
             let id = id.to_owned();
             move |s: &mut UiState<A>| s.actions.set_chat_read(&id, unread)
         }));
+    let chat = id.to_owned();
+    panel = panel.child(item("menu-pop-out", "right_panel_open", "Pop out chat", false, move |s: &mut UiState<A>| s.actions.pop_out_chat(&chat)));
     if !s.chatlist.folders.is_empty() {
         panel = panel.child(submenu_button::<A>("menu-sections", "Move to section", Some("sections")));
         if let Some(folder) = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id)) {
@@ -263,6 +265,7 @@ mod tests {
     }
 
     impl Actions for Fake {
+        fn pop_out_chat(&self, id: &str) { self.log(format!("popout {id}")); }
         fn open(&self, id: &str) { self.log(format!("open {id}")); }
         fn send(&self, _t: SendTarget, _x: String, _f: Vec<teams_core::FileReference>) {}
         fn set_chat_muted(&self, id: &str, muted: bool) { self.log(format!("mute {id} {muted}")); }
@@ -270,7 +273,10 @@ mod tests {
         fn hide_chat(&self, id: &str) { self.log(format!("hide {id}")); }
         fn leave_chat(&self, id: &str) { self.log(format!("leave {id}")); }
         fn search_people(&self, q: &str) { self.log(format!("people {q}")); }
-        fn create_chat(&self, ids: Vec<String>, _t: Option<String>) { self.log(format!("create {}", ids.join(","))); }
+        fn create_chat(&self, ids: Vec<String>, _t: Option<String>, first: String) {
+            self.log(format!("create {}", ids.join(",")));
+            if !first.is_empty() { self.log(format!("first {first}")); }
+        }
         fn add_members(&self, id: &str, people: Vec<store::MemberRecord>) { self.log(format!("add {id} {}", people.len())); }
         fn remove_member(&self, id: &str, user: &str) { self.log(format!("remove {id} {user}")); }
     }
@@ -296,7 +302,7 @@ mod tests {
     }
 
     fn click(rt: &mut Runtime<UiState<Fake>>, key: &str) {
-        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}; new chat open: {}, recipients: {}, creating: {}", rt.state.chatlist.manage.new_chat_open, rt.state.chatlist.manage.new_chat.chips.len(), rt.state.chatlist.manage.new_chat.creating));
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
@@ -310,6 +316,14 @@ mod tests {
     }
 
     fn calls(rt: &Runtime<UiState<Fake>>) -> Vec<String> { rt.state.actions.calls.borrow().clone() }
+
+    #[test]
+    fn chat_menu_requests_a_separate_window() {
+        let mut rt = rt();
+        right_click(&mut rt, "chat-duo");
+        click(&mut rt, "menu-pop-out");
+        assert!(calls(&rt).contains(&"popout duo".into()));
+    }
 
     #[test]
     fn right_click_menu_reads_mutes_hides_and_leaves_groups_only() {
@@ -355,6 +369,7 @@ mod tests {
         click(&mut rt, "new-chat-start");
         assert_eq!(calls(&rt).last().unwrap(), "create zoe");
         rt.update(|s, tx| { s.apply(Update::ChatCreated("fresh".into())); drain(s, tx); });
+        rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.selected.as_deref(), Some("fresh"));
 
         // A known 1:1 is opened instead of created.
@@ -365,6 +380,25 @@ mod tests {
         click(&mut rt, "new-chat-start");
         assert_eq!(rt.state.selected.as_deref(), Some("duo"));
         assert!(!calls(&rt).iter().any(|c| c == "create ann"));
+    }
+
+    #[test]
+    fn a_new_chat_keeps_its_first_message_after_failure_and_prevents_double_creation() {
+        let mut rt = rt();
+        click(&mut rt, "chat-new");
+        rt.update(|s, _| {
+            s.chatlist.manage.new_chat.chips.push(Person { user_id: "zoe".into(), name: "Zoe".into(), mail: None });
+            s.chatlist.manage.new_chat.first_message = TextEdit::new("Hello Zoe");
+        });
+        rt.frame(1.0);
+        click(&mut rt, "new-chat-start");
+        click(&mut rt, "new-chat-start");
+        assert_eq!(calls(&rt).iter().filter(|call| call.as_str() == "create zoe").count(), 1);
+        assert_eq!(calls(&rt).last().map(String::as_str), Some("first Hello Zoe"));
+        rt.update(|s, _| s.apply(Update::ChatCreateFailed("offline".into())));
+        assert_eq!(rt.state.chatlist.manage.new_chat.first_message.text, "Hello Zoe");
+        assert!(!rt.state.chatlist.manage.new_chat.creating);
+        assert!(rt.state.chatlist.manage.new_chat_open);
     }
 
     #[test]

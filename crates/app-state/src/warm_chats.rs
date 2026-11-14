@@ -21,7 +21,7 @@ impl WarmChats {
 
 pub fn recent_chat_ids(chats: &[store::ChatRecord], count: usize) -> Vec<String> {
     let mut recent: Vec<_> = chats.iter().collect();
-    recent.sort_by(|left, right| right.last_message_at.cmp(&left.last_message_at));
+    recent.sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at));
     recent
         .into_iter()
         .take(count)

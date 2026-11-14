@@ -101,7 +101,7 @@ fn production_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     source
         .lines()
         .enumerate()
-        .take_while(|(_, line)| line.trim() != "#[cfg(test)]")
+        .take_while(|(_, line)| !matches!(line.trim(), "#[cfg(test)]" | "#[cfg(all(test, feature = \"gpui\"))]"))
         .filter(|(_, line)| !line.trim_start().starts_with("//"))
 }
 
@@ -115,6 +115,10 @@ fn names_non_graph_host(line: &str) -> bool {
 
 #[test]
 fn host_check_ignores_graph_and_markup() {
+    for attribute in ["#[cfg(test)]", "#[cfg(all(test, feature = \"gpui\"))]"] {
+        let source = format!("production\n{attribute}\nmod tests {{\nhttps://app.whiteboard.microsoft.com/x\n}}");
+        assert_eq!(production_lines(&source).map(|(_, line)| line).collect::<Vec<_>>(), ["production"]);
+    }
     assert!(!names_non_graph_host(
         r#"const GRAPH: &str = "https://graph.microsoft.com";"#
     ));

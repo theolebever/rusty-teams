@@ -35,6 +35,9 @@ const QUICK: [(&str, &str); 3] = [
 /// The chip toggles and the collapsed sections. Lives on `UiState` between frames.
 #[derive(Default)]
 pub struct ChatListState {
+    pub folder_edit: Option<String>,
+    pub folder_name: TextEdit,
+    pub folder_delete_confirm: bool,
     pub team_details: std::collections::HashMap<String, crate::types::TeamDetails>,
     pub channel_details: std::collections::HashMap<String, crate::types::ChannelDetails>,
     pub pinned_channels: Vec<String>,
@@ -389,6 +392,34 @@ fn quick_views<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if let Some(id) = &s.chatlist.folder_edit {
+        let folder = s.chatlist.folders.iter().find(|folder| &folder.id == id)?;
+        let rename_id = id.clone();
+        let delete_id = id.clone();
+        let mut body = col().w_full().gap(8.0).padding(16.0)
+            .child(text(format!("Section: {}", folder.name)).font(ts(18.0, 600.0)))
+            .child(text_input(&s.chatlist.folder_name, ts(14.0, 400.0)).key("folder-rename-field").label("Section name").w_full().on_edit(|s: &mut UiState<A>| &mut s.chatlist.folder_name))
+            .child(crate::screens::button("Rename", "folder-rename", move |s: &mut UiState<A>, _| {
+                let name = s.chatlist.folder_name.text.trim().to_owned();
+                if name.is_empty() { s.toast.show("Enter a section name"); return; }
+                s.actions.change_folders(teams_core::FolderChange::Rename { folder_id: rename_id.clone(), name });
+                s.chatlist.folder_edit = None;
+            }));
+        for other in s.chatlist.folders.iter().filter(|other| other.id != folder.id) {
+            let (source, target) = (id.clone(), other.id.clone());
+            body = body.child(crate::screens::button(&format!("Move to {}'s position", other.name), &format!("folder-move-{}", other.id), move |s: &mut UiState<A>, _| {
+                s.actions.change_folders(teams_core::FolderChange::Move { folder_id: source.clone(), target_folder_id: target.clone() });
+                s.chatlist.folder_edit = None;
+            }));
+        }
+        body = body.child(crate::screens::button(if s.chatlist.folder_delete_confirm { "Confirm delete section" } else { "Delete section" }, "folder-delete", move |s: &mut UiState<A>, _| {
+            if s.chatlist.folder_delete_confirm {
+                s.actions.change_folders(teams_core::FolderChange::Delete { folder_id: delete_id.clone() });
+                s.chatlist.folder_edit = None;
+            } else { s.chatlist.folder_delete_confirm = true; }
+        }));
+        return Some(crate::shortcuts::card("folder-dialog", 420.0, body, |s: &mut UiState<A>| s.chatlist.folder_edit = None));
+    }
     if !s.chatlist.more { return None; }
     let p = active_palette();
     let mut menu = col().key("chat-more-menu").w(200.0).padding(6.0).gap(4.0).radius(8.0)
@@ -433,11 +464,18 @@ fn folder_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
         let expanded = folder.expanded;
         let label = if folder.kind == teams_core::FolderKind::Favorites { "Favorites" } else { &folder.name };
         let mut section = col().key(format!("folder-{}", folder.id)).w_full()
-            .child(row().key(format!("section-folder-{}", folder.id)).w_full().h(SECTION_H).px(10.0).gap(6.0).center_y()
+            .child(row().w_full().center_y().child(row().key(format!("section-folder-{}", folder.id)).grow(1.0).min_w(0.0).h(SECTION_H).px(10.0).gap(6.0).center_y()
                 .label(label.to_owned()).hover(tone(active_palette().row_hover))
                 .on_press(move |s: &mut UiState<A>| s.actions.set_folder_expanded(&id, !expanded))
                 .child(sym(if expanded { "keyboard_arrow_down" } else { "keyboard_arrow_right" }, 12.0).color(tone(active_palette().text_muted)))
-                .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(tone(active_palette().text_soft))));
+                .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(tone(active_palette().text_soft))))
+                .children((folder.kind == teams_core::FolderKind::UserCreated && !s.read_only).then(|| {
+                    let (id, name) = (folder.id.clone(), folder.name.clone());
+                    row().key(format!("folder-more-{}", folder.id)).size(24.0, 24.0).center().label("Section options")
+                        .on_press(move |s: &mut UiState<A>| {
+                            s.chatlist.folder_edit = Some(id.clone()); s.chatlist.folder_name = TextEdit::new(&name); s.chatlist.folder_delete_confirm = false;
+                        }).child(sym("more_horiz", 14.0))
+                })));
         if expanded {
             for i in indices { section = section.child(col().key(format!("chat-{}", s.chats[i].id)).w_full().child(chat_row(s, i))); }
         }

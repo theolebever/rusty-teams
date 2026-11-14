@@ -553,7 +553,7 @@ pub fn set_window_icon(window: &impl HasWindowHandle, png: &[u8]) {
             .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
             .to_rgba8()
             .into_raw();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         unsafe {

@@ -25,6 +25,12 @@ const TYPING_INTERVAL: Duration = Duration::from_secs(20);
 /// Composer state beyond the text: mentions, pickers and the GIFs waiting to be sent.
 #[derive(Default)]
 pub struct Compose {
+    pub inline: Vec<(String, state::outgoing::InlineImage)>,
+    pub inline_loading: std::collections::HashSet<String>,
+    pub slash: crate::slash::State,
+    pub importance: store::MessageImportance,
+    pub subject: TextEdit,
+    pub headline: TextEdit,
     pub reply: Option<crate::types::ReplyReference>,
     typing_sent_at: Option<Instant>,
     pub mentions: crate::mentions::State,
@@ -34,6 +40,7 @@ pub struct Compose {
     pub cloud: crate::cloud_picker::State,
     /// Conversation and text last handed to `Actions::save_draft`.
     saved: Option<(String, String)>,
+    save_retry: Option<Instant>,
 }
 
 fn typing_changed<A: Actions>(s: &mut UiState<A>, now: Instant) {
@@ -54,22 +61,45 @@ pub(crate) fn stop_typing<A: Actions>(s: &mut UiState<A>) {
 }
 
 impl Compose {
+    pub(crate) fn draft_save_failed(&self) -> bool { self.save_retry.is_some() }
+    pub fn snapshot(&self, text: String) -> crate::types::Composed {
+        crate::types::Composed {
+            mentions: crate::mentions::resolve(&text, &self.mentions.chosen), text,
+            gifs: self.gifs.clone(), reply: self.reply.clone(), inline: self.inline.clone(), importance: self.importance,
+            subject: (!self.subject.text.is_empty()).then(|| self.subject.text.clone()),
+            banner: (!self.headline.text.is_empty()).then(|| teams_core::AnnouncementBanner { title: self.headline.text.clone(), background: teams_core::BannerBackground::Color("indigo".into()) }),
+        }
+    }
     /// What is sent with `text`; the mentions and GIFs are used up.
     pub fn take(&mut self, text: String) -> crate::types::Composed {
         let mentions = crate::mentions::resolve(&text, &self.mentions.chosen);
         self.mentions.chosen.clear();
         self.gif.open = false;
-        crate::types::Composed { text, mentions, gifs: std::mem::take(&mut self.gifs), reply: self.reply.take() }
+        let subject = (!self.subject.text.trim().is_empty()).then(|| self.subject.text.trim().to_owned());
+        let banner = (!self.headline.text.trim().is_empty()).then(|| teams_core::AnnouncementBanner {
+            title: self.headline.text.trim().to_owned(), background: teams_core::BannerBackground::Color("indigo".into()),
+        });
+        self.subject.clear();
+        self.headline.clear();
+        crate::types::Composed { text, mentions, gifs: std::mem::take(&mut self.gifs), reply: self.reply.take(),
+            importance: std::mem::take(&mut self.importance), subject, banner, inline: std::mem::take(&mut self.inline) }
     }
 }
 
 /// Stores the open conversation's unsent text when it changed. Called on every poll.
 pub(crate) fn persist_draft<A: Actions>(s: &mut UiState<A>) {
+    if s.compose.save_retry.is_some_and(|at| Instant::now() < at) { return; }
     let Some(id) = s.selected.clone().filter(|_| s.thread_root_id.is_none()) else { return };
-    let now = (id, s.composer.text.clone());
+    let composed = s.compose.snapshot(s.composer.text.clone());
+    let target = active_target(s).expect("selected conversation");
+    let files = s.media.files(&target);
+    let inline: Vec<_> = composed.inline.iter().map(|(marker, image)| (marker, image.image.id)).collect();
+    let now = (id, format!("{:?}", (&composed.text, &composed.mentions, &composed.gifs, &composed.reply, &composed.importance, &composed.subject, &composed.banner, inline, &files)));
     if s.compose.saved.as_ref() != Some(&now) {
-        s.actions.save_draft(&now.0, &now.1);
-        s.compose.saved = Some(now);
+        match s.actions.save_composition(&now.0, &composed, &files) {
+            Ok(()) => { s.compose.saved = Some(now); s.compose.save_retry = None; }
+            Err(error) => { s.toast.show(format!("Draft could not be saved: {error}")); s.compose.save_retry = Some(Instant::now() + Duration::from_secs(10)); }
+        }
     }
 }
 
@@ -78,6 +108,17 @@ fn composer_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx) -> 
     let empty = s.composer.text.is_empty() && s.compose.reply.is_none() && s.compose.gifs.is_empty()
         && active_target(s).is_some_and(|target| s.media.files(&target).is_empty() && !s.media.is_uploading(&target));
     if key.key == Key::Up && key.mods == Mods::default() && empty && !s.read_only {
+        match s.settings.prefs.chat.settings().up_arrow {
+            teams_core::UpArrowBehavior::StayInCompose => return true,
+            teams_core::UpArrowBehavior::NavigateToMessages => {
+                if let Some(message) = s.messages.last() {
+                    tx.scroll_center_in_instant("messages", format!("msg-{}", message.id));
+                    tx.focus(format!("msg-{}", message.id), true);
+                }
+                return true;
+            }
+            teams_core::UpArrowBehavior::EditLastMessage => {}
+        }
         let channel = active_target(s).is_some_and(|target| target.channel);
         if let Some(message) = s.messages.iter().rev().find(|m| m.mine && !m.deleted && !m.system && (!channel || m.reply_to_id == s.thread_root_id)).cloned() {
             crate::message_menu::begin_edit(s, &message, tx);
@@ -90,7 +131,7 @@ fn composer_key<A: Actions>(s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx) -> 
             return true;
         }
     }
-    crate::mentions::handle_key(s, key) || enter_key(s, key)
+    crate::slash::handle_key(s, key, tx) || crate::emoji_picker::handle_key(s, key) || crate::mentions::handle_key(s, key) || enter_key(s, key)
 }
 
 /// Teams' "press Enter to start a new line": Enter breaks the line and Ctrl+Enter sends.
@@ -126,6 +167,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .color(c(INK))
         .w_full()
         .on_edit(|s: &mut UiState<A>| &mut s.composer)
+        .on_input_paste(|s: &mut UiState<A>, content, _| crate::inline_compose::paste(s, content))
         .on_input_change(|s: &mut UiState<A>, _| typing_changed(s, Instant::now()))
         .on_input_key(|s: &mut UiState<A>, key: &KeyEvent, tx: &mut Tx| composer_key(s, key, tx))
         .on_submit(|s: &mut UiState<A>, _tx: &mut Tx| send(s));
@@ -151,7 +193,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .key("composer-tools")
         .gap(INSET)
         .center_y()
-        .child(tool("text_format", "composer-format").on_press(|s: &mut UiState<A>| s.format_open = !s.format_open))
+        .children((!s.settings.prefs.markdown).then(|| tool("text_format", "composer-format").on_press(|s: &mut UiState<A>| s.format_open = !s.format_open)))
         .child(tool("mood", "composer-emoji").on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
             s.emoji_open = !s.emoji_open;
             s.compose.gif.open = false;
@@ -183,7 +225,9 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .child(sym("send", ICON).color(if has_text { c(ACCENT) } else { c(MUTED) }));
 
     let actions = row().key("composer-actions").gap(INSET).center_y()
-        .child(toolbar).child(el().grow(1.0)).child(send_button);
+        .child(toolbar).child(el().grow(1.0))
+        .child(crate::screens::button("Schedule", "composer-schedule", |s: &mut UiState<A>, _| crate::schedule::open(s)))
+        .child(send_button);
     let contents = if stacked {
         col().w_full().gap(INSET).child(field).child(actions.w_full())
     } else {
@@ -201,17 +245,52 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .border(1.0, rgb(palette.border_strong))
         .fill(rgb(palette.surface))
         .child(contents);
+    let bar = bar.on_drop_files(|s: &mut UiState<A>, paths, _| crate::inline_compose::drop_files(s, paths));
 
     col()
         .w_full()
         .px(20.0)
         .pb(16.0)
         .gap(6.0)
-        .children(s.format_open.then(|| {
-            let mut tools = row().key("format-tools").gap(6.0);
-            for (label, before, after) in [("Bold", "**", "**"), ("Italic", "*", "*"), ("Underline", "<u>", "</u>"), ("Strike", "~~", "~~"), ("Code", "`", "`"), ("List", "\n- ", "")] {
+        .children((s.format_open && !s.settings.prefs.markdown).then(|| {
+            let mut choices = row().key("delivery-importance").gap(6.0);
+            for (label, importance) in [("Standard", store::MessageImportance::Normal), ("Important", store::MessageImportance::High), ("Urgent", store::MessageImportance::Urgent)] {
+                choices = choices.child(crate::screens::button(label, &format!("importance-{label}"), move |s: &mut UiState<A>, _| s.compose.importance = importance)
+                    .opacity(if s.compose.importance == importance { 1.0 } else { 0.5 }));
+            }
+            choices
+        }))
+        .children(target.as_ref().filter(|target| target.channel && target.thread_root_id.is_none()).map(|_| {
+            col().w_full().gap(4.0)
+                .child(text_input(&s.compose.subject, ts(14.0, 600.0)).key("post-subject").label("Post subject").placeholder("Add a subject", c(MUTED)).w_full()
+                    .on_edit(|s: &mut UiState<A>| &mut s.compose.subject))
+                .child(text_input(&s.compose.headline, ts(18.0, 600.0)).key("post-headline").label("Announcement headline").placeholder("Announcement headline (optional)", c(MUTED)).w_full()
+                    .on_edit(|s: &mut UiState<A>| &mut s.compose.headline))
+        }))
+        .children((s.format_open && !s.settings.prefs.markdown).then(|| {
+            let mut tools = row().key("format-tools").wrap().gap(6.0).max_h(150.0).scroll(ScrollSpec { stick_bottom: false });
+            for (label, before, after) in [("Bold", "**", "**"), ("Italic", "*", "*"), ("Underline", "<u>", "</u>"), ("Strike", "~~", "~~"), ("Code", "`", "`"), ("List", "\n- ", ""),
+                ("Numbered list", "\n1. ", ""), ("Heading", "\n# ", ""), ("Quote", "\n> ", ""), ("Link", "[", "](https://example.com)"),
+                ("Code block", "\n```rust\n", "\n```\n"), ("Table", "\n| Column 1 | Column 2 |\n| --- | --- |\n| ", " | Value |\n")] {
                 tools = tools.child(crate::screens::button(label, &format!("format-{label}"), move |s: &mut UiState<A>, tx| {
                     format_selection(&mut s.composer, before, after); tx.focus("composer", false);
+                }));
+            }
+            for (label, before, after) in [("Superscript", "<sup>", "</sup>"), ("Subscript", "<sub>", "</sub>"), ("Small text", "<span style=\"font-size:xx-small\">", "</span>"), ("Large text", "<span style=\"font-size:x-large\">", "</span>"), ("Indent", "<div style=\"margin-left:40px\">", "</div>"), ("Horizontal rule", "\n<hr>", "\n")] {
+                tools = tools.child(crate::screens::button(label, &format!("format-{label}"), move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, before, after); tx.focus("composer", false); }));
+            }
+            for (name, color) in crate::formatting::COLORS {
+                for (label, property) in [("Text", "color"), ("Highlight", "background-color")] {
+                    let tag = format!("<span style=\"{property}:{color}\">");
+                    tools = tools.child(crate::screens::button(&format!("{label} {name}"), &format!("format-{label}-{name}"), move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, &tag, "</span>"); tx.focus("composer", false); }));
+                }
+            }
+            tools = tools.child(crate::screens::button("Outdent", "format-outdent", |s: &mut UiState<A>, tx| { crate::formatting::outdent(&mut s.composer); tx.focus("composer", false); }))
+                .child(crate::screens::button("Clear formatting", "format-clear", |s: &mut UiState<A>, tx| { crate::formatting::clear(&mut s.composer); tx.focus("composer", false); }));
+            for action in teams_core::TableEdit::INSERTS.into_iter().chain(teams_core::TableEdit::DELETES) {
+                tools = tools.child(crate::screens::button(action.label(), &format!("format-table-{action:?}"), move |s: &mut UiState<A>, tx| {
+                    if !crate::formatting::table(&mut s.composer, action) { s.toast.show("Place the cursor inside a table first"); }
+                    tx.focus("composer", false);
                 }));
             }
             tools
@@ -221,6 +300,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .children(target.as_ref().filter(|_| s.compose.cloud.menu).map(|target| crate::cloud_picker::menu::<A>(target)))
         .children((target.is_some() && s.compose.cloud.open == target).then(|| crate::cloud_picker::picker(s)))
         .children(crate::gif_picker::chips(s))
+        .child(crate::inline_compose::previews(s))
         .children(target.clone().map(|target| media::attachments(s, &target)))
         .children(s.compose.reply.as_ref().map(|reply| row().key("reply-reference").w_full().gap(8.0).px(8.0).py(6.0).center_y()
             .child(text(format!("Replying to {}: {}", reply.sender, reply.text)).font(ts(12.0, 600.0)).color(c(INK)).truncate().grow(1.0).min_w(0.0))
@@ -236,6 +316,9 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
                 .wrap()
         }))
         .children(crate::mentions::list(s))
+        .children(crate::emoji_picker::popup(s))
+        .children(crate::schedule::view(s))
+        .children(crate::slash::view(s))
         .child(bar)
 }
 
@@ -378,6 +461,35 @@ mod tests {
         rt.update(|s, _| s.apply(Update::CloudFiles { place: crate::cloud_picker::Place::MyFiles, result: Ok(vec![]) }));
         rt.frame(1.0 / 60.0);
         assert!(rt.find("cloud-error").is_none() && rt.find("cloud-empty").is_some());
+    }
+
+    #[test]
+    fn up_arrow_respects_the_preference_and_preserves_a_nonempty_draft() {
+        let mut rt = rt();
+        rt.update(|s, _| s.messages.push(crate::types::MessageRow {
+            id: "mine".into(), sender: "Me".into(), sender_id: None,
+            text: "Previous message".into(), when: "14:00".into(), mine: true,
+            forwarded: false, importance: Default::default(), system: false,
+            reply_to_id: None, deleted: false, can_delete: true,
+            reactions: vec![], media: Default::default(),
+        }));
+        for behavior in [teams_core::UpArrowBehavior::StayInCompose, teams_core::UpArrowBehavior::NavigateToMessages] {
+            rt.update(move |s, tx| {
+                s.settings.prefs.chat.apply(teams_core::ChatSettingChange::UpArrow(behavior));
+                assert!(composer_key(s, &KeyEvent { key: Key::Up, mods: Mods::default() }, tx));
+                assert!(s.menu.edit_id.is_none());
+            });
+        }
+        rt.update(|s, tx| {
+            s.settings.prefs.chat.apply(teams_core::ChatSettingChange::UpArrow(teams_core::UpArrowBehavior::EditLastMessage));
+            s.composer = TextEdit::new("Unsent draft");
+            composer_key(s, &KeyEvent { key: Key::Up, mods: Mods::default() }, tx);
+            assert!(s.menu.edit_id.is_none());
+            assert_eq!(s.composer.text, "Unsent draft");
+            s.composer.clear();
+            assert!(composer_key(s, &KeyEvent { key: Key::Up, mods: Mods::default() }, tx));
+            assert_eq!(s.menu.edit_id.as_deref(), Some("mine"));
+        });
     }
 
     #[test]
@@ -560,6 +672,27 @@ mod tests {
     }
 
     #[test]
+    fn the_selected_skin_tone_is_inserted_in_the_draft() {
+        let mut rt = rt();
+        click(&mut rt, "composer-emoji");
+        click(&mut rt, "emoji-tone-3");
+        click(&mut rt, "emoji-tab-1");
+        click(&mut rt, "emoji-👍");
+        assert_eq!(rt.state.composer.text, "👍🏽");
+    }
+
+    #[test]
+    fn typing_a_colon_opens_emoji_suggestions_and_enter_picks_without_sending() {
+        let mut rt = rt();
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text(":thumbsup".into()));
+        assert!(rt.find("emoji-suggestions").is_some());
+        press(&mut rt, Key::Enter);
+        assert_eq!(rt.state.composer.text, "👍 ");
+        assert!(calls(&rt).iter().all(|call| !call.starts_with("send")));
+    }
+
+    #[test]
     fn a_picked_gif_waits_as_a_chip_and_goes_out_with_the_message() {
         let mut rt = rt();
         click(&mut rt, "composer-gif");
@@ -596,5 +729,22 @@ mod tests {
         rt.update(|s, _| persist_draft(s));
         let saved: Vec<String> = calls(&rt).into_iter().filter(|c| c.starts_with("draft")).collect();
         assert_eq!(saved, ["draft b [from last run]", "draft b [typed]"]);
+    }
+
+    #[test]
+    fn switching_chats_preserves_delivery_options_and_gifs_without_leaking_them() {
+        let mut rt = rt();
+        rt.update(|s, tx| {
+            s.compose.importance = store::MessageImportance::High;
+            s.compose.subject = TextEdit::new("Subject");
+            s.compose.headline = TextEdit::new("Headline");
+            crate::ui::open_chat(s, "a", tx);
+        });
+        assert_eq!(rt.state.compose.importance, store::MessageImportance::Normal);
+        assert!(rt.state.compose.subject.text.is_empty());
+        rt.update(|s, tx| crate::ui::open_chat(s, "b", tx));
+        assert_eq!(rt.state.compose.importance, store::MessageImportance::High);
+        assert_eq!(rt.state.compose.subject.text, "Subject");
+        assert_eq!(rt.state.compose.headline.text, "Headline");
     }
 }

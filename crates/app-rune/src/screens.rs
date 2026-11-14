@@ -33,6 +33,7 @@ pub struct CalendarRow {
     pub organizer: Option<String>,
     pub ical_uid: Option<String>,
     pub join_url: Option<String>,
+    pub dial_in: Option<chatsvc::DialIn>,
     pub thread_id: Option<String>,
     pub response: chatsvc::ResponseType,
 }
@@ -65,6 +66,8 @@ impl CalendarView {
 }
 
 pub struct ScreenState {
+    pub last_chat: Option<String>,
+    pub last_channel: Option<String>,
     pub calendar_view: CalendarView,
     pub calendar_date: NaiveDate,
     pub date_picker: bool,
@@ -81,12 +84,15 @@ pub struct ScreenState {
     pub week: NaiveDate,
     pub filter: ActivityFilter,
     pub selected_event: Option<String>,
+    pub event_menu: Option<String>,
     pub send_response: bool,
 }
 
 impl Default for ScreenState {
     fn default() -> Self {
         Self {
+            last_chat: None,
+            last_channel: None,
             calendar_view: CalendarView::Week,
             calendar_date: Local::now().date_naive(),
             date_picker: false,
@@ -103,6 +109,7 @@ impl Default for ScreenState {
             week: monday(Local::now().date_naive()),
             filter: ActivityFilter::All,
             selected_event: None,
+            event_menu: None,
             send_response: true,
         }
     }
@@ -127,7 +134,8 @@ pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
         ui::save_draft(s);
         s.selected = None;
         s.messages.clear();
-        s.pinned = None;
+        s.pinned.clear();
+    s.pin_index = 0;
     }
     s.screens.screen = screen;
     if screen == Screen::Calendar {
@@ -141,6 +149,20 @@ pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
         s.calls.history_loading = true;
         s.actions.load_call_history();
     }
+}
+
+pub fn navigate_tab<A: Actions>(s: &mut UiState<A>, screen: Screen, tx: &mut Tx) {
+    if let Some(id) = &s.selected {
+        if s.channel(id).is_some() { s.screens.last_channel = Some(id.clone()); }
+        else { s.screens.last_chat = Some(id.clone()); }
+    }
+    navigate(s, screen);
+    let remembered = match screen {
+        Screen::Chat => s.screens.last_chat.clone(),
+        Screen::Teams => s.screens.last_channel.clone(),
+        _ => return,
+    };
+    if let Some(id) = remembered.filter(|id| s.selected.as_ref() != Some(id)) { ui::open_chat(s, &id, tx); }
 }
 
 fn shift_week<A: Actions>(s: &mut UiState<A>, days: i64) {
@@ -264,6 +286,7 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
     if !s.read_only {
         header = header.child(button::<A>("Join with an ID", "calendar-join-id", |s, _| s.screens.join_id_open = true))
+            .child(button::<A>("New meeting", "calendar-new-meeting", |s, tx| { crate::meeting_form::open(s); tx.focus("meeting-title", false); }))
             .child(button::<A>("Meet now", "calendar-meet-now", |s, _| s.actions.meet_now("")));
     }
     let mut body = row()
@@ -336,13 +359,23 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
     {
         let url = url.clone();
         details = details.child(button::<A>("Join", "calendar-join", move |s, _| {
+            s.screens.event_menu = None;
             s.calls.link = TextEdit::new(&url);
+            s.calls.prejoin_open = true;
             s.screens.screen = Screen::Calls;
+        }));
+    }
+    if let Some(url) = &event.join_url {
+        let info = chatsvc::join_info_text(url, event.dial_in.as_ref());
+        details = details.child(button::<A>("Copy join info", "calendar-copy-info", move |s, tx| {
+            tx.copy(info.clone());
+            s.toast.show("Join info copied");
         }));
     }
     if let Some(thread) = &event.thread_id {
         let thread = thread.clone();
         details = details.child(button::<A>("Chat", "calendar-chat", move |s, tx| {
+            s.screens.event_menu = None;
             s.screens.screen = Screen::Chat;
             ui::open_chat(s, &thread, tx);
         }));
@@ -378,7 +411,8 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
         details = details.child(choices);
     }
     details = details.child(button::<A>("Close", "calendar-close", |s, _| {
-        s.screens.selected_event = None
+        s.screens.selected_event = None;
+        s.screens.event_menu = None;
     }));
     details
 }
@@ -549,6 +583,10 @@ fn activity_headline(item: &ActivityItem) -> (String, &'static str) {
 
 pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
     let mut layers = Vec::new();
+    if s.screens.screen == Screen::Calendar
+        && let Some(event) = s.screens.calendar.iter().find(|event| Some(&event.id) == s.screens.event_menu.as_ref()) {
+            layers.push(crate::shortcuts::card("calendar-event-menu", 340.0, calendar_details(s, event), |s: &mut UiState<A>| s.screens.event_menu = None));
+        }
     if s.screens.date_picker && s.screens.screen == Screen::Calendar { layers.push(crate::calendar_grid::date_picker(s)); }
     if s.screens.join_id_open {
         let input = |edit: &TextEdit, key: &str, label: &str| text_input(edit, style(14.0, 400.0)).key(key.to_owned()).w_full().label(label.to_owned())
@@ -664,7 +702,7 @@ mod tests {
             cancelled: false,
             all_day: true,
             organizer: None,
-            ical_uid: None,
+            ical_uid: None, dial_in: None,
             join_url: None,
             thread_id: None,
             response: chatsvc::ResponseType::NotResponded,
@@ -686,7 +724,7 @@ mod tests {
         state.screens.calendar = vec![CalendarRow {
             id: "cancelled".into(), subject: "Planning".into(),
             start: now, end: now + Duration::days(1), cancelled: true, all_day: true,
-            organizer: Some("Ada".into()), ical_uid: None,
+            organizer: Some("Ada".into()), ical_uid: None, dial_in: None,
             join_url: Some("https://teams.microsoft.com/meeting".into()), thread_id: None,
             response: chatsvc::ResponseType::NotResponded,
         }];
@@ -721,7 +759,7 @@ mod tests {
             cancelled: false,
             all_day: false,
             organizer: None,
-            ical_uid: None,
+            ical_uid: None, dial_in: None,
             join_url: None,
             thread_id: None,
             response: chatsvc::ResponseType::NotResponded,

@@ -97,6 +97,10 @@ pub fn newest_update<'a>(
     running_tag: &str,
     releases: &'a [Release],
 ) -> Option<(&'a Release, &'a ReleaseAsset)> {
+    newest_update_for(running_tag, releases, WINDOWS_ASSET_SUFFIX)
+}
+
+pub fn newest_update_for<'a>(running_tag: &str, releases: &'a [Release], asset_suffix: &str) -> Option<(&'a Release, &'a ReleaseAsset)> {
     let running = parse_version(running_tag)?;
     let follows_pre_releases = !running.pre_release.is_empty();
     releases
@@ -107,7 +111,7 @@ pub fn newest_update<'a>(
             let asset = release
                 .assets
                 .iter()
-                .find(|asset| asset.name.ends_with(WINDOWS_ASSET_SUFFIX))?;
+                .find(|asset| asset.name.ends_with(asset_suffix))?;
             Some((version, release, asset))
         })
         .max_by(|left, right| left.0.cmp(&right.0))
@@ -163,7 +167,11 @@ pub async fn fetch_update(
     running_tag: &'static str,
     paths: UpdatePaths,
 ) -> Result<Option<String>, String> {
-    crate::runtime::spawn(download_update(running_tag, paths))
+    fetch_update_from(running_tag, paths, RELEASES_URL, WINDOWS_ASSET_SUFFIX).await
+}
+
+pub async fn fetch_update_from(running_tag: &'static str, paths: UpdatePaths, releases_url: &'static str, asset_suffix: &'static str) -> Result<Option<String>, String> {
+    crate::runtime::spawn(download_update(running_tag, paths, releases_url, asset_suffix))
         .await
         .map_err(|_| "cancelled".to_owned())?
 }
@@ -172,6 +180,8 @@ pub async fn fetch_update(
 async fn download_update(
     running_tag: &'static str,
     paths: UpdatePaths,
+    releases_url: &'static str,
+    asset_suffix: &'static str,
 ) -> Result<Option<String>, String> {
     // GitHub's API refuses requests without a user agent.
     let client = reqwest::Client::builder()
@@ -189,9 +199,9 @@ async fn download_update(
             Ok::<_, String>(body.to_vec())
         }
     };
-    let releases: Vec<Release> = serde_json::from_slice(&get(RELEASES_URL.to_owned()).await?)
+    let releases: Vec<Release> = serde_json::from_slice(&get(releases_url.to_owned()).await?)
         .map_err(|error| error.to_string())?;
-    let Some((release, asset)) = newest_update(running_tag, &releases) else {
+    let Some((release, asset)) = newest_update_for(running_tag, &releases, asset_suffix) else {
         return Ok(None);
     };
     if already_staged(&paths, &release.tag_name) {

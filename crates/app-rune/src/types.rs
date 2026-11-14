@@ -66,6 +66,7 @@ pub struct MessageRow {
 /// The pinned message of a conversation, shown in the bar under its header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinnedRow {
+    pub message_id: String,
     pub conversation_id: String,
     pub sender: String,
     pub text: String,
@@ -108,6 +109,10 @@ pub struct ReplyReference {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Composed {
+    pub inline: Vec<(String, state::outgoing::InlineImage)>,
+    pub importance: store::MessageImportance,
+    pub subject: Option<String>,
+    pub banner: Option<teams_core::AnnouncementBanner>,
     pub text: String,
     pub mentions: Vec<teams_core::MentionInput>,
     pub gifs: Vec<chatsvc::Gif>,
@@ -117,6 +122,29 @@ pub struct Composed {
 /// What the bridge reports to the view. The view applies them in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Update {
+    PopOutChat(String),
+    MeetingCreated { request: u64, result: Result<(), String> },
+    InlineFile { target: SendTarget, marker: String, name: String, result: Result<Vec<u8>, String> },
+    ImageCopied(Result<Vec<u8>, String>),
+    Video { url: String, result: Result<crate::video::Source, String> },
+    LibraryRoot { channel: String, result: Result<teams_core::DriveEntry, String> },
+    LibraryRows { channel: String, folder: teams_core::DriveFolder, result: Result<Vec<teams_core::DriveEntry>, String> },
+    Translated { conversation: String, message: String, source: String, language: String, result: Result<String, String> },
+    LanguageStamps { conversation: String, result: Result<Vec<teams_core::MessageLanguage>, String> },
+    PostFollowed { conversation: String, root: String, followed: bool },
+    ReactionPeople { conversation: String, message: String, result: Result<Vec<teams_core::ReactionInfo>, String> },
+    CardAction { scope: crate::card_state::Scope, result: Result<teams_core::CardActionOutcome, String> },
+    Scheduled { target: SendTarget, text: String, result: Result<(), String> },
+    ScheduledList(Result<Vec<chatsvc::ScheduledDraft>, String>),
+    FollowedPresence(Vec<state::presence_follow::FollowedPerson>),
+    OpenDirect(String),
+    NotificationReply(String),
+    NotificationRead(String),
+    ChannelDescription { id: String, result: Result<String, String> },
+    ChannelChanged { id: String, deleted: bool, result: Result<(), String> },
+    ScheduledChanged { id: String, result: Result<Option<chatsvc::ScheduledDraft>, String> },
+    ComposeFailed { target: SendTarget, composed: Composed, files: Vec<teams_core::FileReference>, error: String },
+    Outbox(Vec<crate::outbox::Row>),
     NotificationPause(Option<chrono::DateTime<chrono::Utc>>),
     MeetingReady(Result<String, String>),
     CalendarRange { start: chrono::NaiveDate, end: chrono::NaiveDate, rows: Vec<crate::screens::CalendarRow> },
@@ -135,6 +163,7 @@ pub enum Update {
     People { query: String, rows: Vec<Person> },
     /// A chat made by `create_chat`; the view opens it.
     ChatCreated(String),
+    ChatCreateFailed(String),
     Audio { url: String, result: Result<Vec<u8>, String> },
     CallHistory(Result<Vec<chatsvc::CallLogEntry>, String>),
     /// Local and account settings for the settings panes, notifications and tray.
@@ -148,7 +177,7 @@ pub enum Update {
     /// The GPUI client's stored agent runs (`agent_panel::stored_runs`).
     AgentRuns(Vec<crate::agent_panel::Run>),
     Details(std::collections::HashMap<String, ChatDetails>),
-    Pinned { conversation_id: String, pin: Option<PinnedRow> },
+    Pinned { conversation_id: String, pins: Vec<PinnedRow> },
     /// Ids of the edited messages of the open conversation (`message_menu.rs`).
     Edited { conversation_id: String, ids: Vec<String> },
     Typing(chatsvc::TypingEvent),
@@ -220,6 +249,33 @@ pub enum Update {
 
 /// What the view asks of the bridge. Calls return at once; results arrive as `Update`s.
 pub trait Actions {
+    fn pop_out_chat(&self, _id: &str) {}
+    fn create_meeting(&self, _request: u64, _draft: app_backend::schedule::MeetingDraft) {}
+    fn load_inline_file(&self, _target: SendTarget, _marker: String, _path: std::path::PathBuf) {}
+    fn export_image(&self, _bytes: Vec<u8>, _rotation: u8, _destination: Option<std::path::PathBuf>) {}
+    fn load_video(&self, _url: &str) {}
+    fn library_root(&self, _channel: &str) {}
+    fn library_rows(&self, _channel: &str, _folder: teams_core::DriveFolder) {}
+    fn translate_message(&self, _conversation: &str, _message: &str, _source: String, _language: String) {}
+    fn load_language_stamps(&self, _conversation: &str) {}
+    fn load_post_followed(&self, _conversation: &str, _root: &str) {}
+    fn set_post_followed(&self, _conversation: &str, _root: &str, _followed: bool) {}
+    fn load_reaction_people(&self, _conversation: &str, _message: &str) {}
+    fn card_action(&self, _scope: crate::card_state::Scope, _action: teams_core::CardAction) {}
+    fn refresh_card(&self, _scope: crate::card_state::Scope, _action: teams_core::ExecuteAction, _trigger: teams_core::ExecuteTrigger) {}
+    fn schedule_message(&self, _target: SendTarget, _text: String, _at: chrono::DateTime<chrono::Utc>) {}
+    fn load_scheduled(&self) {}
+    fn save_composition(&self, id: &str, composed: &Composed, _files: &[teams_core::FileReference]) -> Result<(), String> {
+        self.save_draft(id, &composed.text); Ok(())
+    }
+    fn load_composition(&self, _id: &str) -> Option<(Composed, Vec<teams_core::FileReference>)> { None }
+    fn follow_presence(&self, _user_id: &str, _name: &str, _follow: bool) {}
+    fn load_channel_description(&self, _id: &str) {}
+    fn change_channel(&self, _id: &str, _edit: Option<(String, String)>) {}
+    fn change_scheduled(&self, _draft: chatsvc::ScheduledDraft, _text: Option<String>) {}
+    fn retry_outbox(&self, _id: &str) {}
+    fn save_message(&self, _conversation: &str, _message: &str, _root: Option<String>) {}
+    fn copy_message_link(&self, _conversation: &str, _message: &str) {}
     fn set_notification_pause(&self, _until: Option<chrono::DateTime<chrono::Utc>>) {}
     fn set_work_location(&self, _location: Option<(teams_core::WorkLocationKind, chrono::DateTime<chrono::Utc>)>) {}
     fn search_switcher(&self, _session: teams_core::substrate_search::SearchSession, _query: String) {}
@@ -245,7 +301,7 @@ pub trait Actions {
     fn leave_chat(&self, _id: &str) {}
     fn search_people(&self, _query: &str) {}
     /// One id makes a 1:1, several a group; the answer is `Update::ChatCreated`.
-    fn create_chat(&self, _user_ids: Vec<String>, _topic: Option<String>) {}
+    fn create_chat(&self, _user_ids: Vec<String>, _topic: Option<String>, _first_message: String) {}
     fn add_members(&self, _id: &str, _people: Vec<store::MemberRecord>) {}
     fn remove_member(&self, _id: &str, _user_id: &str) {}
     fn load_audio(&self, _url: &str) {}
@@ -254,6 +310,7 @@ pub trait Actions {
     /// Runs agent `id` on `prompt` in `working_dir` (`~` when empty); progress arrives as
     /// `Update::AgentProgress`, the end as `Update::AgentResult`.
     fn run_agent(&self, _id: &str, _prompt: &str, _working_dir: &str) {}
+    fn run_agent_action(&self, _id: &str, _prompt: &str, _working_dir: &str, _session: &str) {}
     fn stop_agent(&self) {}
     /// Saves the agents settings where GPUI keeps them (`agents::SETTINGS_KEY`).
     fn save_agent_settings(&self, _settings: agents::AgentSettings) {}
@@ -276,7 +333,7 @@ pub trait Actions {
     /// Edits the HTML body, retaining stored mention identities.
     fn edit_message(&self, _conversation_id: &str, _message_id: &str, _html: &str) {}
     fn pin_message(&self, _conversation_id: &str, _message_id: &str, _pin: bool) {}
-    fn forward_message(&self, _source_id: &str, _target_id: &str, _message_id: &str, _comment: &str) {}
+    fn forward_message(&self, _source_id: &str, _target_id: &str, _message_ids: &[String], _comment: &str) {}
     fn mark_unread_from(&self, _conversation_id: &str, _message_id: &str) {}
     fn set_appearance(&self, _settings: app_backend::appearance::AppearanceSettings) {}
     /// Saves one settings edit where GPUI keeps it; a failure republishes `Update::Preferences`.

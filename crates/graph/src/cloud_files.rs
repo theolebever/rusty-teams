@@ -87,7 +87,7 @@ fn shared_entry(item: &Value) -> Option<DriveEntry> {
 
 pub fn parse_shared(body: &Value) -> Vec<DriveEntry> {
     let mut shared: Vec<DriveEntry> = body["value"].as_array().into_iter().flatten().filter_map(shared_entry).collect();
-    shared.sort_by(|first, second| second.modified_at.cmp(&first.modified_at));
+    shared.sort_by_key(|entry| std::cmp::Reverse(entry.modified_at));
     shared.truncate(SHARED_SHOWN);
     shared
 }

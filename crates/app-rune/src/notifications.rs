@@ -8,16 +8,27 @@ pub const ACTIVATION_SCHEME: &str = "rusty-teams-rune";
 pub const ACTIVATION_PREFIX: &str = "rusty-teams-rune://notification/";
 
 pub fn clicked(click: &rune_notify::Click) -> Option<crate::types::Update> {
-    let id = click.get("conversation_id").filter(|id| !id.trim().is_empty())?;
-    Some(crate::types::Update::OpenChat(id.to_owned()))
+    if let Some(id) = click.get("conversation_id").filter(|id| !id.trim().is_empty()) {
+        Some(match click.get("action") {
+            Some("reply") => crate::types::Update::NotificationReply(id.into()),
+            Some("read") => crate::types::Update::NotificationRead(id.into()),
+            _ => crate::types::Update::OpenChat(id.into()),
+        })
+    } else {
+        click.get("user_id").filter(|id| !id.trim().is_empty()).map(|id| crate::types::Update::OpenDirect(id.to_owned()))
+    }
 }
 
 /// Drains the same pending open request used by a person's profile card.
 pub fn open_pending<A: crate::types::Actions>(s: &mut crate::ui::UiState<A>, tx: &mut rune::Tx) -> bool {
+    if !s.toast.reconnecting && !s.read_only {
+        for id in s.profile.read_requests.drain(..) { s.actions.set_chat_read(&id, true); }
+    }
     let Some(id) = s.profile.chat_request.take() else { return false };
     let screen = if s.channel(&id).is_some() { crate::screens::Screen::Teams } else { crate::screens::Screen::Chat };
     crate::screens::navigate(s, screen);
     crate::ui::open_chat(s, &id, tx);
+    if std::mem::take(&mut s.profile.reply_focus) { tx.focus("composer", false); }
     true
 }
 
@@ -92,11 +103,30 @@ pub struct Notifications {
     tracker: IncomingTracker,
     late: LateArrivals,
     throttle: rules::SoundThrottle,
+    urgent: state::notify::urgent_repeat::UrgentRepeats,
+    presence: std::collections::HashMap<String, state::data::PresenceKind>,
 }
 
 impl Notifications {
     pub fn new() -> Self {
-        Self { tracker: IncomingTracker::new(Utc::now()), late: LateArrivals::default(), throttle: rules::SoundThrottle::default() }
+        Self { tracker: IncomingTracker::new(Utc::now()), late: LateArrivals::default(), throttle: rules::SoundThrottle::default(), urgent: Default::default(), presence: Default::default() }
+    }
+
+    pub fn presence_changed(&mut self, engine: &Engine) {
+        use state::data::{Presence, PresenceKind as P};
+        use teams_core::Availability as A;
+        let followed = state::presence_follow::load_followed(engine.store());
+        self.presence.retain(|id, _| followed.iter().any(|person| person.user_id == *id));
+        let env = environment(engine, false, false);
+        let settings = settings::load(engine.store());
+        for person in followed {
+            let Some(status) = engine.presence(&person.user_id) else { continue };
+            let next = match status.availability { A::Available => P::Available, A::Busy => P::Busy, A::DoNotDisturb => P::DoNotDisturb, A::Away => P::Away, A::Offline => P::Offline, A::Unknown => P::Unknown };
+            let previous = self.presence.insert(person.user_id.clone(), next).map(Presence::Live).unwrap_or(Presence::Loading);
+            let Some(body) = state::presence_follow::status_change_text(previous, next) else { continue };
+            if settings.do_not_disturb || env.paused || env.system_quiet || env.own_do_not_disturb { continue; }
+            rune_notify::post(&rune_notify::Notification::new(format!("presence-{}", person.user_id), &person.name).body(body).info("user_id", &person.user_id));
+        }
     }
 
     pub fn mark_late(&mut self, conversation_id: &str, message_ids: Vec<String>) {
@@ -114,14 +144,42 @@ impl Notifications {
         for mut incoming in self.tracker.collect(store, &sidebar, me.as_deref(), &self.late, conversation_id) {
             incoming.chat.desktop = engine.chat_desktop_notifications(conversation_id);
             mentioned |= incoming.mentions_me && !environment.chat_in_foreground;
-            let decision = rules::decide(&settings, &incoming, environment);
-            if !decision.toast { continue; }
+            if !environment.chat_in_foreground { self.urgent.track(&incoming, Utc::now()); }
+            self.present(&incoming, &settings, environment);
+        }
+        mentioned
+    }
+
+    pub fn repeat_urgent(&mut self, engine: &Engine, foreground: Option<&str>, in_call: bool) {
+        if self.urgent.is_empty() { return; }
+        if let Some(id) = foreground { self.urgent.stop_conversation(id); }
+        // Keep pending repeats when the sidebar cannot be read; a transient failure is not a read receipt.
+        if let Ok(sidebar) = engine.sidebar() {
+            self.urgent.stop_read(|id| sidebar.chats.iter().find(|chat| chat.id == id)
+                .and_then(|chat| chat.last_read_at.filter(|_| !chat.unread)));
+        }
+        let mut settings = settings::load(engine.store());
+        settings.account = teams_core::stored_chat_settings(engine.store()).settings().notifications;
+        for mut incoming in self.urgent.due(Utc::now()) {
+            if let Ok(sidebar) = engine.sidebar()
+                && let Some(chat) = sidebar.chats.iter().find(|chat| chat.id == incoming.conversation_id) {
+                    incoming.muted = chat.muted;
+                }
+            incoming.chat.desktop = engine.chat_desktop_notifications(&incoming.conversation_id);
+            self.present(&incoming, &settings, environment(engine, false, in_call));
+        }
+    }
+
+    fn present(&mut self, incoming: &rules::Incoming, settings: &rules::Settings, environment: Environment) {
+            let conversation_id = &incoming.conversation_id;
+            let decision = rules::decide(settings, incoming, environment);
+            if !decision.toast { return; }
             if decision.sound && self.throttle.allow(conversation_id, std::time::Instant::now()) {
                 let sounds = &settings.sounds;
                 crate::sound::play(if decision.urgent_sound { sounds.urgent_sound_type } else { sounds.notification_sound_type }.file_name());
             }
-            if rules::should_flash(&settings, true, rune_notify::app_focused()) { crate::taskbar::flash(); }
-            let body = if !rules::shows_preview(&settings) {
+            if rules::should_flash(settings, true, rune_notify::app_focused()) { crate::taskbar::flash(); }
+            let body = if !rules::shows_preview(settings) {
                 String::new()
             } else {
                 match &incoming.preview {
@@ -130,12 +188,11 @@ impl Notifications {
                 }
             };
             let title = format!("{} · {}", incoming.sender_name, incoming.chat_title);
-            let notification = rune_notify::Notification::new(&incoming.message_id, title)
-                .body(body)
-                .info("conversation_id", conversation_id);
-            rune_notify::post(&notification);
-        }
-        mentioned
+            if let Err(error) = crate::desktop_toast::post(&incoming.message_id, conversation_id, &title, &body) {
+                app_backend::diagnostics::record(format!("Actionable notification unavailable: {error}"));
+                let notification = rune_notify::Notification::new(&incoming.message_id, title).body(body).info("conversation_id", conversation_id);
+                rune_notify::post(&notification);
+            }
     }
 }
 
@@ -152,6 +209,25 @@ mod tests {
     impl Actions for Fake {
         fn open(&self, id: &str) { self.0.borrow_mut().push(id.into()); }
         fn send(&self, _: SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+        fn set_chat_read(&self, id: &str, read: bool) { self.0.borrow_mut().push(format!("read {id} {read}")); }
+    }
+
+    #[test]
+    fn toast_read_waits_for_connection_and_reply_selects_the_conversation() {
+        let mut state = UiState::new(Fake::default());
+        state.toast.reconnecting = true;
+        let read = rune_notify::Click { id: "message".into(), info: vec![("conversation_id".into(), "chat".into()), ("action".into(), "read".into())] };
+        state.apply(clicked(&read).unwrap());
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env { scale: 1.0, system_dark: false });
+        rt.update(|s, tx| { open_pending(s, tx); });
+        assert!(rt.state.actions.0.borrow().is_empty());
+        rt.update(|s, tx| { s.toast.reconnecting = false; open_pending(s, tx); });
+        assert_eq!(*rt.state.actions.0.borrow(), ["read chat true"]);
+        assert!(rt.state.selected.is_none());
+        let reply = rune_notify::Click { id: "message".into(), info: vec![("conversation_id".into(), "chat".into()), ("action".into(), "reply".into())] };
+        rt.update(move |s, tx| { s.apply(clicked(&reply).unwrap()); assert!(open_pending(s, tx)); });
+        assert_eq!(rt.state.selected.as_deref(), Some("chat"));
+        assert!(!rt.state.profile.reply_focus);
     }
 
     #[test]

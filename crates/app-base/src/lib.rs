@@ -28,6 +28,7 @@ pub mod recap;
 pub mod release_feed;
 pub mod remote_image;
 pub mod schedule_time;
+pub mod syntax;
 pub mod single_instance;
 pub mod stickers;
 pub mod task_dialog;

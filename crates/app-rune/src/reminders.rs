@@ -28,9 +28,8 @@ pub fn poll<A: Actions>(s: &mut UiState<A>, now: DateTime<Utc>) -> bool {
         .map(|(thread_id, _)| thread_id.clone()).collect();
     let update = s.reminders.update(&s.screens.agenda, &live, now, true);
     let after = shown(s).cloned();
-    if update.changed && after.as_ref().map(|toast| toast.id) != before {
-        if let Some(toast) = &after { announce(s, toast, update.chime); }
-    }
+    if update.changed && after.as_ref().map(|toast| toast.id) != before
+        && let Some(toast) = &after { announce(s, toast, update.chime); }
     update.changed
 }
 

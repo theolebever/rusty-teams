@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde::Serialize;
@@ -10,6 +11,7 @@ use crate::profile::Environment;
 use crate::sessions::RunningSession;
 
 const SENDER: &str = "rusty-teams";
+#[cfg(unix)]
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const WSL_PROGRAM: &str = "wsl.exe";
 const SOCKET_RELAY_SCRIPT: &str = "import socket,sys;s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sys.argv[1]);s.sendall(sys.stdin.buffer.read());s.close()";

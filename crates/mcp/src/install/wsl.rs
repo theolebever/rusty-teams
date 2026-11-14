@@ -15,7 +15,7 @@ pub(super) fn decode_output(bytes: &[u8]) -> String {
             && bytes.len() >= 2;
     let text = if looks_utf16 {
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         String::from_utf16_lossy(&units)

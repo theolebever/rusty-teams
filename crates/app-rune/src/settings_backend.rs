@@ -41,9 +41,16 @@ pub fn load(store: &Store) -> Preferences {
         chat: teams_core::stored_chat_settings(store),
         reactions: teams_core::default_reactions(store),
         skin_tone: teams_core::skin_tone(store),
+        markdown: state::chat_settings_actions::stored_markdown_mode(store),
+        actions_on_right_click: state::chat_settings_actions::stored_actions_on_right_click(store),
         camera: load_device(store, Device::Camera),
         microphone: load_device(store, Device::Microphone),
         speaker: load_device(store, Device::Speaker),
+        translation: store.meta("translation_settings").ok().flatten()
+            .and_then(|json| serde_json::from_str(&json).ok()).and_then(|value| teams_core::parse_language_settings(&value).ok()),
+        languages: store.meta("translation_languages").ok().flatten()
+            .and_then(|json| serde_json::from_str::<Vec<(String, String)>>(&json).ok())
+            .unwrap_or_default().into_iter().map(|(code, name)| teams_core::Language { code, name }).collect(),
     }
 }
 
@@ -77,8 +84,29 @@ pub fn save(shared: &Arc<Shared>, change: Change) {
         }
         Change::OpenInBackground(enabled) => StartupSettings { auto_start: true, open_in_background: enabled }.save_background(store),
         Change::Chat(change) => account(shared, engine.map(|engine| async move { engine.save_chat_setting(change).await.map(drop) })),
+        Change::Translation(patch) => {
+            let Some(engine) = engine else { return republish(&shared, "not connected") };
+            app_backend::runtime::handle().spawn(async move {
+                if let Err(error) = engine.patch_language_settings(patch).await { return republish(&shared, error); }
+                refresh_translation(&shared, &engine).await;
+                shared.publish(Update::Preferences(Box::new(load(&shared.store))));
+            });
+        }
+        Change::MutedSection(enabled) => {
+            let Some(engine) = engine else { return republish(&shared, "not connected") };
+            app_backend::runtime::handle().spawn(async move {
+                if let Err(error) = engine.set_section_enabled(teams_core::ChatSection::Muted, enabled).await {
+                    shared.publish(Update::Status(format!("Setting not saved: {error}")));
+                }
+                shared.publish(Update::SectionSettings(teams_core::stored_section_settings(&shared.store)));
+            });
+        }
         Change::SkinTone(tone) => account(shared, engine.map(|engine| async move { engine.set_skin_tone(tone).await })),
         Change::DefaultReactions(ids) => account(shared, engine.map(|engine| async move { engine.set_default_reactions(&ids).await })),
+        Change::Markdown(on) | Change::ActionsOnRightClick(on) => {
+            let key = if matches!(change, Change::Markdown(_)) { state::chat_settings_actions::META_MARKDOWN_MODE } else { state::chat_settings_actions::META_ACTIONS_ON_RIGHT_CLICK };
+            if let Err(error) = store.set_meta(key, if on { "true" } else { "false" }) { republish(&shared, error); }
+        }
         Change::Device(device, choice) => {
             let value = match &choice { DeviceChoice::SystemDefault => DEFAULT_DEVICE, DeviceChoice::Device(key) => key };
             if let Err(error) = store.set_meta(device_key(device), value) { return republish(&shared, error); }
@@ -109,8 +137,22 @@ pub fn refresh(shared: Arc<Shared>, engine: Arc<Engine>) {
             }
             Err(error) => app_backend::diagnostics::record(format!("Rune: sound settings not read: {error}")),
         }
+        refresh_translation(&shared, &engine).await;
         shared.publish(Update::Preferences(Box::new(load(&shared.store))));
     });
+}
+
+async fn refresh_translation(shared: &Shared, engine: &Engine) {
+    match engine.language_settings().await {
+        Ok(settings) => {
+            if let Err(error) = shared.store.set_meta("translation_settings", &settings.to_account_value().to_string()) { republish(shared, error); }
+        }
+        Err(error) => shared.publish(Update::Status(format!("Translation settings unavailable: {error}"))),
+    }
+    if let Ok(languages) = engine.translation_languages("en").await {
+        let pairs: Vec<_> = languages.into_iter().map(|language| (language.code, language.name)).collect();
+        if let Err(error) = shared.store.set_meta("translation_languages", &serde_json::json!(pairs).to_string()) { republish(shared, error); }
+    }
 }
 
 /// Lists devices off the UI thread for the Devices pane.

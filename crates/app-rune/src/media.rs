@@ -164,6 +164,7 @@ pub fn watch<A: Actions + 'static>(s: &UiState<A>, owner: &str, images: Vec<Imag
 }
 
 pub struct MediaState {
+    pub video: crate::video::State,
     pub voice: crate::voice::State,
     cache: ImageCache,
     /// The app icon the title bar draws.
@@ -179,6 +180,8 @@ pub struct MediaState {
     pub errors: HashMap<String, String>,
     /// Cache key and alt text of the image open in the full-window viewer.
     pub viewer: Option<(String, String)>,
+    pub viewer_state: crate::image_viewer::State,
+    pub clipboard_image: Option<Vec<u8>>,
     attachments: HashMap<SendTarget, Vec<Attachment>>,
 }
 
@@ -188,6 +191,7 @@ impl Default for MediaState {
             if let Some(wake) = crate::WAKER.get() { wake(); }
         }));
         Self {
+            video: Default::default(),
             voice: Default::default(),
             logo: cache.load(app_backend::appearance::AppIcon::MicrosoftTeams.png()),
             cache,
@@ -201,6 +205,8 @@ impl Default for MediaState {
             evicted: HashSet::new(),
             errors: HashMap::new(),
             viewer: None,
+            viewer_state: Default::default(),
+            clipboard_image: None,
             attachments: HashMap::new(),
         }
     }
@@ -227,8 +233,8 @@ impl MediaState {
             let dimensions = ::image::ImageReader::new(std::io::Cursor::new(&bytes))
                 .with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok());
             // shortcut: animated costs cover the first frame, use decoder frame accounting for a hard animation budget.
-            let size = dimensions.map_or(bytes.len(), |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(16) / 3);
-            self.originals.remove(&key);
+            let size = dimensions.map_or(bytes.len(), |(w, h)| (w as usize).saturating_mul(h as usize).saturating_mul(16) / 3).saturating_add(bytes.len().saturating_mul(2));
+            if !key.starts_with("avatar:") { self.originals.insert(key.clone(), bytes.clone()); }
             (self.cache.load(bytes), size)
         };
         self.shown.get_mut().insert(key.clone(), Instant::now());
@@ -241,6 +247,8 @@ impl MediaState {
     pub fn image(&self, key: &str) -> Option<&Image> {
         self.images.get(key)
     }
+
+    pub fn image_bytes(&self, key: &str) -> Option<&[u8]> { self.originals.get(key).map(Vec::as_slice) }
 
     pub fn begin_render(&self) { self.render.set(self.render.get().wrapping_add(1)); }
 
@@ -256,6 +264,7 @@ impl MediaState {
     }
 
     pub fn open_viewer(&mut self, key: String, alt: String) {
+        self.viewer_state = Default::default();
         self.viewer_image = self.originals.get(&key).map(|bytes| self.cache.load(bytes.clone()));
         self.viewer = Some((key, alt));
     }
@@ -416,6 +425,9 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         body = body.child(watch(s, &format!("image-{message_id}-{index}"), vec![image.clone()], picture));
     }
     for (index, file) in content.files.iter().enumerate() {
+        if file.kind == teams_core::FileKind::Video && is_web_url(&file.open_url) {
+            body = body.child(crate::video::view(s, &file.open_url, &file.name, &format!("video-{message_id}-{index}")));
+        }
         let url = file.open_url.clone();
         let name = file.name.clone();
         let download_url = url.clone();
@@ -450,7 +462,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         body = body.child(crate::cards::banner(s, banner, &format!("banner-{message_id}")));
     }
     for (index, card) in rich.cards.iter().enumerate() {
-        body = body.child(crate::cards::view(s, card, &format!("card-{message_id}-{index}")));
+        body = body.child(crate::cards::view(s, card, &format!("card-{message_id}-{index}"), message_id));
     }
     if let Some(preview) = &rich.preview {
         body = body.child(crate::link_preview::view(s, preview, message_id));

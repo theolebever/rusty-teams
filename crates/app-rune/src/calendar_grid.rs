@@ -60,6 +60,7 @@ fn events(rows: &[CalendarRow]) -> Vec<chatsvc::CalendarEvent> {
 
 fn event<A: Actions + 'static>(s: &UiState<A>, e: &CalendarRow, date: chrono::NaiveDate) -> El {
     let selected = format!("{}-{date}", e.id);
+    let menu_id = e.id.clone();
     let title = if e.cancelled {
         format!("Canceled: {}", e.subject)
     } else {
@@ -76,6 +77,7 @@ fn event<A: Actions + 'static>(s: &UiState<A>, e: &CalendarRow, date: chrono::Na
         .hover(color("#DADDF5"))
         .clip_soft(0.0)
         .on_press(move |s: &mut UiState<A>| s.screens.selected_event = Some(selected.clone()))
+        .on_secondary_press(move |s: &mut UiState<A>, _, _| s.screens.event_menu = Some(menu_id.clone()))
         .child(
             text(title)
                 .font(style(12.0, 600.0))
@@ -278,7 +280,7 @@ mod tests {
                 cancelled: false,
                 all_day: false,
                 organizer: None,
-                ical_uid: None,
+                ical_uid: None, dial_in: None,
                 join_url: None,
                 thread_id: None,
                 response: chatsvc::ResponseType::Accepted,

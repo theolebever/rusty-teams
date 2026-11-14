@@ -18,13 +18,16 @@ pub struct Draft {
     pub query: TextEdit,
     /// Optional group name, asked once two or more people are picked.
     pub name: TextEdit,
+    pub first_message: TextEdit,
+    pub creating: bool,
+    pub error: Option<String>,
     pub chips: Vec<Person>,
     pub results: Vec<Person>,
 }
 
 impl Default for Draft {
     fn default() -> Self {
-        Draft { query: TextEdit::new(""), name: TextEdit::new(""), chips: Vec::new(), results: Vec::new() }
+        Draft { query: TextEdit::new(""), name: TextEdit::new(""), first_message: TextEdit::default(), creating: false, error: None, chips: Vec::new(), results: Vec::new() }
     }
 }
 
@@ -38,7 +41,7 @@ pub fn open<A: Actions>(s: &mut UiState<A>) {
 
 /// A directory answer is kept only by the drafts still holding the query it was asked for.
 pub fn apply_people<A: Actions>(s: &mut UiState<A>, query: &str, rows: Vec<Person>) {
-    for draft in [&mut s.chatlist.manage.new_chat, &mut s.chatlist.manage.add] {
+    for draft in [&mut s.chatlist.manage.new_chat, &mut s.chatlist.manage.add, &mut s.meeting.people] {
         if draft.query.text.trim() == query {
             draft.results = rows.clone();
         }
@@ -155,18 +158,22 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>) -> El {
         );
     }
     if !draft.chips.is_empty() {
-        body = body.child(crate::screens::button("Start chat", "new-chat-start", |s: &mut UiState<A>, tx| start(s, tx)));
+        body = body.child(text_input(&draft.first_message, ts(14.0, 400.0)).key("new-chat-first-message").label("First message")
+            .placeholder("First message (optional)", tone(p.text_muted)).w_full().on_edit(|s: &mut UiState<A>| &mut s.chatlist.manage.new_chat.first_message))
+            .children(draft.error.as_ref().map(|error| text(error.clone()).key("new-chat-error").font(ts(12.0, 400.0))))
+            .child(crate::screens::button(if draft.creating { "Creating…" } else { "Start chat" }, "new-chat-start", |s: &mut UiState<A>, tx| start(s, tx)));
     }
     body
 }
 
 /// Opens the existing 1:1 with the one person picked, else asks the bridge for a new chat.
 pub fn start<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
+    if s.read_only || s.chatlist.manage.new_chat.creating { return; }
     let draft = &s.chatlist.manage.new_chat;
     let ids: Vec<String> = draft.chips.iter().map(|chip| chip.user_id.clone()).collect();
     let topic = Some(draft.name.text.trim().to_owned()).filter(|name| !name.is_empty());
+    let first_message = draft.first_message.text.trim().to_owned();
     if ids.is_empty() { return; }
-    s.chatlist.manage.new_chat_open = false;
     if let [one] = ids.as_slice() {
         // A group of others is non-empty in `ChatDetails::group`; a 1:1 has none.
         let existing = s.chats.iter().find(|chat| {
@@ -176,9 +183,15 @@ pub fn start<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
         if let Some(chat) = existing {
             let id = chat.id.clone();
             open_chat(s, &id, tx);
+            s.chatlist.manage.new_chat_open = false;
+            if !first_message.is_empty() {
+                s.actions.send_composed(crate::types::SendTarget { conversation_id: id, thread_root_id: None, channel: false }, crate::types::Composed { text: first_message, ..Default::default() }, vec![]);
+            }
             tx.focus("composer", false);
             return;
         }
     }
-    s.actions.create_chat(ids, topic);
+    s.chatlist.manage.new_chat.creating = true;
+    s.chatlist.manage.new_chat.error = None;
+    s.actions.create_chat(ids, topic, first_message);
 }

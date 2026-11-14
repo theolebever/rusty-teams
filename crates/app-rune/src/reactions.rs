@@ -17,15 +17,20 @@ const WHITE: u32 = 0xFFFFFF;
 /// The message whose quick picker is open. One at a time, cleared when the chat changes.
 #[derive(Default)]
 pub struct Picker {
+    pub people: Option<(String, Result<Vec<teams_core::ReactionInfo>, String>)>,
     open: Option<String>,
+    all: bool,
 }
 
 impl Picker {
     pub fn close(&mut self) {
+        self.people = None;
         self.open = None;
+        self.all = false;
     }
 
     fn toggle(&mut self, message_id: &str) {
+        self.all = false;
         self.open = match self.open.take() {
             Some(open) if open == message_id => None,
             _ => Some(message_id.to_owned()),
@@ -33,13 +38,46 @@ impl Picker {
     }
 }
 
+pub fn people<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    let (_, people) = s.picker.people.as_ref()?;
+    let mut body = col().w_full().gap(8.0).padding(16.0).child(text("Reactions").font(ts(18.0, 600.0)));
+    match people {
+        Err(error) => body = body.child(text(error.clone()).font(ts(13.0, 400.0))),
+        Ok(people) if people.is_empty() => body = body.child(text("No reactions")),
+        Ok(people) => for person in people {
+            let glyph = chatsvc::reaction_glyph_for_key(&person.reaction_type).unwrap_or_else(|| person.reaction_type.clone());
+            let name = person.user_name.as_deref().or(person.user_id.as_deref()).unwrap_or("Unknown");
+            body = body.child(text(format!("{glyph}  {name}")).font(ts(14.0, 400.0)));
+        },
+    }
+    Some(crate::shortcuts::card("reaction-people-dialog", 420.0, body, |s: &mut UiState<A>| s.picker.people = None))
+}
+
+pub fn pick<A: Actions>(s: &mut UiState<A>, glyph: &str) -> bool {
+    if !s.picker.all { return false; }
+    if !s.read_only
+        && let (Some(conversation), Some(id)) = (&s.selected, &s.picker.open)
+        && let Some(message) = s.messages.iter().find(|message| &message.id == id)
+    {
+        s.actions.react(conversation, id, &wire(glyph), is_mine(message, glyph));
+    }
+    s.picker.close();
+    true
+}
+
 /// The Teams quick set (like, heart, laugh, surprised) as glyphs.
 pub fn quick_glyphs() -> Vec<String> {
-    // ponytail: the account's own default set (defaultMessageReactions) is not read; add when needed.
     teams_core::TEAMS_DEFAULT_REACTIONS
         .iter()
         .filter_map(|key| chatsvc::reaction_glyph_for_key(key))
         .collect()
+}
+
+fn preferred_glyphs<A: Actions>(s: &UiState<A>) -> Vec<String> {
+    let chosen: Vec<_> = s.settings.prefs.reactions.iter()
+        .filter_map(|key| chatsvc::reaction_glyph_for_key(key)).collect();
+    let glyphs = if chosen.is_empty() { quick_glyphs() } else { chosen };
+    glyphs.iter().map(|glyph| app_base::emoticons::with_tone(glyph, s.settings.prefs.skin_tone)).collect()
 }
 
 fn bare(glyph: &str) -> String {
@@ -76,7 +114,7 @@ pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> 
     let conversation_id = s.selected.clone().unwrap_or_default();
     let mut bar = row().key(format!("menu-react-{}", message.id)).h(36.0).px(3.0).gap(1.0).center_y().radius(10.0)
         .fill(rgb(palette.popup)).border(1.0, rgb(palette.border_strong));
-    for glyph in quick_glyphs() {
+    for glyph in preferred_glyphs(s) {
         let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
         let mine = is_mine(message, &glyph);
         let label = glyph.clone();
@@ -90,7 +128,15 @@ pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> 
         if mine { button = button.fill(rgb(palette.reaction_on_own)); }
         bar = bar.child(button);
     }
-    bar
+    let message_id = message.id.clone();
+    bar.child(crate::screens::button("+", "menu-reaction-more", move |s: &mut UiState<A>, tx| {
+        crate::message_menu::close(s);
+        s.picker.open = Some(message_id.clone());
+        s.picker.all = true;
+        s.emoji_open = false;
+        s.compose.emoji.query.clear();
+        tx.focus("emoji-search", false);
+    }))
 }
 
 /// The reaction pills of a message, plus the quick set when it is open. Read-only views show the
@@ -133,7 +179,7 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
     let mut column = col().gap(4.0).child(chips);
     if s.picker.open.as_deref() == Some(message.id.as_str()) {
         let mut quick = row().key(format!("quick-{}", message.id)).gap(4.0);
-        for glyph in quick_glyphs() {
+        for glyph in preferred_glyphs(s) {
             let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
             let mine = is_mine(message, &glyph);
             let label = glyph.clone();
@@ -152,6 +198,13 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
             );
         }
         column = column.child(quick);
+        column = column.child(crate::screens::button("More emoji", "reaction-more", |s: &mut UiState<A>, tx| {
+            s.picker.all = !s.picker.all;
+            s.emoji_open = false;
+            s.compose.emoji.query.clear();
+            if s.picker.all { tx.focus("emoji-search", false); }
+        }));
+        if s.picker.all { column = column.child(crate::emoji_picker::picker(s)); }
     }
     column
 }
@@ -231,6 +284,41 @@ mod tests {
             quick_glyphs(),
             ["\u{1F44D}", "\u{2764}", "\u{1F606}", "\u{1F62E}"]
         );
+    }
+
+    #[test]
+    fn the_full_picker_reacts_without_modifying_the_draft() {
+        let mut rt = rt();
+        show(&mut rt, vec![msg("m", vec![])]);
+        rt.update(|s, _| s.composer = TextEdit::new("keep this draft"));
+        click(&mut rt, "react-m");
+        click(&mut rt, "reaction-more");
+        rt.update(|s, _| s.compose.emoji.query = TextEdit::new("rocket"));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "emoji-🚀");
+        assert_eq!(calls(&rt), ["react a m 🚀 false"]);
+        assert_eq!(rt.state.composer.text, "keep this draft");
+        assert!(rt.find("quick-m").is_none());
+    }
+
+    #[test]
+    fn quick_reactions_use_the_account_choices_and_skin_tone() {
+        let mut s = UiState::new(Fake::default());
+        s.settings.prefs.reactions = vec!["like".into(), "clap".into()];
+        s.settings.prefs.skin_tone = 3;
+        assert_eq!(preferred_glyphs(&s), ["👍🏽", "👏🏽"]);
+    }
+
+    #[test]
+    fn the_context_menu_can_open_the_full_reaction_picker() {
+        let mut rt = rt();
+        show(&mut rt, vec![msg("m", vec![])]);
+        click(&mut rt, "more-m");
+        click(&mut rt, "menu-reaction-more");
+        assert!(rt.find("emoji-search").is_some());
+        assert!(rt.find("message-menu").is_none());
+        click(&mut rt, "emoji-😀");
+        assert_eq!(calls(&rt), ["react a m 😀 false"]);
     }
 
     #[test]

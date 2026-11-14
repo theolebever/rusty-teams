@@ -91,7 +91,10 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
     }
     bar = bar
         .child(icon_button("search-toggle", "search", s.search_open).on_press_tx(|s: &mut UiState<A>, _| toggle_search(s)))
-        .child(icon_button("side-panel", "right_panel_open", s.shared_open).on_press(|s: &mut UiState<A>| s.shared_open = !s.shared_open));
+        .child(icon_button("side-panel", "right_panel_open", s.details_open).label("Conversation details").on_press(|s: &mut UiState<A>| {
+            s.details_open = !s.details_open;
+            if s.details_open && let Some(id) = &s.selected && s.channel(id).is_some() { s.actions.load_channel_description(id); }
+        }));
 
     let mut block = col()
         .key("header-block")
@@ -112,10 +115,50 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
                 }
             })));
     }
-    if let Some(pinned) = s.pinned.as_ref().filter(|pinned| pinned.conversation_id == id) {
-        block = block.child(col().w_full().padding(PIN_INSET).child(pinned_bar(pinned)));
+    if let Some(pinned) = s.pinned.get(s.pin_index.min(s.pinned.len().saturating_sub(1))).filter(|pinned| pinned.conversation_id == id) {
+        let message_id = pinned.message_id.clone();
+        let mut bar = pinned_bar(pinned).on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| {
+            if s.messages.iter().any(|m| m.id == message_id) {
+                tx.scroll_center_in_instant("messages", format!("msg-{message_id}"));
+            } else {
+                s.status = "Load older messages to view this pinned message".into();
+            }
+        });
+        if s.pinned.len() > 1 {
+            bar = bar.child(crate::screens::button(&format!("{} / {} · Next", s.pin_index + 1, s.pinned.len()), "pin-next", |s: &mut UiState<A>, _| {
+                if !s.pinned.is_empty() { s.pin_index = (s.pin_index + 1) % s.pinned.len(); }
+            }));
+        }
+        block = block.child(col().w_full().padding(PIN_INSET).child(bar));
     }
     block
+}
+
+pub fn details<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
+    let mut body = col().key("conversation-details").w(320.0).h_full().padding(12.0).gap(10.0)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(text("Details").font(ts(16.0, 600.0)))
+        .child(crate::screens::button("Close", "details-close", |s: &mut UiState<A>, _| s.details_open = false));
+    if let Some(channel) = s.channel(id) {
+        body = body.child(text(channel.name.clone()).font(ts(14.0, 600.0)).wrap());
+        if let Some(team) = s.teams.iter().find(|team| team.channels.iter().any(|channel| channel.id == id)) {
+            body = body.child(text(team.name.clone()).font(ts(13.0, 400.0)).wrap());
+        }
+        body = body.child(text(if s.chatlist.channel_details.get(id).is_some_and(|details| details.private) { "Private channel" } else { "Standard channel" }).font(ts(12.0, 400.0)));
+        body = body.child(text(match s.channel_descriptions.get(id) {
+            Some(Ok(description)) if description.is_empty() => "No description".into(),
+            Some(Ok(description)) => description.clone(), Some(Err(error)) => error.clone(), None => "Loading description…".into(),
+        }).font(ts(13.0, 400.0)).wrap());
+    } else { body = body.child(crate::members::panel(s, id)); }
+    body = body.child(crate::screens::button("Shared files and links", "details-shared", |s: &mut UiState<A>, _| { s.shared_open = true; s.details_open = false; }));
+    for pin in &s.pinned {
+        let message_id = pin.message_id.clone();
+        body = body.child(crate::screens::button(&format!("Pinned · {}", pin.text), &format!("details-pin-{}", pin.message_id), move |s: &mut UiState<A>, tx| {
+            s.shared_open = false;
+            tx.scroll_center_in_instant("messages", format!("msg-{message_id}"));
+        }));
+    }
+    body
 }
 
 fn toggle_search<A: Actions>(s: &mut UiState<A>) {
@@ -310,9 +353,28 @@ mod tests {
 
     fn pin_c0(rt: &mut Runtime<UiState<Quiet>>) {
         rt.update(|s, _| {
-            s.pinned = Some(PinnedRow { conversation_id: "c0".into(), sender: "Mara".into(), text: "Rollout".into() });
+            s.pinned = vec![PinnedRow { message_id: "pin".into(), conversation_id: "c0".into(), sender: "Mara".into(), text: "Rollout".into() }];
         });
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn details_panel_and_multiple_pins_have_independent_controls() {
+        let mut rt = runtime("c0");
+        pin_c0(&mut rt);
+        rt.update(|s, _| s.pinned.push(PinnedRow { message_id: "second".into(), conversation_id: "c0".into(), sender: "Ada".into(), text: "Second".into() }));
+        rt.frame(0.1);
+        click(&mut rt, "pin-next");
+        assert_eq!(rt.state.pin_index, 1);
+        click(&mut rt, "pin-next");
+        assert_eq!(rt.state.pin_index, 0);
+        click(&mut rt, "side-panel");
+        assert!(rt.state.details_open);
+        assert!(!rt.state.shared_open);
+        assert!(rt.find("conversation-details").is_some());
+        click(&mut rt, "details-shared");
+        assert!(rt.state.shared_open);
+        assert!(!rt.state.details_open);
     }
 
     #[test]

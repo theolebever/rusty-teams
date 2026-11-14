@@ -44,6 +44,19 @@ impl CallWindow {
                 | Update::Details(_)
                 // The chat panel beside the call: its messages, pictures and unread state.
                 | Update::Messages { .. }
+                | Update::Outbox(_)
+                | Update::ComposeFailed { .. }
+                | Update::InlineFile { .. }
+                | Update::ImageCopied(_)
+                | Update::Translated { .. }
+                | Update::ReactionPeople { .. }
+                | Update::PostFollowed { .. }
+                | Update::CardAction { .. }
+                | Update::Scheduled { .. }
+                | Update::ScheduledList(_)
+                | Update::ScheduledChanged { .. }
+                | Update::Video { .. }
+                | Update::Pinned { .. }
                 | Update::Chats(_)
                 | Update::Image { .. }
                 | Update::ImagePreview { .. }

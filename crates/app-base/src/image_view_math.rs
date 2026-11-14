@@ -8,7 +8,7 @@ const WHEEL_SENSITIVITY: f32 = 0.01;
 const SCALE_EPSILON: f32 = 0.001;
 
 pub fn rotated_size(size: Pair, quarter_turns: u8) -> Pair {
-    if quarter_turns % 2 == 0 {
+    if quarter_turns.is_multiple_of(2) {
         size
     } else {
         (size.1, size.0)

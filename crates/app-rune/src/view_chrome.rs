@@ -170,7 +170,7 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         .gap(4.0)
         .items_center()
         .on_press_tx(move |s: &mut UiState<A>, tx| {
-            screens::navigate(s, screen);
+            screens::navigate_tab(s, screen, tx);
             if screen == Screen::Calendar { tx.scroll_to_instant("calendar-hours", 0.0, 7.0 * 48.0); }
         })
         .child(sym(glyph, RAIL_ICON).color(ink))

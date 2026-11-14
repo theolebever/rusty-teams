@@ -9,8 +9,8 @@ use crate::app_state::{AppEvent, AppState};
 use crate::rows::Receipt;
 use crate::runtime;
 
-const META_MARKDOWN_MODE: &str = "compose.markdown_mode";
-const META_ACTIONS_ON_RIGHT_CLICK: &str = "chat.message_actions_on_right_click";
+pub const META_MARKDOWN_MODE: &str = "compose.markdown_mode";
+pub const META_ACTIONS_ON_RIGHT_CLICK: &str = "chat.message_actions_on_right_click";
 
 pub fn stored_markdown_mode(store: &Store) -> bool {
     store.meta(META_MARKDOWN_MODE).ok().flatten().as_deref() == Some("true")

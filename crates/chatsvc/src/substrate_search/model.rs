@@ -232,28 +232,28 @@ pub fn parse_suggestions(body: &Value) -> Suggestions {
         match group.group_type.as_str() {
             "People" => suggestions
                 .people
-                .extend(items.filter_map(|item| person(item))),
+                .extend(items.filter_map(person)),
             "Chat" => suggestions
                 .chats
-                .extend(items.filter_map(|item| chat(item))),
+                .extend(items.filter_map(chat)),
             "Channel" => suggestions
                 .channels
-                .extend(items.filter_map(|item| channel(item))),
+                .extend(items.filter_map(channel)),
             "Team" => suggestions
                 .teams
-                .extend(items.filter_map(|item| team(item))),
+                .extend(items.filter_map(team)),
             "Message" => suggestions
                 .messages
                 .extend(items.filter_map(|item| message(item, None))),
             "File" => suggestions
                 .files
-                .extend(items.filter_map(|item| file(item))),
+                .extend(items.filter_map(file)),
             "Event" => suggestions
                 .events
-                .extend(items.filter_map(|item| event(item))),
+                .extend(items.filter_map(event)),
             "Text" => suggestions
                 .texts
-                .extend(items.filter_map(|item| text(item))),
+                .extend(items.filter_map(text)),
             _ => {}
         }
     }

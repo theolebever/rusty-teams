@@ -1,5 +1,5 @@
 //! Adaptive cards (text, facts, images, columns, open-URL buttons) and announcement banners.
-//! Inputs, charts, tables and the other element kinds are not drawn.
+//! Form inputs, client actions and server actions share their validation with GPUI.
 
 use app_backend::schemes::active_palette;
 use rune::*;
@@ -11,7 +11,7 @@ use teams_core::{
 
 use crate::avatar::rgb;
 use crate::link_preview::thumbnail;
-use crate::rich_text::{flatten, remote};
+use crate::rich_text::flatten;
 use crate::types::Actions;
 use crate::ui::{UiState, ts};
 
@@ -37,23 +37,49 @@ pub fn image_urls(card: &AdaptiveCard) -> Vec<String> {
     out
 }
 
-pub fn view<A: Actions + 'static>(s: &UiState<A>, card: &AdaptiveCard, key: &str) -> El {
+pub fn view<A: Actions + 'static>(s: &UiState<A>, card: &AdaptiveCard, key: &str, message: &str) -> El {
+    let scope = crate::card_state::Scope { conversation: s.selected.clone().unwrap_or_default(), message: message.into(), key: key.into(), task: false };
+    scoped(s, card, &scope)
+}
+
+pub fn scoped<A: Actions + 'static>(s: &UiState<A>, card: &AdaptiveCard, scope: &crate::card_state::Scope) -> El {
+    let key = &scope.key;
+    let card = s.cards.replacements.get(scope).unwrap_or(card);
     let palette = active_palette();
     let mut body = col().key(key.to_owned()).w_full().max_w(480.0).padding(12.0).gap(8.0).radius(6.0)
         .border(1.0, rgb(palette.border)).fill(rgb(palette.surface_raised));
-    body = body.children(items(s, &card.items));
-    let buttons: Vec<El> = card.actions.iter().enumerate().filter_map(|(index, action)| button::<A>(key, index, action)).collect();
+    body = body.children(items(s, &card.items, scope, card, &mut card.actions.len()));
+    let buttons: Vec<El> = card.actions.iter().enumerate().filter_map(|(index, action)| button::<A>(s, scope, card, index, action)).collect();
     if !buttons.is_empty() {
         body = body.child(row().w_full().gap(8.0).children(buttons));
+    }
+    if let Some(error) = s.cards.errors.get(scope) { body = body.child(text(error.clone()).key(format!("{}-error", scope.key)).font(ts(12.0, 400.0)).wrap()); }
+    if let Some(refresh) = &card.refresh {
+        let automatic = refresh.runs_automatically(s.details.get(&scope.conversation).map(|details| details.members.len()), s.own.me.as_ref().map(|me| me.user_id.as_str()));
+        let (auto_scope, auto_action) = (scope.clone(), refresh.action.clone());
+        body = body.child(el().key(format!("{}-refresh-watch", key)).size(1.0, 1.0).on_visible(move |s: &mut UiState<A>, visible, _| {
+            if visible && automatic && !s.read_only && !s.cards.busy.contains(&auto_scope) && s.cards.refreshed.insert(auto_scope.clone()) {
+                s.cards.busy.insert(auto_scope.clone());
+                s.actions.refresh_card(auto_scope.clone(), auto_action.clone(), teams_core::ExecuteTrigger::Automatic);
+            }
+        }));
+        let (scope, action) = (scope.clone(), refresh.action.clone());
+        body = body.child(crate::screens::button("Refresh", &format!("{}-refresh", key), move |s: &mut UiState<A>, _| {
+            if !s.read_only && !s.cards.busy.contains(&scope) { s.cards.busy.insert(scope.clone()); s.actions.refresh_card(scope.clone(), action.clone(), teams_core::ExecuteTrigger::Manual); }
+        }));
     }
     crate::media::watch(s, key, image_urls(card).iter().map(|url| crate::rich_text::remote(url)).collect(), body)
 }
 
-fn items<A: Actions + 'static>(s: &UiState<A>, list: &[CardItem]) -> Vec<El> {
-    list.iter().filter(|item| item.visible).filter_map(|item| element(s, &item.element)).collect()
+fn items<A: Actions + 'static>(s: &UiState<A>, list: &[CardItem], scope: &crate::card_state::Scope, card: &AdaptiveCard, next_action: &mut usize) -> Vec<El> {
+    list.iter().filter_map(|item| {
+        // Traverse hidden elements too so toggling visibility cannot change action identities.
+        let content = element(s, &item.element, scope, card, next_action);
+        if item.id.as_ref().and_then(|id| s.cards.visibility.get(&(scope.clone(), id.clone()))).copied().unwrap_or(item.visible) { content } else { None }
+    }).collect()
 }
 
-fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement) -> Option<El> {
+fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement, scope: &crate::card_state::Scope, card: &AdaptiveCard, next_action: &mut usize) -> Option<El> {
     let palette = active_palette();
     match element {
         CardElement::Text(block) => {
@@ -86,7 +112,7 @@ fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement) -> Optio
                 .child(value.element::<A>(13.0, rgb(palette.foreground)).grow(1.0).min_w(0.0))
         }))),
         CardElement::Columns { columns, .. } => Some(row().w_full().gap(8.0).children(columns.iter().map(|column| {
-            let cell = col().min_w(0.0).gap(6.0).children(items(s, &column.items));
+            let cell = col().min_w(0.0).gap(6.0).children(items(s, &column.items, scope, card, next_action));
             match column.width {
                 ColumnWidth::Pixels(width) => cell.w(width),
                 ColumnWidth::Weighted(weight) => cell.grow(weight.max(0.1)),
@@ -95,7 +121,7 @@ fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement) -> Optio
             }
         }))),
         CardElement::Container { layout, items: inner, .. } => {
-            let mut container = col().w_full().gap(6.0).children(items(s, inner));
+            let mut container = col().w_full().gap(6.0).children(items(s, inner, scope, card, next_action));
             let fill = match layout.style {
                 ContainerStyle::Default => None,
                 ContainerStyle::Emphasis => Some(palette.row_hover),
@@ -107,19 +133,28 @@ fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement) -> Optio
             if let Some(fill) = fill { container = container.padding(8.0).radius(4.0).fill(rgb(fill).alpha(0.35)); }
             Some(container)
         }
+        CardElement::Input(input) => Some(crate::card_state::input(s, scope, input)),
+        CardElement::Actions(actions) => Some(col().w_full().gap(6.0).children(actions.iter().filter_map(|action| {
+            let index = *next_action;
+            *next_action += 1;
+            button(s, scope, card, index, action)
+        }))),
         _ => None,
     }
 }
 
-fn button<A: Actions + 'static>(key: &str, index: usize, action: &CardAction) -> Option<El> {
-    let CardActionKind::OpenUrl(url) = &action.kind else { return None };
-    if !action.visible || !action.enabled || !crate::rich_text::is_openable(url) { return None; }
-    let palette = active_palette();
-    let url = url.clone();
-    Some(row().key(format!("{key}-action-{index}")).px(12.0).h(30.0).center_y().radius(4.0)
-        .border(1.0, rgb(palette.accent)).hover(rgb(palette.row_hover)).label(action.title.clone())
-        .on_press_tx(move |s: &mut UiState<A>, tx| crate::rich_text::open(s, tx, &url))
-        .child(text(action.title.clone()).font(ts(13.0, 600.0)).color(rgb(palette.accent))))
+fn button<A: Actions + 'static>(s: &UiState<A>, scope: &crate::card_state::Scope, card: &AdaptiveCard, index: usize, action: &CardAction) -> Option<El> {
+    if !action.visible { return None; }
+    let (scope_copy, card_copy, action_copy) = (scope.clone(), card.clone(), action.clone());
+    let mut button = crate::screens::button(&action.title, &format!("{}-action-{index}", scope.key), move |s: &mut UiState<A>, tx| {
+        crate::card_state::run(s, scope_copy.clone(), &card_copy, index, action_copy.clone(), tx);
+    }).opacity(if action.enabled && !s.cards.busy.contains(scope) { 1.0 } else { 0.4 });
+    if let CardActionKind::ShowCard(child) = &action.kind
+        && s.cards.shown.contains(&(scope.clone(), index)) {
+            let child_scope = crate::card_state::Scope { key: format!("{}-show-{index}", scope.key), ..scope.clone() };
+            button = col().w_full().child(button).child(scoped(s, child, &child_scope));
+        }
+    Some(button)
 }
 
 /// The coloured headline a channel announcement opens with.
@@ -146,7 +181,26 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>, banner: &AnnouncementBanner,
 
 #[cfg(test)]
 mod tests {
+    use crate::rich_text::remote;
     use super::*;
+    #[derive(Default)]
+    struct Fake;
+    impl Actions for Fake {
+        fn open(&self, _: &str) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+    }
+
+    #[test]
+    fn action_sets_have_distinct_stable_keys_even_when_hidden() {
+        let mut rt = Runtime::new(UiState::new(Fake), |s, _| {
+            let card = AdaptiveCard::parse(r#"{"type":"AdaptiveCard","body":[{"type":"ActionSet","id":"hidden","isVisible":false,"actions":[{"type":"Action.ShowCard","title":"Hidden","card":{"type":"AdaptiveCard"}}]},{"type":"Container","items":[{"type":"ActionSet","actions":[{"type":"Action.ShowCard","title":"Nested","card":{"type":"AdaptiveCard"}}]}]}],"actions":[{"type":"Action.ShowCard","title":"Root","card":{"type":"AdaptiveCard"}}]}"#).unwrap();
+            view(s, &card, "test-card", "message")
+        }, (600.0, 500.0), Env { scale: 1.0, system_dark: false });
+        rt.frame(0.0);
+        assert!(rt.find("test-card-action-0").is_some());
+        assert!(rt.find("test-card-action-1").is_none());
+        assert!(rt.find("test-card-action-2").is_some());
+    }
 
     #[test]
     fn card_images_are_collected_from_nested_items() {

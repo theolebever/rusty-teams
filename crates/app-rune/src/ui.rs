@@ -35,10 +35,18 @@ pub struct UiState<A: Actions> {
     pub actions: A,
     pub read_only: bool,
     pub(crate) window_focused: bool,
+    pub(crate) starting: bool,
+    pub(crate) demo_ready_at: Option<std::time::Instant>,
     pub screens: crate::screens::ScreenState,
     pub calls: crate::calls::CallView,
     pub(crate) call_window: Option<crate::call_window::CallWindow>,
+    pub(crate) detached_chat: bool,
+    pub(crate) chat_windows: std::collections::HashMap<String, rune::AppHandle<UiState<crate::bridge::Bridge>>>,
     pub media: crate::media::MediaState,
+    pub(crate) cards: crate::card_state::State,
+    pub(crate) translation: crate::translation::State,
+    pub(crate) library: crate::library::State,
+    pub(crate) meeting: crate::meeting_form::State,
     pub appearance: app_backend::appearance::AppearanceSettings,
     pub status: String,
     /// Own presence, status menu and status dialog (`status_menu.rs`).
@@ -52,6 +60,8 @@ pub struct UiState<A: Actions> {
     pub chatlist: crate::view_chatlist::ChatListState,
     /// Messages of `selected`, oldest first.
     pub messages: Vec<MessageRow>,
+    pub(crate) outbox: Vec<crate::outbox::Row>,
+    pub(crate) schedule: crate::schedule::State,
     pub(crate) receipts: HashMap<String, teams_core::ReceiptState>,
     pub(crate) first_unread: Option<String>,
     pub(crate) deleted_here: std::collections::HashSet<(String, String)>,
@@ -62,12 +72,15 @@ pub struct UiState<A: Actions> {
     pub(crate) search_open: bool,
     pub(crate) search_results: Option<Vec<MessageRow>>,
     /// Pinned message of the open conversation, if any (`view_header.rs`).
-    pub pinned: Option<crate::types::PinnedRow>,
+    pub pinned: Vec<crate::types::PinnedRow>,
+    pub pin_index: usize,
     /// Member counts by conversation id; the header shows the count when one is known.
     pub member_counts: HashMap<String, usize>,
     pub details: HashMap<String, crate::types::ChatDetails>,
     pub typing: HashMap<(String, String), chatsvc::TypingEvent>,
     pub shared_open: bool,
+    pub details_open: bool,
+    pub channel_descriptions: HashMap<String, Result<String, String>>,
     pub rename_open: bool,
     pub rename_title: TextEdit,
     pub format_open: bool,
@@ -82,6 +95,7 @@ pub struct UiState<A: Actions> {
     pub tray: crate::tray::State,
     /// The launch option of the first process, run at the first poll (`arguments::Command`).
     pub(crate) launch_command: Option<crate::arguments::Command>,
+    pub(crate) launch_reply_last: Option<String>,
     /// The incoming call ringtone, stopped when dropped (`notifications::ring`).
     pub(crate) ringtone: Option<crate::sound::Handle>,
     /// Whether a call rang at the last frame, so a silent ring flashes once (`notifications::ring`).
@@ -104,6 +118,7 @@ pub struct UiState<A: Actions> {
     /// `poll` empties it, so only the commit that adds them animates.
     pub(crate) appearing: Vec<String>,
     drafts: HashMap<SendTarget, String>,
+    compose_drafts: HashMap<SendTarget, crate::view_composer::Compose>,
     reply_drafts: HashMap<SendTarget, crate::types::ReplyReference>,
     send_errors: HashMap<SendTarget, String>,
 }
@@ -119,6 +134,7 @@ impl<A: Actions> UiState<A> {
             live_meetings: HashMap::new(),
             tray: Default::default(),
             launch_command: None,
+            launch_reply_last: None,
             ringtone: None,
             was_ringing: false,
             call_tone: None,
@@ -127,6 +143,8 @@ impl<A: Actions> UiState<A> {
             details: HashMap::new(),
             typing: HashMap::new(),
             shared_open: false,
+            details_open: false,
+            channel_descriptions: HashMap::new(),
             rename_open: false,
             rename_title: TextEdit::default(),
             format_open: false,
@@ -134,10 +152,18 @@ impl<A: Actions> UiState<A> {
             compose: Default::default(),
             read_only,
             window_focused: false,
+            starting: false,
+            demo_ready_at: None,
             screens: crate::screens::ScreenState::default(),
             calls: crate::calls::CallView::default(),
             call_window: None,
+            detached_chat: false,
+            chat_windows: Default::default(),
             media: crate::media::MediaState::default(),
+            cards: Default::default(),
+            translation: Default::default(),
+            library: Default::default(),
+            meeting: Default::default(),
             appearance: Default::default(),
             status: String::new(),
             own: Default::default(),
@@ -149,6 +175,8 @@ impl<A: Actions> UiState<A> {
             expanded_teams: Vec::new(),
             chatlist: Default::default(),
             messages: Vec::new(),
+            outbox: Vec::new(),
+            schedule: Default::default(),
             receipts: HashMap::new(),
             first_unread: None,
             deleted_here: Default::default(),
@@ -157,7 +185,8 @@ impl<A: Actions> UiState<A> {
             search: TextEdit::new(""),
             search_open: false,
             search_results: None,
-            pinned: None,
+            pinned: Vec::new(),
+            pin_index: 0,
             member_counts: HashMap::new(),
             global_search: Default::default(),
             thread_root_id: None,
@@ -167,6 +196,7 @@ impl<A: Actions> UiState<A> {
             more_open: None,
             menu: Default::default(),
             drafts: HashMap::new(),
+            compose_drafts: HashMap::new(),
             reply_drafts: HashMap::new(),
             send_errors: HashMap::new(),
             appearing: Vec::new(),
@@ -195,6 +225,114 @@ impl<A: Actions> UiState<A> {
 
     pub fn apply(&mut self, update: Update) {
         match update {
+            Update::PopOutChat(_) => {},
+            Update::MeetingCreated { request, result } => {
+                if request == self.meeting.request {
+                    self.meeting.sending = false;
+                    match &result { Ok(()) => self.meeting.open = false, Err(error) => self.meeting.error = Some(error.clone()) }
+                }
+                if result.is_ok() { self.toast.show("Meeting created"); crate::screens::reload_calendar(self); }
+            }
+            Update::InlineFile { target, marker, name, result } => {
+                if active_target(self).as_ref() == Some(&target) {
+                    self.compose.inline_loading.remove(&marker);
+                    if self.composer.text.contains(&marker) {
+                        let result = result.and_then(|bytes| crate::inline_compose::insert(self, marker.clone(), bytes, name, false));
+                        if let Err(error) = result { self.composer = TextEdit::new(self.composer.text.replace(&marker, "")); self.toast.show(error); }
+                    }
+                } else if let Some(compose) = self.compose_drafts.get_mut(&target) {
+                    compose.inline_loading.remove(&marker);
+                    if self.drafts.get(&target).is_some_and(|text| text.contains(&marker)) {
+                        let result = result.and_then(|bytes| crate::inline_compose::image(bytes, name));
+                        match result {
+                            Ok(image) if compose.inline.iter().map(|(_, image)| image.image.bytes.len()).sum::<usize>().saturating_add(image.image.bytes.len()) <= crate::inline_compose::MAX_DRAFT_BYTES => compose.inline.push((marker, image)),
+                            Ok(_) => {
+                                if let Some(text) = self.drafts.get_mut(&target) { *text = text.replace(&marker, ""); }
+                                self.toast.show("A draft can contain up to 64 MiB of inline images");
+                            }
+                            Err(error) => {
+                                if let Some(text) = self.drafts.get_mut(&target) { *text = text.replace(&marker, ""); }
+                                self.toast.show(error);
+                            }
+                        }
+                    }
+                }
+            }
+            Update::ImageCopied(result) => match result { Ok(bytes) => self.media.clipboard_image = Some(bytes), Err(error) => self.toast.show(error) },
+            Update::Video { url, result } => self.media.video.loaded(url, result),
+            Update::LibraryRoot { channel, result } => crate::library::root(self, channel, result),
+            Update::LibraryRows { channel, folder, result } => crate::library::loaded(self, channel, folder, result),
+            Update::Translated { conversation, message, source, language, result } => crate::translation::apply(self, conversation, message, source, language, result),
+            Update::LanguageStamps { conversation, result } => {
+                if self.selected.as_deref() == Some(&conversation) {
+                    match result {
+                        Ok(rows) => self.translation.stamps = rows.into_iter().map(|row| (row.message_id, row.stamp)).collect(),
+                        Err(error) => self.toast.show(format!("Translation languages unavailable: {error}")),
+                    }
+                }
+            }
+            Update::PostFollowed { conversation, root, followed } => {
+                if self.selected.as_deref() == Some(&conversation) { self.menu.followed.insert(root, followed); }
+            }
+            Update::ReactionPeople { conversation, message, result } => {
+                if self.selected.as_deref() == Some(&conversation) && self.picker.people.as_ref().is_some_and(|(id, _)| id == &message) { self.picker.people = Some((message, result)); }
+            }
+            Update::CardAction { scope, result } => crate::card_state::apply(self, scope, result),
+            Update::ScheduledList(result) => {
+                self.schedule.loading = false;
+                match result { Ok(rows) => self.schedule.rows = rows, Err(error) => self.schedule.error = Some(error) }
+            }
+            Update::FollowedPresence(people) => self.profile.followed = people,
+            Update::OpenDirect(id) => self.actions.open_direct(&id),
+            Update::NotificationReply(id) => { self.profile.chat_request = Some(id); self.profile.reply_focus = true; }
+            Update::NotificationRead(id) => {
+                if !self.profile.read_requests.contains(&id) { self.profile.read_requests.push(id); }
+            }
+            Update::ChannelDescription { id, result } => {
+                self.channel_descriptions.insert(id.clone(), result.clone());
+                crate::team_menu::description(self, &id, result);
+            }
+            Update::ChannelChanged { id, deleted, result } => crate::team_menu::changed(self, &id, deleted, result),
+            Update::ScheduledChanged { id, result } => crate::schedule::changed(self, &id, result),
+            Update::Scheduled { target, text, result } => {
+                if self.schedule.pending.as_ref() == Some(&(target.clone(), text.clone())) {
+                    self.schedule.pending = None;
+                    match result {
+                        Ok(()) => {
+                            let mut cleared = false;
+                            if active_target(self).as_ref() == Some(&target) && self.composer.text == text
+                                && self.compose.gifs.is_empty() && self.compose.reply.is_none()
+                                && self.compose.inline.is_empty() && self.compose.inline_loading.is_empty()
+                                && self.compose.subject.text.is_empty() && self.compose.headline.text.is_empty()
+                                && self.media.files(&target).is_empty() && !self.media.is_uploading(&target) {
+                                self.composer.clear();
+                                self.compose = Default::default();
+                                cleared = true;
+                            } else if self.drafts.get(&target) == Some(&text) {
+                                self.drafts.remove(&target);
+                                self.compose_drafts.remove(&target);
+                                cleared = true;
+                            }
+                            if cleared && target.thread_root_id.is_none() { self.actions.save_draft(&target.conversation_id, ""); }
+                            self.toast.show("Message scheduled");
+                            self.schedule.open = false;
+                        }
+                        Err(error) => self.schedule.error = Some(error),
+                    }
+                }
+            }
+            Update::ComposeFailed { target, composed, files, error } => {
+                self.apply(Update::SendFailed { target: target.clone(), text: composed.text.clone(), reply: composed.reply.clone(), files, error });
+                let compose = if active_target(self).as_ref() == Some(&target) { &mut self.compose }
+                    else { self.compose_drafts.entry(target).or_default() };
+                compose.mentions.chosen.extend(composed.mentions);
+                compose.gifs.splice(0..0, composed.gifs);
+                compose.inline.extend(composed.inline);
+                if compose.importance == store::MessageImportance::Normal { compose.importance = composed.importance; }
+                if let Some(subject) = composed.subject { compose.subject = TextEdit::new(join_draft(&subject, &compose.subject.text)); }
+                if let Some(banner) = composed.banner { compose.headline = TextEdit::new(join_draft(&banner.title, &compose.headline.text)); }
+            }
+            Update::Outbox(rows) => self.outbox = rows,
             Update::EditFinished { conversation_id, message_id, result } => {
                 if self.selected.as_deref() == Some(&conversation_id) && self.menu.edit_id.as_deref() == Some(&message_id) {
                     self.menu.edit_saving = false;
@@ -214,7 +352,7 @@ impl<A: Actions> UiState<A> {
                 if active { self.menu.forward_sending = false; }
                 match result {
                     Ok(()) => {
-                        if active { crate::message_menu::close(self); }
+                        if active { self.menu.selected.clear(); crate::message_menu::close(self); }
                         self.toast.show("Message forwarded");
                     }
                     Err(error) => {
@@ -241,14 +379,14 @@ impl<A: Actions> UiState<A> {
             }
             Update::AgentSettings(settings) => self.agent.settings = settings,
             Update::AgentResult(result) => self.agent.finish(result),
-            Update::AgentProgress(step) => self.agent.step(step),
+            Update::AgentProgress(step) => { self.agent.running = true; self.agent.step(step); }
             Update::AgentRuns(runs) => self.agent.runs.extend(runs),
             Update::Details(details) => {
                 for (id, chat) in &details { self.member_counts.insert(id.clone(), chat.members.len()); }
                 self.details = details;
             }
-            Update::Pinned { conversation_id, pin } => {
-                if self.selected.as_deref() == Some(&conversation_id) { self.pinned = pin; }
+            Update::Pinned { conversation_id, pins } => {
+                if self.selected.as_deref() == Some(&conversation_id) { self.pinned = pins; self.pin_index = 0; }
             }
             Update::Edited { conversation_id, ids } => {
                 if self.selected.as_deref() == Some(&conversation_id) { self.menu.edited = ids.into_iter().collect(); }
@@ -258,13 +396,21 @@ impl<A: Actions> UiState<A> {
                 if event.active { self.typing.insert(key, event); } else { self.typing.remove(&key); }
             }
             Update::People { query, rows } => crate::new_chat::apply_people(self, &query, rows),
-            Update::ChatCreated(id) => self.chatlist.manage.pending_open = Some(id),
+            Update::ChatCreated(id) => {
+                self.chatlist.manage.new_chat.creating = false;
+                self.chatlist.manage.new_chat_open = false;
+                self.chatlist.manage.pending_open = Some(id);
+            }
+            Update::ChatCreateFailed(error) => {
+                self.chatlist.manage.new_chat.creating = false;
+                self.chatlist.manage.new_chat.error = Some(error);
+            }
             Update::Status(s) => { self.toast.observe(&s); self.status = s; }
             Update::Me { user_id, name, email } => self.own.me = Some(crate::status_menu::Me { user_id, name, email }),
             Update::OwnStatus(status) => self.own.status = status,
             Update::Profile { user_id, result } => self.profile.loaded(user_id, result),
             Update::OpenChat(id) => self.profile.chat_request = Some(id),
-            Update::Chats(rows) => self.chats = rows,
+            Update::Chats(rows) => { self.chats = rows; self.starting = false; }
             Update::Folders(folders) => self.chatlist.folders = folders,
             Update::Favorites(ids) => self.chatlist.favorites = ids,
             Update::ChatPaging { more, loading } => { self.chatlist.has_older = more; self.chatlist.loading_older = loading; }
@@ -282,6 +428,10 @@ impl<A: Actions> UiState<A> {
             Update::Appearance(settings) => self.appearance = settings,
             Update::Mentioned(id) => { self.tray.mentions.insert(id); }
             Update::Preferences(prefs) => {
+                if self.settings.prefs.translation.as_ref().map(|settings| &settings.target_locale) != prefs.translation.as_ref().map(|settings| &settings.target_locale) {
+                    let target = prefs.translation.as_ref().map(|settings| teams_core::default_target(settings.target_locale.as_deref(), settings.display_locale.as_deref(), &prefs.languages)).unwrap_or_else(|| "en".into());
+                    self.translation.target_changed(&target);
+                }
                 self.calls.selected_camera = prefs.camera.clone();
                 self.calls.selected_input = prefs.microphone.clone();
                 self.calls.selected_output = prefs.speaker.clone();
@@ -354,6 +504,7 @@ impl<A: Actions> UiState<A> {
                     let rows = crate::teams::group_replies(rows);
                     self.appearing = arrived(&self.messages, &rows);
                     self.messages = rows;
+                    if self.launch_reply_last.as_deref() == Some(&conversation_id) { self.launch_reply_last = None; crate::arguments::reply_last(self); }
                 }
             }
             Update::Gifs { query, result } => self.compose.gif.loaded(query, result),
@@ -411,22 +562,28 @@ fn arrived(old: &[MessageRow], new: &[MessageRow]) -> Vec<String> {
 }
 
 pub(crate) fn open_chat<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
+    s.launch_reply_last = None;
     s.chatlist.quick_view = None;
     save_draft(s);
     s.selected = Some(id.to_owned());
     s.shared_open = false;
+    s.details_open = false;
+    s.library = Default::default();
     s.rename_open = false;
-    s.pinned = None;
+    s.pinned.clear();
+    s.pin_index = 0;
     s.thread_root_id = None;
     s.expanded_posts.clear();
     s.picker.close();
     s.confirm_delete = None;
     s.more_open = None;
     s.menu = Default::default();
+    s.translation.dialog = None;
     s.messages.clear();
     s.receipts.clear();
     s.first_unread = None;
     s.media.voice.pause();
+    s.media.video.pause();
     s.search.clear();
     s.search_open = false;
     s.search_results = None;
@@ -445,19 +602,47 @@ pub(crate) fn active_target<A: Actions>(s: &UiState<A>) -> Option<SendTarget> {
 }
 
 pub(crate) fn save_draft<A: Actions>(s: &mut UiState<A>) {
+    crate::view_composer::persist_draft(s);
     crate::view_composer::stop_typing(s);
     if let Some(target) = active_target(s) {
         if let Some(reply) = &s.compose.reply { s.reply_drafts.insert(target.clone(), reply.clone()); }
         else { s.reply_drafts.remove(&target); }
         s.drafts.insert(target.clone(), s.composer.text.clone());
+        s.compose_drafts.insert(target.clone(), std::mem::take(&mut s.compose));
         if let Some(error) = s.send_error.take() { s.send_errors.insert(target, error); }
     }
 }
 
-fn restore_draft<A: Actions>(s: &mut UiState<A>) {
+pub(crate) fn forget_cached_draft<A: Actions>(s: &mut UiState<A>) {
     if let Some(target) = active_target(s) {
+        s.drafts.remove(&target);
+        s.compose_drafts.remove(&target);
+        s.reply_drafts.remove(&target);
+        s.media.clear(&target);
+    }
+}
+
+pub(crate) fn restore_draft<A: Actions>(s: &mut UiState<A>) {
+    if let Some(target) = active_target(s) {
+        if !s.drafts.contains_key(&target) && target.thread_root_id.is_none()
+            && let Some((stored, files)) = s.actions.load_composition(&target.conversation_id) {
+                let mut compose = crate::view_composer::Compose::default();
+                compose.mentions.chosen = stored.mentions;
+                compose.reply = stored.reply.clone();
+                compose.gifs = stored.gifs;
+                compose.inline = stored.inline;
+                compose.importance = stored.importance;
+                compose.subject = TextEdit::new(stored.subject.unwrap_or_default());
+                compose.headline = TextEdit::new(stored.banner.map(|banner| banner.title).unwrap_or_default());
+                for (marker, image) in &compose.inline { s.media.loaded(marker.clone(), image.image.bytes.to_vec()); }
+                if let Some(reply) = stored.reply { s.reply_drafts.insert(target.clone(), reply); }
+                s.drafts.insert(target.clone(), stored.text);
+                s.compose_drafts.insert(target.clone(), compose);
+                s.media.restore_files(target.clone(), files);
+            }
         let stored = if target.thread_root_id.is_none() { s.actions.load_draft(&target.conversation_id) } else { None };
         s.composer = TextEdit::new(s.drafts.remove(&target).or(stored).unwrap_or_default());
+        s.compose = s.compose_drafts.remove(&target).unwrap_or_default();
         s.compose.reply = s.reply_drafts.remove(&target);
         s.send_error = s.send_errors.remove(&target);
     }
@@ -483,6 +668,8 @@ fn join_draft(failed: &str, current: &str) -> String {
 
 pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     let Some(target) = active_target(s) else { return };
+    if s.schedule.pending.as_ref().is_some_and(|(pending, _)| pending == &target) { return; }
+    if s.compose.inline_loading.iter().any(|marker| s.composer.text.contains(marker)) { return; }
     let text = s.composer.text.trim().to_owned();
     let files = s.media.files(&target);
     if s.media.is_uploading(&target) || (text.is_empty() && files.is_empty() && s.compose.gifs.is_empty()) {
@@ -516,6 +703,15 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
     cx.titlebar_height(crate::view_chrome::TITLE_BAR_HEIGHT * zoom);
     let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
     let arriving = !s.appearing.is_empty() && !cx.is_reduced_motion();
+    if s.starting {
+        return zoomed(cx, zoom, col().key("startup-splash").w_full().h_full().fill(c(WHITE))
+            .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
+            .child(col().grow(1.0).w_full().center().gap(16.0)
+                .child(crate::icons::sym("chat_bubble", 48.0).color(c("#5B5FC7")))
+                .child(text("Rusty Teams").font(ts(24.0, 600.0)).color(c(INK)))
+                .child(text(s.status.clone()).font(ts(14.0, 400.0)).color(c(MUTED)))
+                .child(crate::screens::button("Open app", "startup-open", |s: &mut UiState<A>, _| s.starting = false))));
+    }
     if s.toast.reconnecting {
         return zoomed(cx, zoom, col().key("root").fill(c(WHITE))
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
@@ -534,9 +730,9 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(crate::view_chrome::rail(s))
+                .children((!s.detached_chat).then(|| crate::view_chrome::rail(s)))
                 .child(if matches!(s.screens.screen, crate::screens::Screen::Chat | crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
-                    let sidebar = if matches!(s.screens.screen, crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
+                    let sidebar = if s.detached_chat { el().size(0.0, 0.0) } else if matches!(s.screens.screen, crate::screens::Screen::Teams | crate::screens::Screen::Activity) {
                         crate::screens::view(s)
                     } else {
                         crate::view_chatlist::pane(s, (width * 0.28).clamp(220.0, 320.0))
@@ -555,6 +751,10 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::image_viewer::overlay(s))
         .child(crate::chat_menu::overlay(s))
         .children(crate::message_menu::overlay(s))
+        .children(crate::reactions::people(s))
+        .children(crate::card_state::dialog(s))
+        .children(crate::translation::dialog(s))
+        .children(crate::meeting_form::dialog(s))
         .children(crate::shortcuts::overlays(s));
     zoomed(cx, zoom, root)
 }
@@ -590,8 +790,19 @@ fn conversation<A: Actions + 'static>(s: &UiState<A>, compact: bool, arriving: b
     crate::view_messages::snappy(conversation, arriving)
         .child(crate::view_header::header(s, id, compact))
         .child(crate::find::bar(s))
-        .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s, arriving) })
+        .child(row().w_full().grow(1.0).min_h(0.0)
+            .child(if s.shared_open { crate::view_messages::shared(s) } else { crate::view_messages::message_list(s, arriving) })
+            .children(s.details_open.then(|| crate::view_header::details(s, id))))
         .child(crate::find::jump_bar(s))
+        .children((!s.menu.selected.is_empty()).then(|| row().w_full().gap(8.0).padding(8.0)
+            .child(text(format!("{} messages selected", s.menu.selected.len())).font(ts(13.0, 600.0)))
+            .child(crate::screens::button("Forward selected", "forward-selected", |s: &mut UiState<A>, tx| {
+                if let Some(id) = s.messages.iter().find(|message| s.menu.selected.contains(&message.id)).map(|message| message.id.clone()) {
+                    s.menu.forward = Some(id); tx.focus("forward-search", false);
+                }
+            }))
+            .child(crate::screens::button("Clear", "forward-selection-clear", |s: &mut UiState<A>, _| s.menu.selected.clear()))))
+        .child(crate::outbox::view(s))
         .child(if s.read_only { row().w_full().padding(16.0).child(text("Read-only").font(ts(13.0, 400.0)).color(c(MUTED))) } else { crate::view_composer::composer(s, compact) })
 }
 
@@ -801,6 +1012,8 @@ mod tests {
         assert_eq!(rt.state.selected.as_deref(), Some("general"));
         click(&mut rt, "nav-Chat");
         rt.frame(3.0);
+        assert_eq!(rt.state.selected.as_deref(), Some("a"));
+        assert_eq!(rt.state.composer.text, "Keep this draft");
         click(&mut rt, "chat-a");
         assert_eq!(rt.state.composer.text, "Keep this draft");
     }
@@ -809,10 +1022,11 @@ mod tests {
     fn conversation_metadata_ignores_late_pins_and_tracks_typing_stop() {
         let mut state = UiState::new(Fake::default());
         state.selected = Some("b".into());
-        state.apply(Update::Pinned { conversation_id: "a".into(), pin: Some(crate::types::PinnedRow {
+        state.apply(Update::Pinned { conversation_id: "a".into(), pins: vec![crate::types::PinnedRow {
+            message_id: "pin".into(),
             conversation_id: "a".into(), sender: "Ada".into(), text: "Private".into(),
-        }) });
-        assert!(state.pinned.is_none());
+        }] });
+        assert!(state.pinned.is_empty());
         state.apply(Update::Details(HashMap::from([("b".into(), crate::types::ChatDetails {
             avatar_id: None, group: vec![],
             members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
@@ -1059,6 +1273,35 @@ mod tests {
         );
         assert_eq!(rt.state.composer.text, "sent\nnew draft");
         assert!(rt.state.send_error.is_some());
+    }
+
+    #[test]
+    fn a_storage_failure_restores_the_full_composition_in_its_own_chat() {
+        let mut rt = rt();
+        apply(&mut rt, Update::Chats(vec![chat("a", "Ada"), chat("b", "Bo")]));
+        click(&mut rt, "chat-b");
+        apply(&mut rt, Update::ComposeFailed {
+            target: SendTarget { conversation_id: "a".into(), thread_root_id: None, channel: false },
+            composed: crate::types::Composed {
+                inline: vec![],
+                text: "hello @Ada".into(),
+                importance: store::MessageImportance::Urgent,
+                subject: Some("Subject".into()),
+                banner: Some(teams_core::AnnouncementBanner { title: "Headline".into(), background: teams_core::BannerBackground::Color("indigo".into()) }),
+                mentions: vec![teams_core::MentionInput::user("ada", "Ada")],
+                gifs: vec![chatsvc::Gif { url: "https://x.test/a.gif".into(), title: "wave".into(), preview_url: String::new(), width: 20, height: 20, preview_width: 20, preview_height: 20 }],
+                reply: None,
+            },
+            files: vec![], error: "disk full".into(),
+        });
+        assert!(rt.state.compose.gifs.is_empty());
+        click(&mut rt, "chat-a");
+        assert_eq!(rt.state.compose.gifs.len(), 1);
+        assert_eq!(rt.state.compose.mentions.chosen.len(), 1);
+        assert_eq!(rt.state.compose.importance, store::MessageImportance::Urgent);
+        assert_eq!(rt.state.compose.subject.text, "Subject");
+        assert_eq!(rt.state.compose.headline.text, "Headline");
+        assert_eq!(rt.state.composer.text, "hello @Ada");
     }
 
     #[test]

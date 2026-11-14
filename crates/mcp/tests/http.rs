@@ -1252,8 +1252,21 @@ async fn a_request_over_the_body_cap_is_rejected() {
             .body(body)
             .send()
     };
-    let status = post(25 * 1024 * 1024).await.unwrap().status();
-    assert_eq!(status, 413);
+    match post(25 * 1024 * 1024).await {
+        Ok(response) => assert_eq!(response.status(), 413),
+        Err(error) => {
+            // Rejecting before the upload finishes can reset the TCP connection on Windows.
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            let mut reset = false;
+            while let Some(cause) = source {
+                if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                    reset |= matches!(io.kind(), std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe);
+                }
+                source = cause.source();
+            }
+            assert!(reset, "unexpected upload failure: {error:?}");
+        }
+    }
     let status = post(20 * 1024 * 1024).await.unwrap().status();
     assert_ne!(status, 413);
 }

@@ -508,6 +508,7 @@ dependencies = [
  "rune",
  "rune-notify",
  "scraper",
+ "serde",
  "serde_json",
  "session",
  "store",

@@ -18,6 +18,7 @@ use crate::ui::{UiState, active_target, select_thread, ts};
 pub(crate) const MESSAGE_ROW_H: f32 = 64.0;
 
 pub(crate) fn shared<A: Actions + 'static>(s: &UiState<A>) -> El {
+    if s.selected.as_deref().is_some_and(|id| s.channel(id).is_some()) { return crate::library::view(s); }
     // shortcut: uses the loaded history, add server pagination when browsing all shared files.
     let mut list = col().w_full().padding(20.0).gap(12.0)
         .child(text("Files and images in loaded messages").font(ts(14.0, 600.0)).color(rgb(active_palette().foreground)));
@@ -123,7 +124,7 @@ pub(crate) fn message_list<A: Actions + 'static>(s: &UiState<A>, arriving: bool)
             displayed.len(),
             MESSAGE_ROW_H,
             |s: &UiState<A>, i| Cow::Owned(format!("msg-{}", s.search_results.as_ref().unwrap_or(&s.messages)[i].id)),
-            |s: &UiState<A>, i| message_row(s, i),
+            |s: &UiState<A>, i| message_row(s, i).focusable(true),
         )
         .on_visible_rows(|s: &mut UiState<A>, rows| crate::find::rows_visible(s, rows))
         .virtual_rows_version((ids, crate::theme::version(), crate::find::marked(s), s.first_unread.clone()));
@@ -213,7 +214,8 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
         row().w_full().gap(AVATAR_GAP).items_start().child(lead).child(stack)
     };
     let indent = if m.reply_to_id.is_some() { REPLY_INDENT } else { 0.0 };
-    let gap = if has_prev { SERIES_GAP } else { START_GAP };
+    let compact = s.settings.prefs.chat.settings().message_density == teams_core::MessageDensity::Compact;
+    let gap = if compact { 2.0 } else if has_prev { SERIES_GAP } else { START_GAP };
     let mut line = col().w_full().pt(gap).pl(indent).hover_group().children(unread_divider(s, &m.id)).child(content);
     if !s.read_only && !m.deleted {
         let id = m.id.clone();
@@ -224,6 +226,7 @@ pub(crate) fn message_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El 
 }
 
 fn receipt<A: Actions>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
+    if !s.settings.prefs.chat.settings().read_receipts { return None; }
     let (icon, label) = match s.receipts.get(&m.id)? {
         teams_core::ReceiptState::Sent => ("check", "Sent"),
         teams_core::ReceiptState::Read { .. } => ("done_all", "Seen"),
@@ -285,7 +288,12 @@ fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
             }
         }).child(sym("reply", 16.0).color(rgb(palette.accent)))
         .child(text(label).font(ts(12.0, 600.0)).color(rgb(palette.accent)));
-    col().w_full().child(
+    let id = m.id.clone();
+    let mut post = col().w_full();
+    if !s.read_only && !m.deleted {
+        post = post.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
+    }
+    post.child(
         col().key(format!("post-{}", m.id)).w_full().padding(16.0).gap(10.0).radius(6.0)
             .border(1.0, rgb(palette.border)).fill(rgb(palette.surface_raised)).hover_group()
             .child(row().w_full().gap(10.0).center_y()
@@ -294,7 +302,7 @@ fn channel_post<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
                     .child(crate::profile::link::<A>(text(m.sender.clone()).font(ts(14.0, 600.0)).color(rgb(palette.foreground)), format!("name-{}", m.id), m.sender_id.as_deref(), &m.sender))
                     .child(text(m.when.clone()).font(ts(12.0, 400.0)).color(rgb(palette.text_muted))))
                 .children(toolbar(s, m)))
-            .children((!m.text.is_empty() && s.menu.edit_id.as_deref() != Some(m.id.as_str())).then(|| crate::rich_text::body::<A>(m, 14.0, rgb(palette.foreground))))
+            .children((!m.text.is_empty() && s.menu.edit_id.as_deref() != Some(m.id.as_str())).then(|| crate::rich_text::body::<A>(s, m, 14.0, rgb(palette.foreground))))
             .children(labels(m))
             .children(undo(s, m))
             .children(crate::message_menu::edit_field(s, m))
@@ -313,7 +321,7 @@ fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded:
             .child(text(m.when.clone()).font(ts(11.0, 400.0)).color(rgb(palette.text_muted))))
         .child(if expanded {
             crate::message_menu::edit_field(s, m)
-                .unwrap_or_else(|| crate::rich_text::body::<A>(m, 13.0, rgb(palette.foreground)))
+                .unwrap_or_else(|| crate::rich_text::body::<A>(s, m, 13.0, rgb(palette.foreground)))
         } else { body.truncate() })
         .children(crate::message_menu::edited_mark(s, m));
     content = content.children(labels(m)).children(undo(s, m));
@@ -321,7 +329,12 @@ fn compact_reply<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, expanded:
         content = content.child(crate::media::view(s, &m.media, &m.id))
             .child(crate::reactions::controls(s, m));
     }
-    row().key(format!("post-reply-{}", m.id)).w_full().gap(8.0).py(4.0).hover_group()
+    let id = m.id.clone();
+    let mut reply = row().key(format!("post-reply-{}", m.id)).w_full().gap(8.0).py(4.0).hover_group();
+    if !s.read_only && !m.deleted {
+        reply = reply.on_secondary_press(move |s: &mut UiState<A>, at, _| crate::message_menu::open_at(s, &id, at.x, at.y));
+    }
+    reply
         .child(crate::profile::link::<A>(crate::avatar::person(s, &m.sender, m.sender_id.as_deref(), 24.0, None), format!("avatar-{}", m.id), m.sender_id.as_deref(), &m.sender))
         .child(content).children(expanded.then(|| toolbar(s, m)).flatten())
 }
@@ -346,7 +359,7 @@ fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_p
         body = body.fill(rgb(if own { palette.bubble_own } else { palette.bubble_other }));
         palette.foreground
     };
-    body.children(labels(m)).child(crate::rich_text::body::<A>(m, BODY, rgb(ink)))
+    body.children(labels(m)).child(crate::rich_text::body::<A>(s, m, BODY, rgb(ink)))
         .children(undo(s, m))
         .child(crate::media::view(s, &m.media, &m.id))
         .children(crate::message_menu::edited_mark(s, m))
@@ -368,7 +381,7 @@ pub(crate) fn action_button<A: Actions + 'static>(key: String, glyph: &str, on_p
 
 /// React, reply and more, shown while the pointer is over the message. Read-only views have none.
 fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
-    if s.read_only || m.deleted {
+    if s.read_only || m.deleted || s.settings.prefs.actions_on_right_click {
         return None;
     }
     let mut bar = row()
@@ -614,6 +627,26 @@ mod tests {
         assert_eq!(series(&rows, 0), (false, true));
         assert_eq!(series(&rows, 1), (true, false));
         assert_eq!(series(&rows, 2), (false, false));
+    }
+
+    #[test]
+    fn right_click_setting_keeps_channel_posts_and_replies_accessible() {
+        for (id, key) in [("post", "post-post"), ("reply", "post-reply-reply")] {
+            let mut rt = show(vec![msg("post", "Ada", false, "Release"), MessageRow {
+                reply_to_id: Some("post".into()), ..msg("reply", "Bo", false, "Thanks")
+            }]);
+            rt.update(|s, _| {
+                s.settings.prefs.actions_on_right_click = true;
+                s.teams = vec![crate::types::TeamRow { id: "team".into(), name: "Team".into(), channels: vec![crate::types::ChannelRow { id: "a".into(), name: "General".into(), hidden: false, unread: false }] }];
+            });
+            rt.frame(1.0 / 60.0);
+            assert!(rt.find(&format!("toolbar-{id}")).is_none());
+            let (x, y) = rt.find(key).expect("channel message");
+            rt.secondary_down(x, y);
+            rt.secondary_up(x, y);
+            rt.frame(1.0 / 60.0);
+            assert_eq!(rt.state.more_open.as_deref(), Some(id));
+        }
     }
 
     #[test]

@@ -61,9 +61,11 @@ const TRANSCRIPTS_DISABLED: &str =
 pub struct TeamsTools {
     hub: Arc<AgentHub>,
     source: Arc<dyn TeamsSource>,
-    refreshed: Arc<Mutex<HashMap<String, (DateTime<Utc>, Instant)>>>,
+    refreshed: Arc<Mutex<RefreshedConversations>>,
     tool_router: ToolRouter<Self>,
 }
+
+type RefreshedConversations = HashMap<String, (DateTime<Utc>, Instant)>;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListChatsParams {
@@ -970,7 +972,7 @@ impl TeamsTools {
                     .then(|| (last_message_at, candidate.conversation_id.clone()))
             })
             .collect();
-        stale.sort_by(|left, right| right.0.cmp(&left.0));
+        stale.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let claimed: Vec<(DateTime<Utc>, String)> = {
             let mut refreshed = lock(&self.refreshed);
             stale

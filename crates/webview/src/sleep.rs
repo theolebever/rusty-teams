@@ -89,7 +89,8 @@ impl<C> Sleep<C> {
         self.asleep
     }
 
-    pub(crate) fn should_sleep(&self, activity: Activity, now: Instant) -> bool {
+    #[cfg(test)]
+    fn should_sleep(&self, activity: Activity, now: Instant) -> bool {
         self.quiet(now) && blocker(activity).is_none()
     }
 

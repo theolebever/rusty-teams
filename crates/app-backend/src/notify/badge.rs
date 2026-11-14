@@ -63,7 +63,7 @@ pub fn render_badge(badge: &Badge, size: u32) -> Vec<u8> {
         resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
     }
     let mut pixels = pixmap.take();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     pixels

@@ -1,4 +1,5 @@
 #[cfg(windows)]
+#[expect(clippy::manual_dangling_ptr, reason = "Win32 MAKEINTRESOURCE encodes resource ID 1 as a pointer value")]
 fn load_icon() -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::Foundation::HINSTANCE;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;

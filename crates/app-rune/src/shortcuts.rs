@@ -34,7 +34,8 @@ impl NavState {
         self.recent.truncate(20);
     }
 
-    pub fn take_new_chat_request(&mut self) -> bool {
+    #[cfg(test)]
+    fn take_new_chat_request(&mut self) -> bool {
         std::mem::take(&mut self.new_chat_requested)
     }
 }
@@ -206,7 +207,7 @@ fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) ->
         Action::Shortcuts => s.nav.shortcuts_open = !s.nav.shortcuts_open,
         Action::Screen(screen) => {
             close_popups(s);
-            navigate(s, screen);
+            crate::screens::navigate_tab(s, screen, tx);
         }
         Action::PreviousChat => step_chat(s, -1, false, tx),
         Action::NextChat => step_chat(s, 1, false, tx),

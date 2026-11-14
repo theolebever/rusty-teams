@@ -72,17 +72,67 @@ pub fn is_openable(url: &str) -> bool {
 }
 
 pub fn open<A: Actions + 'static>(s: &mut UiState<A>, tx: &mut Tx, url: &str) {
-    if is_openable(url) {
-        if let Err(error) = tx.open_url(url) { s.status = error.to_string(); }
-    }
+    if is_openable(url)
+        && let Err(error) = tx.open_url(url) { s.status = error.to_string(); }
 }
 
 /// The message body: formatted when the message has spans, else its plain text.
-pub fn body<A: Actions + 'static>(m: &MessageRow, size: f32, color: Color) -> El {
-    if m.media.rich.spans.is_empty() {
-        return crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap();
+pub fn body<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, size: f32, color: Color) -> El {
+    if let Some(translation) = crate::translation::cached(s, m) {
+        let content = if translation.shown { blocks::<A>(&translation.spans, size, color, m.mine) }
+            else if m.media.rich.spans.is_empty() { crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap() }
+            else { blocks::<A>(&m.media.rich.spans, size, color, m.mine) };
+        return col().w_full().child(content).children(crate::translation::line(s, m));
     }
-    flatten(&m.media.rich.spans, size, m.mine).element::<A>(size, color)
+    if m.media.rich.spans.is_empty() {
+        return col().child(crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap()).children(crate::translation::line(s, m));
+    }
+    col().child(blocks::<A>(&m.media.rich.spans, size, color, m.mine)).children(crate::translation::line(s, m))
+}
+
+fn blocks<A: Actions + 'static>(spans: &[Md], size: f32, color: Color, own: bool) -> El {
+    let palette = active_palette();
+    let mut body = col().w_full().gap(6.0);
+    let mut start = 0;
+    for (index, span) in spans.iter().enumerate() {
+        if !matches!(span, Md::Table { .. } | Md::CodeBlock { .. }) { continue; }
+        if start < index { body = body.child(flatten(&spans[start..index], size, own).element::<A>(size, color)); }
+        start = index + 1;
+        let block = match span {
+            Md::Table { header, rows } => {
+                let columns = rows.iter().map(Vec::len).max().unwrap_or_default();
+                let mut table = col().key(format!("rich-table-{index}")).role("table").w_full().border(1.0, rgb(palette.border));
+                for (row_index, cells) in rows.iter().enumerate() {
+                    let mut line = row().role("row").w_full();
+                    for column in 0..columns {
+                        let cell = cells.get(column).map(Vec::as_slice).unwrap_or_default();
+                        let header = *header && row_index == 0;
+                        let mut content = flatten(cell, size, own).element::<A>(size, color);
+                        if header { content = content.font(ts(size, 600.0)); }
+                        let cell = col().key(format!("rich-cell-{row_index}-{column}")).role(if header { "columnheader" } else { "cell" }).grow(1.0).min_w(60.0).padding(6.0)
+                            .border(0.5, rgb(palette.border)).child(content);
+                        line = line.child(if header { cell.fill(rgb(palette.row_hover)) } else { cell });
+                    }
+                    table = table.child(line);
+                }
+                table
+            }
+            Md::CodeBlock { language, code } => {
+                use app_base::syntax::Token;
+                let highlights = language.as_deref().and_then(|language| app_base::syntax::highlight(code, language)).unwrap_or_default();
+                let spans = highlights.into_iter().map(|(range, token)| {
+                    let color = match token { Token::Keyword => palette.accent, Token::String => palette.green, Token::Number => palette.amber, Token::Comment => palette.text_muted };
+                    rune::Span::new(range.start, range.end).color(rgb(color))
+                }).collect();
+                col().key(format!("rich-code-{index}")).w_full().padding(8.0).radius(4.0).fill(rgb(palette.row_hover))
+                    .child(rune::rich(code.clone(), spans).font(ts(size, 400.0).family(rune::tok::Family::Named("Consolas"))).color(color).wrap())
+            }
+            _ => unreachable!(),
+        };
+        body = body.child(block);
+    }
+    if start < spans.len() { body = body.child(flatten(&spans[start..], size, own).element::<A>(size, color)); }
+    body
 }
 
 #[derive(Clone, Copy, Default)]
@@ -238,6 +288,22 @@ mod tests {
     use super::*;
 
     fn t(text: &str) -> Md { Md::Text(text.into()) }
+
+    #[test]
+    fn table_cells_have_separate_columns_and_code_has_its_own_block() {
+        struct Fake(Vec<Md>);
+        impl Actions for Fake {
+            fn open(&self, _: &str) {}
+            fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+        }
+        let spans = teams_core::html_to_spans("<table><tr><th>A</th><th>B</th></tr><tr><td>one</td><td>two</td></tr></table><pre><code class=\"language-rust\">let x = 1;</code></pre>");
+        let mut rt = Runtime::new(UiState::new(Fake(spans)), |s, _| blocks::<Fake>(&s.actions.0, 14.0, rgb(0), false), (800.0, 600.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let first = rt.presented("rich-cell-1-0").expect("first data cell").0;
+        let second = rt.presented("rich-cell-1-1").expect("second data cell").0;
+        assert!(second[0] >= first[0] + first[2] - 1.0, "cells occupy separate columns");
+        assert!(rt.elements().iter().any(|element| element.path.contains("rich-code-")));
+    }
 
     #[test]
     fn formatting_becomes_styled_ranges_and_links_keep_their_url() {

@@ -144,6 +144,7 @@ pub(super) struct Runner {
 }
 
 impl Runner {
+    #[expect(clippy::too_many_arguments, reason = "wires the existing realtime channels without a second configuration type")]
     pub(super) fn new(
         session: Session,
         config: RealtimeConfig,

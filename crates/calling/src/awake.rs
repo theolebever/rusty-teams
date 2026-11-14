@@ -54,6 +54,10 @@ mod platform {
     }
 }
 
+impl Default for StayAwake {
+    fn default() -> Self { Self::new() }
+}
+
 impl StayAwake {
     #[cfg(windows)]
     pub fn new() -> Self {

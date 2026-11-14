@@ -15,6 +15,9 @@ const MENU_W: f32 = 200.0;
 
 #[derive(Default)]
 pub struct MenuState {
+    pub selected: HashSet<String>,
+    pub followed: std::collections::HashMap<String, bool>,
+    pub follow_requested: HashSet<String>,
     /// Message being edited in place and its field.
     pub(crate) edit_id: Option<String>,
     pub(crate) edit_text: TextEdit,
@@ -181,13 +184,17 @@ fn send_forward<A: Actions>(s: &mut UiState<A>) {
     let (Some(source), Some(id), Some((target, _))) = (&s.selected, &s.menu.forward, &s.menu.forward_target) else { return };
     s.menu.forward_sending = true;
     s.menu.forward_error = None;
-    s.actions.forward_message(source, target, id, s.menu.forward_comment.text.trim());
+    let ids: Vec<_> = if s.menu.selected.is_empty() { vec![id.clone()] }
+        else { s.messages.iter().filter(|message| s.menu.selected.contains(&message.id) && !message.deleted && !message.system).map(|message| message.id.clone()).take(5).collect() };
+    if ids.is_empty() { s.menu.forward_sending = false; return; }
+    s.menu.forward = ids.first().cloned();
+    s.actions.forward_message(source, target, &ids, s.menu.forward_comment.text.trim());
 }
 
 fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
     let palette = active_palette();
     let mut body = col().key(format!("forward-{id}")).w_full().padding(16.0).gap(12.0)
-        .child(text("Forward this message").font(ts(18.0, 600.0)).color(rgb(palette.foreground)))
+        .child(text(if s.menu.selected.len() > 1 { format!("Forward {} messages", s.menu.selected.len()) } else { "Forward this message".into() }).font(ts(18.0, 600.0)).color(rgb(palette.foreground)))
         .child(text("You can forward to any chat or channel.").font(ts(12.0, 400.0)).color(rgb(palette.text_muted)));
     if let Some(message) = s.messages.iter().find(|m| m.id == id) {
         body = body.child(text(message.text.clone()).font(ts(13.0, 400.0)).color(rgb(palette.foreground)).truncate());
@@ -235,7 +242,7 @@ fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .on_submit(|s: &mut UiState<A>, _| send_forward(s)))
         .children(s.menu.forward_error.as_ref().map(|error| text(error.clone()).key("forward-error").font(ts(12.0, 400.0)).color(rgb(palette.red)).wrap()))
         .child(row().w_full().gap(8.0).justify_end()
-            .child(crate::screens::button("Cancel", "forward-cancel", |s: &mut UiState<A>, _| close(s)))
+            .child(crate::screens::button("Cancel", "forward-cancel", |s: &mut UiState<A>, _| { s.menu.selected.clear(); close(s); }))
             .child(crate::screens::button(if s.menu.forward_sending { "Forwarding…" } else { "Forward" }, "forward-send", |s: &mut UiState<A>, _| send_forward(s))
                 .opacity(if s.menu.forward_target.is_some() && !s.menu.forward_sending { 1.0 } else { 0.4 })));
     crate::shortcuts::card("forward-dialog", 480.0, body, close::<A>)
@@ -247,6 +254,9 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     let id = m.id.clone();
     let conversation = s.selected.clone().unwrap_or_default();
     let channel = active_target(s).is_some_and(|target| target.channel);
+    let root = m.reply_to_id.clone().unwrap_or_else(|| id.clone());
+    let saved_message = m.clone();
+    let saved_conversation = conversation.clone();
     let mut list = col().key(format!("menu-{id}")).w_full().gap(1.0).padding(4.0).radius(8.0)
         .fill(rgb(palette.popup)).border(1.0, rgb(palette.border_strong));
 
@@ -263,14 +273,51 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
         tx.copy(body.clone());
         close(s);
     }));
+    list = list.child(item(format!("menu-save-{id}"), "Save this message", ink, move |s: &mut UiState<A>, _| {
+        s.actions.save_message(&saved_conversation, &saved_message.id, saved_message.reply_to_id.clone());
+        close(s);
+    }));
+    let (link_id, link_conversation) = (id.clone(), conversation.clone());
+    list = list.child(item(format!("menu-link-{id}"), "Copy link", ink, move |s: &mut UiState<A>, _| {
+        s.actions.copy_message_link(&link_conversation, &link_id);
+        close(s);
+    }));
+    let share = teams_core::outlook_compose_link(&format!("Message from {}", m.sender), &m.text);
+    list = list.child(item(format!("menu-outlook-{id}"), "Share to Outlook", ink, move |s: &mut UiState<A>, tx| {
+        crate::rich_text::open(s, tx, &share);
+        close(s);
+    }));
+    if channel {
+        let followed = s.menu.followed.get(&root).copied().unwrap_or(false);
+        let (follow_id, follow_conversation) = (root.clone(), conversation.clone());
+        list = list.child(item(format!("menu-follow-{id}"), if followed { "Unfollow post" } else { "Follow post" }, ink, move |s: &mut UiState<A>, _| {
+            s.actions.set_post_followed(&follow_conversation, &follow_id, !followed);
+            close(s);
+        }));
+        let load_conversation = conversation.clone();
+        list = list.child(el().key(format!("follow-load-{id}")).size(1.0, 1.0).on_visible(move |s: &mut UiState<A>, on, _| {
+            if on && s.menu.follow_requested.insert(root.clone()) { s.actions.load_post_followed(&load_conversation, &root); }
+        }));
+    }
+    if !m.reactions.is_empty() {
+        let (message, conversation) = (id.clone(), conversation.clone());
+        list = list.child(item(format!("menu-reaction-people-{id}"), "Who reacted", ink, move |s: &mut UiState<A>, _| {
+            close(s);
+            s.picker.people = Some((message.clone(), Err("Loading…".into())));
+            s.actions.load_reaction_people(&conversation, &message);
+        }));
+    }
+    let translation_id = id.clone();
+    list = list.child(item(format!("menu-translate-{id}"), "Translate", ink, move |s: &mut UiState<A>, tx| {
+        close(s); s.translation.dialog = Some(translation_id.clone()); tx.focus("translation-language", false);
+    }));
     if m.mine {
         let message = m.clone();
         list = list.child(item(format!("menu-edit-{id}"), "Edit", ink, move |s: &mut UiState<A>, tx| {
             begin_edit(s, &message, tx);
         }));
     }
-    // ponytail: the pin bar carries no message id, so "pinned" is matched by text; add the id to `PinnedRow` if duplicates matter.
-    let pinned = s.pinned.as_ref().is_some_and(|pin| pin.text == m.text);
+    let pinned = s.pinned.iter().any(|pin| pin.message_id == m.id);
     {
         let (pin_id, conversation) = (id.clone(), conversation.clone());
         list = list.child(item(format!("menu-pin-{id}"), if pinned { "Unpin" } else { "Pin" }, ink, move |s: &mut UiState<A>, _| {
@@ -279,6 +326,15 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
         }));
     }
     {
+        let selected = s.menu.selected.contains(&id);
+        let select_id = id.clone();
+        list = list.child(item(format!("menu-select-{id}"), if selected { "Deselect" } else { "Select for forwarding" }, ink, move |s: &mut UiState<A>, _| {
+            if !s.menu.selected.remove(&select_id) {
+                if s.menu.selected.len() == 5 { s.toast.show("Select up to five messages"); return; }
+                s.menu.selected.insert(select_id.clone());
+            }
+            close(s);
+        }));
         let fwd_id = id.clone();
         list = list.child(item(format!("menu-forward-{id}"), "Forward", ink, move |s: &mut UiState<A>, tx| {
             close(s);
@@ -320,13 +376,17 @@ mod tests {
 
     impl Actions for Fake {
         fn open(&self, _: &str) {}
+        fn set_post_followed(&self, c: &str, root: &str, followed: bool) { self.calls.borrow_mut().push(format!("follow {c} {root} {followed}")); }
+        fn load_reaction_people(&self, c: &str, id: &str) { self.calls.borrow_mut().push(format!("people {c} {id}")); }
+        fn save_message(&self, c: &str, id: &str, root: Option<String>) { self.calls.borrow_mut().push(format!("save {c} {id} {root:?}")); }
+        fn copy_message_link(&self, c: &str, id: &str) { self.calls.borrow_mut().push(format!("link {c} {id}")); }
         fn send(&self, _: SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn send_composed(&self, target: SendTarget, composed: crate::types::Composed, _: Vec<teams_core::FileReference>) {
             self.calls.borrow_mut().push(format!("reply {} {} {}", target.conversation_id, composed.reply.map(|r| r.message_id).unwrap_or_default(), composed.text));
         }
         fn edit_message(&self, c: &str, id: &str, text: &str) { self.calls.borrow_mut().push(format!("edit {c} {id} {text}")); }
         fn pin_message(&self, c: &str, id: &str, pin: bool) { self.calls.borrow_mut().push(format!("pin {c} {id} {pin}")); }
-        fn forward_message(&self, s: &str, t: &str, id: &str, comment: &str) { self.calls.borrow_mut().push(format!("forward {s} {t} {id} [{comment}]")); }
+        fn forward_message(&self, s: &str, t: &str, ids: &[String], comment: &str) { self.calls.borrow_mut().push(format!("forward {s} {t} {} [{comment}]", ids.join(","))); }
         fn mark_unread_from(&self, c: &str, id: &str) { self.calls.borrow_mut().push(format!("unread {c} {id}")); }
     }
 
@@ -513,15 +573,53 @@ mod tests {
     }
 
     #[test]
+    fn channel_posts_toggle_following_and_reaction_people_open_a_dialog() {
+        let mut message = msg("post", false, "hello");
+        message.reactions = vec![teams_core::ReactionSummary { emoji: "👍".into(), count: 1, mine: false }];
+        let mut rt = show(vec![message]);
+        rt.update(|s, _| {
+            s.teams = vec![crate::types::TeamRow { id: "team".into(), name: "Team".into(), channels: vec![crate::types::ChannelRow { id: "a".into(), name: "General".into(), hidden: false, unread: false }] }];
+            s.apply(Update::PostFollowed { conversation: "a".into(), root: "post".into(), followed: true });
+        });
+        rt.frame(1.0);
+        open_menu(&mut rt, "post");
+        click(&mut rt, "menu-follow-post");
+        assert_eq!(last_call(&rt), "follow a post false");
+        open_menu(&mut rt, "post");
+        click(&mut rt, "menu-reaction-people-post");
+        assert_eq!(last_call(&rt), "people a post");
+        assert!(rt.find("reaction-people-dialog").is_some());
+    }
+
+    #[test]
+    fn save_preserves_the_thread_root_and_copy_link_uses_the_message_id() {
+        let mut message = msg("reply", false, "hello");
+        message.reply_to_id = Some("root".into());
+        let mut rt = show(vec![message]);
+        rt.update(|s, _| s.thread_root_id = Some("root".into()));
+        rt.frame(1.0 / 60.0);
+        open_menu(&mut rt, "reply");
+        click(&mut rt, "menu-save-reply");
+        assert_eq!(last_call(&rt), "save a reply Some(\"root\")");
+        open_menu(&mut rt, "reply");
+        click(&mut rt, "menu-link-reply");
+        assert_eq!(last_call(&rt), "link a reply");
+    }
+
+    #[test]
     fn pin_and_unpin_follow_the_pinned_bar() {
         let mut rt = show(vec![msg("m1", false, "hi")]);
         open_menu(&mut rt, "m1");
         click(&mut rt, "menu-pin-m1");
         assert_eq!(last_call(&rt), "pin a m1 true");
-        rt.update(|s, _| s.pinned = Some(crate::types::PinnedRow { conversation_id: "a".into(), sender: "Ada".into(), text: "hi".into() }));
+        rt.update(|s, _| s.pinned = vec![crate::types::PinnedRow { message_id: "m1".into(), conversation_id: "a".into(), sender: "Ada".into(), text: "hi".into() }]);
         open_menu(&mut rt, "m1");
         click(&mut rt, "menu-pin-m1");
         assert_eq!(last_call(&rt), "pin a m1 false");
+        rt.update(|s, _| s.pinned[0].message_id = "another-message".into());
+        open_menu(&mut rt, "m1");
+        click(&mut rt, "menu-pin-m1");
+        assert_eq!(last_call(&rt), "pin a m1 true", "identical text does not identify a pin");
     }
 
     #[test]
@@ -537,6 +635,21 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(rt.find("forward-dialog").is_none());
         assert!(rt.find("menu-m1").is_none());
+    }
+
+    #[test]
+    fn selected_messages_are_forwarded_together_in_conversation_order() {
+        let mut rt = show(vec![msg("m1", false, "first"), msg("m2", false, "second")]);
+        open_menu(&mut rt, "m2");
+        click(&mut rt, "menu-select-m2");
+        open_menu(&mut rt, "m1");
+        click(&mut rt, "menu-select-m1");
+        click(&mut rt, "forward-selected");
+        click(&mut rt, "forward-to-b");
+        click(&mut rt, "forward-send");
+        assert_eq!(last_call(&rt), "forward a b m1,m2 []");
+        rt.update(|s, _| s.apply(Update::Forwarded { conversation_id: "a".into(), message_id: "m1".into(), result: Ok(()) }));
+        assert!(rt.state.menu.selected.is_empty());
     }
 
     #[test]

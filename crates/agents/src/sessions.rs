@@ -261,7 +261,7 @@ pub fn scan_external_sessions(
             (!known_session_ids.contains(&session_id)).then_some((session_id, modified))
         })
         .collect();
-    files.sort_by(|left, right| right.1.cmp(&left.1));
+    files.sort_by_key(|file| std::cmp::Reverse(file.1));
     files
         .into_iter()
         .filter_map(|(session_id, modified)| {

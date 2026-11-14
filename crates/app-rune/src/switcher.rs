@@ -31,7 +31,7 @@ pub fn open<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
 
 fn close<A: Actions>(s: &mut UiState<A>) { s.nav.switcher = None; }
 
-fn search<A: Actions>(s: &mut UiState<A>) {
+pub(crate) fn search<A: Actions>(s: &mut UiState<A>) {
     let Some(switcher) = &mut s.nav.switcher else { return };
     switcher.highlighted = 0;
     switcher.results = Suggestions::default();

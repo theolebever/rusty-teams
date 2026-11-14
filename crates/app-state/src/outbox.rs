@@ -206,7 +206,7 @@ async fn attempt(
     .await
 }
 
-async fn resend(engine: &Engine, record: &OutboxRecord, outgoing: &Outgoing) -> Result<(), String> {
+pub async fn resend(engine: &Engine, record: &OutboxRecord, outgoing: &Outgoing) -> Result<(), String> {
     let mut failure = String::new();
     for attempt_number in 0..=RETRY_BACKOFF.len() {
         if let Some(delay) = attempt_number
@@ -222,6 +222,15 @@ async fn resend(engine: &Engine, record: &OutboxRecord, outgoing: &Outgoing) -> 
         }
     }
     Err(failure)
+}
+
+/// Sends a new message before using recovery checks for an uncertain delivery.
+pub async fn send(engine: &Engine, record: &OutboxRecord, outgoing: &Outgoing) -> Result<(), String> {
+    match deliver(engine, &record.conversation_id, record.target, record.thread_root_id.as_deref(), outgoing).await {
+        Ok(_) => Ok(()),
+        Err(error) if is_permanent(&error) => Err(short_error(&error)),
+        Err(_) => resend(engine, record, outgoing).await,
+    }
 }
 
 async fn resend_record(engine: &Engine, record: OutboxRecord) {

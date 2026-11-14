@@ -44,9 +44,13 @@ pub struct Preferences {
     pub chat: ChatSettingsDocument,
     pub reactions: Vec<String>,
     pub skin_tone: u8,
+    pub markdown: bool,
+    pub actions_on_right_click: bool,
     pub camera: DeviceChoice,
     pub microphone: DeviceChoice,
     pub speaker: DeviceChoice,
+    pub translation: Option<teams_core::LanguageSettings>,
+    pub languages: Vec<teams_core::Language>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,10 @@ pub enum Change {
     Chat(ChatSettingChange),
     SkinTone(u8),
     DefaultReactions(Vec<String>),
+    Markdown(bool),
+    ActionsOnRightClick(bool),
+    MutedSection(bool),
+    Translation(serde_json::Value),
     Device(Device, DeviceChoice),
 }
 
@@ -77,6 +85,10 @@ impl Preferences {
             Change::Chat(change) => { self.chat.apply(*change); }
             Change::SkinTone(tone) => self.skin_tone = *tone,
             Change::DefaultReactions(ids) => self.reactions = ids.clone(),
+            Change::Markdown(on) => self.markdown = *on,
+            Change::ActionsOnRightClick(on) => self.actions_on_right_click = *on,
+            Change::MutedSection(_) => {},
+            Change::Translation(_) => {},
             Change::Device(Device::Camera, choice) => self.camera = choice.clone(),
             Change::Device(Device::Microphone, choice) => self.microphone = choice.clone(),
             Change::Device(Device::Speaker, choice) => self.speaker = choice.clone(),
@@ -92,12 +104,13 @@ pub enum Section {
     Appearance,
     Chats,
     Devices,
+    Calls,
     Agents,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Devices, Self::Agents, Self::About];
+    const ALL: [Section; 8] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Calls, Self::Devices, Self::Agents, Self::About];
 
     fn label(self) -> &'static str {
         match self {
@@ -106,6 +119,7 @@ impl Section {
             Self::Appearance => "Appearance and accessibility",
             Self::Chats => "Chats and channels",
             Self::Devices => "Devices",
+            Self::Calls => "Calls",
             Self::Agents => "Agents",
             Self::About => "About",
         }
@@ -114,11 +128,12 @@ impl Section {
     /// The setting titles on the pane, for the search box (GPUI `settings/nav.rs`).
     fn terms(self) -> &'static [&'static str] {
         match self {
-            Self::General => &[AUTO_START, BACKGROUND, CLOSE_TO_TRAY],
+            Self::General => &[AUTO_START, BACKGROUND, CLOSE_TO_TRAY, "Up arrow in compose box", "Edit last message", "Navigate to messages", "Stay in compose", "Translation", "Language"],
             Self::Notifications => &[PREVIEW, FLASH, SOUND, URGENT, CALL_SOUND, BUSY_SOUND, HIDE_IN_CALLS],
             Self::Appearance => &["Theme", "Color scheme", "App icon"],
-            Self::Chats => &[RECEIPTS, ENTER, REACTIONS, SKIN_TONE],
+            Self::Chats => &[RECEIPTS, ENTER, REACTIONS, SKIN_TONE, "Message density", "Compact", "Comfy", "Show message actions on right click", "Muted items"],
             Self::Devices => &["Speaker", "Microphone", "Camera"],
+            Self::Calls => &["Ringtones", "Forwarded calls", "Delegated calls", "Call queue"],
             Self::Agents => &["Agent", "Action", "Resume interrupted runs"],
             Self::About => &["Version", "Build"],
         }
@@ -227,8 +242,9 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         Section::Appearance => appearance(s),
         Section::Chats => chats(s),
         Section::Devices => devices(s),
+        Section::Calls => calls(s),
         Section::Agents => crate::agent_settings::pane(s),
-        Section::About => about(),
+        Section::About => about::<A>(),
     };
     row().key("settings").w_full().h_full().fill(color("#FFFFFF"))
         .child(nav)
@@ -246,11 +262,31 @@ fn select<A: Actions>(s: &mut UiState<A>, section: Section) {
 fn general<A: Actions + 'static>(s: &UiState<A>) -> El {
     let prefs = &s.settings.prefs;
     let (auto_start, background, close_to_tray) = (prefs.auto_start, prefs.open_in_background, prefs.notify.close_to_tray);
-    col().w_full()
+    let mut pane = col().w_full()
         .child(caption("SYSTEM"))
         .child(toggle("settings-auto-start", AUTO_START, auto_start, true, move |s: &mut UiState<A>| change(s, Change::AutoStart(!auto_start))))
         .child(toggle("settings-open-in-background", BACKGROUND, background, auto_start, move |s: &mut UiState<A>| change(s, Change::OpenInBackground(!background))))
         .child(toggle("settings-close-to-tray", CLOSE_TO_TRAY, close_to_tray, true, |s: &mut UiState<A>| notify(s, |n| n.close_to_tray = !n.close_to_tray)))
+        .child(caption("UP ARROW IN COMPOSE BOX"));
+    for (label, behavior) in [("Edit last message", teams_core::UpArrowBehavior::EditLastMessage), ("Navigate to messages", teams_core::UpArrowBehavior::NavigateToMessages), ("Stay in compose", teams_core::UpArrowBehavior::StayInCompose)] {
+        pane = pane.child(choice(format!("settings-up-{behavior:?}"), label, prefs.chat.settings().up_arrow == behavior, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::UpArrow(behavior)))));
+    }
+    pane.child(crate::translation::settings(s))
+}
+
+fn calls<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let mut pane = col().w_full().child(caption("RINGTONES"));
+    for call_type in chatsvc::sounds::RingtoneCallType::ALL {
+        let current = s.settings.prefs.notify.sounds.ringtones.get(call_type);
+        pane = pane.child(text(call_type.label()).font(ts(14.0, 600.0)).padding(12.0));
+        for ringtone in chatsvc::sounds::Ringtone::ALL {
+            pane = pane.child(choice(format!("settings-ring-{}-{}", call_type.name(), ringtone.name()), ringtone.label(), ringtone == current, move |s: &mut UiState<A>| {
+                notify(s, |n| n.sounds.ringtones.set(call_type, ringtone));
+                crate::sound::play(ringtone.file_name());
+            }));
+        }
+    }
+    pane
 }
 
 fn sound_list<A: Actions + 'static>(key: &'static str, sounds: &[AlertSound], current: AlertSound, field: fn(&mut rules::Settings) -> &mut AlertSound) -> El {
@@ -282,10 +318,38 @@ fn notifications<A: Actions + 'static>(s: &UiState<A>) -> El {
     if sounds.urgent_sound {
         pane = pane.child(sound_list::<A>("settings-urgent", &AlertSound::URGENT, sounds.urgent_sound_type, |n| &mut n.sounds.urgent_sound_type));
     }
-    pane.child(toggle("settings-call-sound", CALL_SOUND, sounds.call_and_meeting_sound, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.call_and_meeting_sound = !n.sounds.call_and_meeting_sound)))
+    pane = pane.child(toggle("settings-call-sound", CALL_SOUND, sounds.call_and_meeting_sound, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.call_and_meeting_sound = !n.sounds.call_and_meeting_sound)))
         .child(toggle("settings-busy-sound", BUSY_SOUND, sounds.sound_when_busy, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.sound_when_busy = !n.sounds.sound_when_busy)))
         .child(caption("CALLS AND MEETINGS"))
-        .child(toggle("settings-hide-in-calls", HIDE_IN_CALLS, n.mute_in_calls, true, |s: &mut UiState<A>| notify(s, |n| n.mute_in_calls = !n.mute_in_calls)))
+        .child(toggle("settings-hide-in-calls", HIDE_IN_CALLS, n.mute_in_calls, true, |s: &mut UiState<A>| notify(s, |n| n.mute_in_calls = !n.mute_in_calls)));
+    let account = prefs.chat.settings().notifications;
+    pane = pane.child(caption("ACTIVITY"));
+    for preset in teams_core::NotificationPreset::ALL {
+        let label = match preset { teams_core::NotificationPreset::AllActivity => "All activity", teams_core::NotificationPreset::MentionsAndReplies => "Mentions and replies", teams_core::NotificationPreset::Customised => "Customised" };
+        pane = pane.child(choice(format!("settings-preset-{preset:?}"), label, account.preset == preset, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::Preset(preset)))));
+    }
+    for (key, label, current, update) in [
+        ("chats", "Chat messages", account.chat_messages, ChatSettingChange::ChatMessages as fn(_) -> _),
+        ("mentions", "Personal mentions", account.personal_mentions, ChatSettingChange::PersonalMentions as fn(_) -> _),
+        ("everyone", "Everyone mentions", account.everyone_mentions, ChatSettingChange::EveryoneMentions as fn(_) -> _),
+        ("likes", "Likes and reactions", account.likes, ChatSettingChange::Likes as fn(_) -> _),
+    ] {
+        pane = pane.child(text(label).font(ts(14.0, 600.0)).padding(12.0));
+        for (label, alert) in [("Banner and feed", teams_core::ActivityAlert::BannerAndFeed), ("Only feed", teams_core::ActivityAlert::OnlyFeed), ("Only banner", teams_core::ActivityAlert::OnlyBanner), ("Off", teams_core::ActivityAlert::Off)] {
+            pane = pane.child(choice(format!("settings-alert-{key}-{alert:?}"), label, current == alert, move |s: &mut UiState<A>| change(s, Change::Chat(update(alert)))));
+        }
+    }
+    pane = pane.child(caption("MEETING CHATS"));
+    for (label, mode) in [("Mute", teams_core::MeetingChatNotifications::Mute), ("Unmute", teams_core::MeetingChatNotifications::Unmute), ("Mute until I join", teams_core::MeetingChatNotifications::MuteUntilJoin)] {
+        pane = pane.child(choice(format!("settings-meeting-chat-{mode:?}"), label, account.meeting_chats == mode, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::MeetingChats(mode)))));
+    }
+    pane = pane.child(caption("STATUS NOTIFICATIONS"));
+    for person in &s.profile.followed {
+        let id = person.user_id.clone();
+        let name = person.name.clone();
+        pane = pane.child(choice(format!("settings-unfollow-{id}"), &format!("{} · Turn off", person.name), false, move |s: &mut UiState<A>| s.actions.follow_presence(&id, &name, false)));
+    }
+    pane
 }
 
 fn appearance<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -319,13 +383,21 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
     let account = prefs.chat.settings();
     let receipts = account.read_receipts;
     let mut pane = col().w_full()
+        .child(caption("CHAT LIST"))
+        .child(toggle("settings-muted-section", "Show muted items in their own section", s.section_settings.enabled(teams_core::ChatSection::Muted), true, |s: &mut UiState<A>| change(s, Change::MutedSection(!s.section_settings.enabled(teams_core::ChatSection::Muted)))))
         .child(caption("CHATS"))
+        .child(toggle("settings-markdown", "Format messages using mark-down", prefs.markdown, true, |s: &mut UiState<A>| change(s, Change::Markdown(!s.settings.prefs.markdown))))
+        .child(toggle("settings-actions-right-click", "Show message actions on right click", prefs.actions_on_right_click, true, |s: &mut UiState<A>| change(s, Change::ActionsOnRightClick(!s.settings.prefs.actions_on_right_click))))
         .child(toggle("settings-read-receipts", RECEIPTS, receipts, true, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::ReadReceipts(!receipts)))))
         .child(text(ENTER).font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0));
     for (label, behavior) in [("Send the message", EnterKeyBehavior::Send), ("Start a new line (to send, select Send or use Ctrl+Enter).", EnterKeyBehavior::NewLine)] {
         pane = pane.child(choice(format!("settings-enter-{behavior:?}"), label, account.enter_key == behavior, move |s: &mut UiState<A>| {
             change(s, Change::Chat(ChatSettingChange::EnterKey(behavior)));
         }));
+    }
+    pane = pane.child(caption("MESSAGE DENSITY"));
+    for (label, density) in [("Comfy", teams_core::MessageDensity::Comfy), ("Compact", teams_core::MessageDensity::Compact)] {
+        pane = pane.child(choice(format!("settings-density-{density:?}"), label, account.message_density == density, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::MessageDensity(density)))));
     }
     pane = pane.child(caption(&REACTIONS.to_uppercase()));
     let mut reactions = row().w_full().wrap().gap(6.0).px(12.0);
@@ -372,11 +444,12 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
     pane
 }
 
-fn about() -> El {
+fn about<A: Actions + 'static>() -> El {
     col().w_full()
         .child(caption("RUSTY TEAMS"))
         .child(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0))
         .child(text(format!("Build {}", app_backend::version::build_version())).font(ts(14.0, 400.0)).color(color("#616161")).px(12.0).pt(4.0))
+        .child(crate::screens::button("Copy build", "settings-copy-build", |_: &mut UiState<A>, tx| tx.copy(app_backend::version::build_version())))
 }
 
 #[cfg(test)]
@@ -440,5 +513,8 @@ mod tests {
         assert!(rt.find("settings-read-receipts").is_some());
         assert!(Section::Devices.matches("MICRO"));
         assert!(!Section::Appearance.matches("receipts"));
+        assert!(Section::General.matches("up arrow"));
+        assert!(Section::Chats.matches("density"));
+        assert!(Section::Chats.matches("right click"));
     }
 }

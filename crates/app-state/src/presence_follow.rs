@@ -5,7 +5,7 @@ use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 use crate::data::{Presence, PresenceKind};
 
-const FOLLOWED_META_KEY: &str = "presence.followed";
+pub const FOLLOWED_META_KEY: &str = "presence.followed";
 pub const NOTIFY_WHEN_AVAILABLE: &str = "Notify when available";
 pub const TURN_OFF_NOTIFICATIONS: &str = "Turn off notifications";
 pub const MANAGE_STATUS_NOTIFICATIONS: &str = "Manage status notifications";

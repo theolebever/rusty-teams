@@ -496,7 +496,6 @@ impl<R: Remote> SyncEngine<R> {
                 delta_link: None,
             },
         };
-        let mut collected = collected;
         self.apply_chat_emotions(conversation_id, &mut collected)
             .await;
         let covered_from = oldest_fetched.filter(|_| has_next);

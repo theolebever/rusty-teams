@@ -77,6 +77,11 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         content = content.child(chips);
     }
     if !s.read_only && !s.agent.running {
+        for action in &s.agent.settings.actions {
+            let action = action.clone();
+            let label = action.label.clone();
+            content = content.child(crate::screens::button(&label, &format!("agent-action-{}", action.id), move |s: &mut UiState<A>, _| start_action(s, &action)));
+        }
         for agent in &s.agent.settings.agents {
             let (id, name) = (agent.id.clone(), agent.name.clone());
             content = content.child(crate::screens::button(&format!("Run {name}"), &format!("agent-{id}"), move |s: &mut UiState<A>, _| start(s, &id, &name)));
@@ -100,6 +105,31 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         }
     }
     col().key("agents").grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content)
+}
+
+fn start_action<A: Actions>(s: &mut UiState<A>, action: &agents::AgentAction) {
+    let Some(message) = s.messages.iter().rev().find(|message| !message.deleted && !message.system) else { s.toast.show("Open a conversation with a message first"); return; };
+    if action.ask_extra_instructions && s.agent.prompt.text.trim().is_empty() { s.toast.show("Enter additional instructions first"); return; }
+    let working_dir = if s.agent.working_dir.text.trim().is_empty() { action.working_dir.as_str() } else { s.agent.working_dir.text.trim() };
+    let session = agents::new_session_id();
+    let values = agents::Values {
+        message: message.text.clone(), sender: message.sender.clone(),
+        chat: s.selected.as_ref().and_then(|id| s.chats.iter().find(|chat| &chat.id == id)).map(|chat| chat.title.clone()).unwrap_or_default(),
+        conversation_id: s.selected.clone().unwrap_or_default(), message_id: message.id.clone(),
+        thread: s.messages.iter().map(|row| format!("{}: {}", row.sender, row.text)).collect::<Vec<_>>().join("\n"),
+        extra: s.agent.prompt.text.clone(), prompt: s.agent.prompt.text.clone(), cwd: working_dir.into(),
+        session_id: session, agent: action.agent_id.clone(),
+    };
+    match agents::render(&action.prompt_template, &values) {
+        Ok(prompt) if !prompt.trim().is_empty() => {
+            s.agent.running = true;
+            s.agent.output = "Running…".into();
+            s.agent.current = Run { title: action.label.clone(), ..Default::default() };
+            s.actions.run_agent_action(&action.id, &prompt, working_dir, &values.session_id);
+        }
+        Ok(_) => s.toast.show("The action produced an empty prompt"),
+        Err(error) => s.toast.show(error.to_string()),
+    }
 }
 
 /// The GPUI client's run history (`agents.runs`), newest first. Read only: its records carry

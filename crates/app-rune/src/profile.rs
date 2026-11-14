@@ -26,11 +26,14 @@ enum Entry {
 
 #[derive(Default)]
 pub struct State {
+    pub followed: Vec<state::presence_follow::FollowedPerson>,
     history: Vec<(String, String)>,
     open: Option<(String, String)>,
     entries: HashMap<String, Entry>,
     /// A chat created for a person, waiting for the window loop to select it (it needs a `Tx`).
     pub chat_request: Option<String>,
+    pub reply_focus: bool,
+    pub read_requests: Vec<String>,
 }
 
 impl State {
@@ -168,6 +171,11 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let email = profile.and_then(|p| p.email.clone()).filter(|email| !email.trim().is_empty());
     let mut actions = row().w_full().gap(8.0).wrap();
     if !is_me {
+        let (follow_id, follow_name) = (user_id.clone(), title.clone());
+        let following = s.profile.followed.iter().any(|person| person.user_id == *user_id);
+        actions = actions.child(button("profile-follow", Some("notifications"), if following { state::presence_follow::TURN_OFF_NOTIFICATIONS } else { state::presence_follow::NOTIFY_WHEN_AVAILABLE }, false, move |s: &mut UiState<A>, _| {
+            s.actions.follow_presence(&follow_id, &follow_name, !following);
+        }));
         let (chat_id, call_id, call_name) = (user_id.clone(), user_id.clone(), title.clone());
         actions = actions
             .child(button("profile-chat", Some("chat_bubble"), "Chat", true, move |s: &mut UiState<A>, tx| {

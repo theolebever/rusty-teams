@@ -266,6 +266,7 @@ async fn refresh_loop(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "wires backend event and activity channels")]
 async fn realtime_loop(
     session: Session,
     engine: Arc<Engine>,

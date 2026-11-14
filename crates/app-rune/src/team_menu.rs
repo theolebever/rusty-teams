@@ -15,6 +15,12 @@ pub struct State {
     name: TextEdit,
     description: TextEdit,
     private: bool,
+    edit_channel: Option<String>,
+    delete_confirm: bool,
+    pending: bool,
+    loading: bool,
+    description_ready: bool,
+    error: Option<String>,
 }
 
 pub fn open<A: Actions>(s: &mut UiState<A>, id: &str, channel: bool, x: f32, y: f32) {
@@ -38,6 +44,7 @@ fn item<A: Actions + 'static>(label: &str, key: &str, action: impl Fn(&mut UiSta
 }
 
 pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if let Some(id) = &s.chatlist.team_menu.edit_channel { return Some(edit_dialog(s, id)); }
     if let Some(team) = &s.chatlist.team_menu.create_team { return Some(create_dialog(s, team)); }
     let (id, channel, x, y) = s.chatlist.team_menu.menu.as_ref()?;
     let p = active_palette();
@@ -49,6 +56,21 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if !s.read_only {
         if *channel {
             let row = s.channel(id)?;
+            if let Some(team) = s.teams.iter().find(|team| team.channels.iter().any(|channel| channel.id == *id)) {
+                let rights = s.chatlist.team_details.get(&team.id).map(|details| details.rights).unwrap_or_default();
+                for (delete, allowed, label) in [(false, rights.owner || rights.edit_channel, "Edit channel"), (true, rights.owner || rights.delete_channel, "Delete channel")] {
+                    if allowed {
+                        let (id, name) = (id.clone(), row.name.clone());
+                        menu = menu.child(item(label, if delete { "channel-delete" } else { "channel-edit" }, move |s: &mut UiState<A>| {
+                            let state = &mut s.chatlist.team_menu;
+                            state.edit_channel = Some(id.clone()); state.name = TextEdit::new(&name);
+                            state.description.clear(); state.delete_confirm = delete; state.pending = false; state.loading = !delete; state.error = None;
+                            state.description_ready = false;
+                            if !delete { s.actions.load_channel_description(&id); }
+                        }));
+                    }
+                }
+            }
             let pinned = s.chatlist.pinned_channels.contains(id);
             let chat = id.clone();
             menu = menu.child(item(if pinned { "Unpin channel" } else { "Pin channel" }, "channel-pin", move |s: &mut UiState<A>| s.actions.set_channel_pinned(&chat, !pinned)));
@@ -96,6 +118,55 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .child(menu.pin(Some(*x), Some(y.min(350.0)), None, None)))
 }
 
+pub fn description<A: Actions>(s: &mut UiState<A>, id: &str, result: Result<String, String>) {
+    let state = &mut s.chatlist.team_menu;
+    if state.edit_channel.as_deref() != Some(id) || state.delete_confirm { return; }
+    state.loading = false;
+    match result { Ok(value) => { state.description = TextEdit::new(value); state.description_ready = true; state.error = None; }, Err(error) => state.error = Some(error) }
+}
+
+pub fn changed<A: Actions>(s: &mut UiState<A>, id: &str, deleted: bool, result: Result<(), String>) {
+    let state = &mut s.chatlist.team_menu;
+    if state.edit_channel.as_deref() != Some(id) || !state.pending { return; }
+    state.pending = false;
+    match result {
+        Err(error) => state.error = Some(error),
+        Ok(()) => {
+            state.edit_channel = None;
+            if deleted && s.selected.as_deref() == Some(id) { s.selected = None; s.messages.clear(); }
+            s.toast.show(if deleted { "Channel deleted" } else { "Channel updated" });
+        }
+    }
+}
+
+fn edit_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
+    let state = &s.chatlist.team_menu;
+    let mut body = col().w_full().gap(12.0).padding(16.0)
+        .child(text(if state.delete_confirm { "Delete this channel? Its conversations and files may become unavailable." } else { "Edit channel" }).font(ts(16.0, 600.0)).wrap());
+    if !state.delete_confirm {
+        body = body.child(text_input(&state.name, ts(14.0, 400.0)).key("channel-edit-name").label("Channel name").w_full().on_edit(|s: &mut UiState<A>| &mut s.chatlist.team_menu.name));
+        if state.description_ready {
+            body = body.child(text_input(&state.description, ts(14.0, 400.0)).key("channel-edit-description").label("Description").w_full().on_edit(|s: &mut UiState<A>| &mut s.chatlist.team_menu.description));
+        }
+    }
+    if let Some(error) = &state.error { body = body.child(text(error.clone()).font(ts(12.0, 400.0)).wrap()); }
+    let id = id.to_owned();
+    body = body.child(crate::screens::button(if state.pending { "Saving…" } else if state.delete_confirm { "Confirm deletion" } else { "Save" }, "channel-edit-submit", move |s: &mut UiState<A>, _| {
+        let state = &mut s.chatlist.team_menu;
+        if s.read_only || state.pending || state.loading { return; }
+        if !state.delete_confirm && (state.name.text.trim().is_empty() || state.name.text.trim().chars().count() > teams_core::MAX_CHANNEL_NAME_LENGTH || state.description.text.chars().count() > teams_core::MAX_CHANNEL_DESCRIPTION_LENGTH) {
+            state.error = Some("Enter a name of 1–50 characters and a description of at most 1024 characters.".into()); return;
+        }
+        // A failed description fetch must not erase the server's description.
+        if !state.delete_confirm && !state.description_ready { s.actions.load_channel_description(&id); state.loading = true; state.error = None; return; }
+        state.pending = true;
+        s.actions.change_channel(&id, (!state.delete_confirm).then(|| (state.name.text.clone(), state.description.text.clone())));
+    }));
+    crate::shortcuts::card("channel-edit-dialog", 420.0, body, |s: &mut UiState<A>| {
+        if !s.chatlist.team_menu.pending { s.chatlist.team_menu.edit_channel = None; }
+    })
+}
+
 fn create_dialog<A: Actions + 'static>(s: &UiState<A>, team: &str) -> El {
     let p = active_palette();
     let state = &s.chatlist.team_menu;
@@ -138,6 +209,26 @@ mod tests {
         fn open(&self, _: &str) {}
         fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
         fn set_channel_pinned(&self, id: &str, pinned: bool) { self.0.borrow_mut().push(format!("pin {id} {pinned}")); }
+    }
+
+    #[test]
+    fn channel_edit_keeps_inputs_on_failure_and_ignores_stale_descriptions() {
+        let mut s = UiState::new(Fake::default());
+        s.chatlist.team_menu.edit_channel = Some("channel".into());
+        s.chatlist.team_menu.loading = true;
+        description(&mut s, "other", Ok("wrong".into()));
+        assert!(s.chatlist.team_menu.loading);
+        description(&mut s, "channel", Err("offline".into()));
+        assert!(!s.chatlist.team_menu.description_ready);
+        description(&mut s, "channel", Ok("Existing description".into()));
+        assert!(s.chatlist.team_menu.description_ready);
+        s.chatlist.team_menu.name = TextEdit::new("New name");
+        s.chatlist.team_menu.pending = true;
+        changed(&mut s, "channel", false, Err("denied".into()));
+        assert_eq!(s.chatlist.team_menu.name.text, "New name");
+        assert_eq!(s.chatlist.team_menu.description.text, "Existing description");
+        assert_eq!(s.chatlist.team_menu.edit_channel.as_deref(), Some("channel"));
+        assert!(!s.chatlist.team_menu.pending);
     }
 
     #[test]

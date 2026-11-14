@@ -208,7 +208,7 @@ pub(crate) fn i420_from_yuyv(data: &[u8], width: u32, height: u32) -> Option<I42
     for row in 0..height_rows {
         let source = &data[row * row_bytes..(row + 1) * row_bytes];
         let luma_row = &mut plane_y[row * stride_y as usize..][..width_pixels];
-        for (luma, pair) in luma_row.chunks_exact_mut(2).zip(source.chunks_exact(4)) {
+        for (luma, pair) in luma_row.as_chunks_mut::<2>().0.iter_mut().zip(source.as_chunks::<4>().0.iter()) {
             luma[0] = pair[0];
             luma[1] = pair[2];
         }
@@ -220,8 +220,8 @@ pub(crate) fn i420_from_yuyv(data: &[u8], width: u32, height: u32) -> Option<I42
         let red_row = &mut plane_v[row * stride_v as usize..][..width_pixels / 2];
         for (column, (blue, red)) in blue_row.iter_mut().zip(red_row.iter_mut()).enumerate() {
             let offset = column * 4;
-            *blue = ((u16::from(upper[offset + 1]) + u16::from(lower[offset + 1]) + 1) / 2) as u8;
-            *red = ((u16::from(upper[offset + 3]) + u16::from(lower[offset + 3]) + 1) / 2) as u8;
+            *blue = (u16::from(upper[offset + 1]) + u16::from(lower[offset + 1])).div_ceil(2) as u8;
+            *red = (u16::from(upper[offset + 3]) + u16::from(lower[offset + 3])).div_ceil(2) as u8;
         }
     }
     Some(buffer)

@@ -59,7 +59,7 @@ impl ModelSpec {
             InputRange::Signed => (2. / 255., -1.),
         };
         let mut data = vec![0f32; 3 * plane];
-        for (index, pixel) in rgba.chunks_exact(CHANNELS).enumerate() {
+        for (index, pixel) in rgba.as_chunks::<CHANNELS>().0.iter().enumerate() {
             for channel in 0..3 {
                 data[channel * plane + index] = f32::from(pixel[channel]) * scale + offset;
             }

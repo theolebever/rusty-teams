@@ -5,12 +5,22 @@
 
 mod agenda;
 mod agent_panel;
+mod agent_runs;
 mod agent_settings;
 mod arguments;
 mod avatar;
 mod bridge;
 mod cloud_picker;
 mod composed;
+mod formatting;
+mod outbox;
+mod schedule;
+mod slash;
+mod translation;
+mod library;
+mod video;
+mod inline_compose;
+mod meeting_form;
 mod emoji_picker;
 mod gif_picker;
 mod mentions;
@@ -21,6 +31,7 @@ mod calls_backend;
 mod calendar_grid;
 mod icons;
 mod cards;
+mod card_state;
 mod image_viewer;
 mod link_preview;
 mod media;
@@ -32,10 +43,12 @@ mod switcher;
 mod taskbar;
 mod tray;
 mod chat_menu;
+mod chat_window;
 mod members;
 mod new_chat;
 mod voice;
 mod notifications;
+mod desktop_toast;
 mod profile;
 mod quick_views;
 mod reactions;
@@ -81,6 +94,7 @@ fn init() -> UiState<Bridge> {
         }
     });
     let mut state = UiState::new(bridge);
+    state.starting = true;
     state.launch_command = arguments.command.clone();
     // The stored preferences are queued already; startup reads them (tray, close to tray).
     for update in state.actions.poll() { state.apply(update); }
@@ -102,6 +116,10 @@ fn setup(_: &mut UiState<Bridge>, wake: Waker) {
 }
 
 fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
+    if let Some(bytes) = s.media.clipboard_image.take() {
+        if let Some(image) = ClipboardImage::from_png(bytes) { tx.copy_rich(ClipboardContent::default().with_image(image)); }
+        else { s.toast.show("The image is too large for the clipboard"); }
+    }
     if s.media.voice.is_playing() { tx.wake_after(std::time::Duration::from_millis(100)); }
     let now = std::time::Instant::now();
     let input = app_backend::user_activity::latest_input(rune::last_input(), app_backend::user_activity::system_idle(), now);
@@ -116,6 +134,8 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     s.typing.retain(|_, event| (chrono::Utc::now() - event.received_at).num_seconds() < 8);
     let changed = !updates.is_empty() || s.typing.len() != before || s.media.voice.is_playing();
     for update in updates {
+        if let Update::PopOutChat(id) = update { chat_window::open(s, id); continue; }
+        chat_window::forward(s, &update);
         if let Some(window) = &s.call_window {
             if matches!(&update, Update::VideoReady) {
                 window.video(s.actions.take_video());
@@ -140,10 +160,11 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     if opened { rune_notify::bring_to_front(); }
     let call_changed = calls::poll(s, _now, tx);
     let reminded = reminders::poll(s, chrono::Utc::now());
+    let translated = translation::poll(s);
     notifications::ring(s);
     taskbar::set_badge(notifications::badge_count(s));
     tray::sync(s);
-    changed || noticed || ticked || opened || call_changed || reminded
+    changed || noticed || ticked || opened || call_changed || reminded || translated
 }
 
 fn main() {
@@ -196,6 +217,7 @@ fn main() {
     ARGUMENTS.set(arguments).expect("arguments are initialized once");
     if demo {
         App::new(AppSpec {
+            poll: Some(demo_poll),
             scenes: &[
                 ("calendar", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Calendar),
                 ("activity", |s: &mut UiState<DemoActions>| s.screens.screen = screens::Screen::Activity),
@@ -293,7 +315,7 @@ fn demo_init() -> UiState<DemoActions> {
             cancelled: false,
             all_day: false,
             organizer: Some("Ada Example".into()),
-            ical_uid: None,
+            ical_uid: None, dial_in: None,
             join_url: None,
             thread_id: Some("c0".into()),
             response: chatsvc::ResponseType::NotResponded,
@@ -333,11 +355,12 @@ fn demo_init() -> UiState<DemoActions> {
     }]));
     s.selected = Some("c0".into());
     s.member_counts.insert("c0".into(), 5);
-    s.pinned = Some(types::PinnedRow {
+    s.pinned = vec![types::PinnedRow {
+        message_id: "0".into(),
         conversation_id: "c0".into(),
         sender: "Ada Example".into(),
         text: "Rollout for Friday:".into(),
-    });
+    }];
     let rows = (0..60)
         .map(|i| MessageRow {
             forwarded: false, importance: Default::default(),
@@ -359,7 +382,24 @@ fn demo_init() -> UiState<DemoActions> {
         conversation_id: "c0".into(),
         rows,
     });
+    if let Some(arguments) = ARGUMENTS.get() {
+        s.launch_command = arguments.command.clone();
+        s.demo_ready_at = arguments.demo_sync.map(|delay| std::time::Instant::now() + delay);
+        s.starting = s.demo_ready_at.is_some();
+    }
     s
+}
+
+fn demo_poll(s: &mut UiState<DemoActions>, _: f64, tx: &mut Tx) -> bool {
+    let mut changed = false;
+    if let Some(at) = s.demo_ready_at {
+        if let Some(remaining) = at.checked_duration_since(std::time::Instant::now()) { tx.wake_after(remaining); return false; }
+        s.demo_ready_at = None;
+        s.starting = false;
+        changed = true;
+    }
+    if let Some(command) = s.launch_command.take() { command.run(s, tx); return true; }
+    changed
 }
 
 fn demo_view(s: &UiState<DemoActions>, cx: &mut Cx<UiState<DemoActions>>) -> El {
