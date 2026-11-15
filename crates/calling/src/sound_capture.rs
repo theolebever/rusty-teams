@@ -33,11 +33,17 @@ fn audio_error(what: &str, error: impl std::fmt::Display) -> Error {
 }
 
 fn named_input(choice: &DeviceChoice) -> Option<Device> {
-    let DeviceChoice::Device(wanted) = choice else { return None };
-    cpal::default_host()
-        .input_devices()
-        .ok()?
-        .find(|device| device.description().is_ok_and(|description| description.name() == wanted))
+    let DeviceChoice::Device(wanted) = choice else {
+        return None;
+    };
+    let host = cpal::default_host();
+    let mut devices = host.input_devices().ok()?;
+    devices.find(|device| {
+        device.description().is_ok_and(|description| {
+            let name = description.name();
+            name == *wanted || name.contains(wanted) || wanted.contains(&name)
+        })
+    })
 }
 
 pub struct MicrophoneStart {
@@ -49,43 +55,76 @@ pub struct MicrophoneStart {
 pub fn start_microphone(choice: &DeviceChoice, queue: SampleQueue) -> Result<MicrophoneStart> {
     match crate::mic_windows::start_communications_microphone(choice, queue.clone()) {
         Ok((capture, name, effects)) => {
-            let active: Vec<String> = effects.iter().filter(|effect| effect.enabled).map(|effect| effect.name()).collect();
+            let active: Vec<String> = effects
+                .iter()
+                .filter(|effect| effect.enabled)
+                .map(|effect| effect.name())
+                .collect();
             Ok(MicrophoneStart {
                 capture,
-                source: format!("wasapi communications ({name}), windows effects: {}", active.join(", ")),
+                source: format!(
+                    "wasapi communications ({name}), windows effects: {}",
+                    active.join(", ")
+                ),
             })
         }
         Err(error) => {
-            let capture = start_cpal_microphone(choice, queue)?;
-            Ok(MicrophoneStart { capture, source: format!("cpal, wasapi communications failed: {error}") })
+            let (capture, name) = start_cpal_microphone(choice, queue)?;
+            Ok(MicrophoneStart {
+                capture,
+                source: format!("cpal ({name}), wasapi communications failed: {error}"),
+            })
         }
     }
 }
 
 #[cfg(not(windows))]
 pub fn start_microphone(choice: &DeviceChoice, queue: SampleQueue) -> Result<MicrophoneStart> {
-    let capture = start_cpal_microphone(choice, queue)?;
-    Ok(MicrophoneStart { capture, source: "cpal".into() })
+    let (capture, name) = start_cpal_microphone(choice, queue)?;
+    Ok(MicrophoneStart {
+        capture,
+        source: format!("cpal ({name})"),
+    })
 }
 
-fn start_cpal_microphone(choice: &DeviceChoice, queue: SampleQueue) -> Result<Capture> {
-    let device = named_input(choice)
-        .or_else(|| cpal::default_host().default_input_device())
-        .ok_or_else(|| Error::Audio("no microphone".into()))?;
-    let config = device.default_input_config().map_err(|error| audio_error("microphone format", error))?;
-    start_cpal_input(device, config.sample_format(), config.config(), queue)
+fn start_cpal_microphone(choice: &DeviceChoice, queue: SampleQueue) -> Result<(Capture, String)> {
+    let device = match choice {
+        DeviceChoice::SystemDefault => cpal::default_host()
+            .default_input_device()
+            .ok_or_else(|| Error::Audio("no microphone".into()))?,
+        DeviceChoice::Device(wanted) => named_input(choice).ok_or_else(|| {
+            Error::Audio(format!(
+                "microphone `{wanted}` not found for capture; pick Default device or another mic"
+            ))
+        })?,
+    };
+    let name = device
+        .description()
+        .map(|description| description.name().to_owned())
+        .unwrap_or_else(|_| "unknown".into());
+    let config = device
+        .default_input_config()
+        .map_err(|error| audio_error("microphone format", error))?;
+    let capture = start_cpal_input(device, config.sample_format(), config.config(), queue)?;
+    Ok((capture, name))
 }
 
 #[cfg(windows)]
 pub fn start_loopback(queue: SampleQueue) -> Result<LoopbackStart> {
     match crate::loopback_windows::start_process_loopback(queue.clone(), std::process::id()) {
-        Ok(capture) => Ok(LoopbackStart { capture, kind: LoopbackKind::ProcessExclude, warning: None }),
+        Ok(capture) => Ok(LoopbackStart {
+            capture,
+            kind: LoopbackKind::ProcessExclude,
+            warning: None,
+        }),
         Err(error) => {
             let capture = start_endpoint_loopback(queue)?;
             Ok(LoopbackStart {
                 capture,
                 kind: LoopbackKind::WholeEndpoint,
-                warning: Some(format!("process loopback unavailable ({error}); capturing the whole endpoint, call audio may echo")),
+                warning: Some(format!(
+                    "process loopback unavailable ({error}); capturing the whole endpoint, call audio may echo"
+                )),
             })
         }
     }
@@ -96,13 +135,19 @@ fn start_endpoint_loopback(queue: SampleQueue) -> Result<Capture> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| Error::Audio("no output device".into()))?;
-    let config = device.default_output_config().map_err(|error| audio_error("output format", error))?;
+    let config = device
+        .default_output_config()
+        .map_err(|error| audio_error("output format", error))?;
     start_cpal_input(device, config.sample_format(), config.config(), queue)
 }
 
 #[cfg(not(windows))]
 pub fn start_loopback(queue: SampleQueue) -> Result<LoopbackStart> {
-    Ok(LoopbackStart { capture: start_monitor(queue)?, kind: LoopbackKind::Monitor, warning: None })
+    Ok(LoopbackStart {
+        capture: start_monitor(queue)?,
+        kind: LoopbackKind::Monitor,
+        warning: None,
+    })
 }
 
 #[cfg(not(windows))]
@@ -113,12 +158,21 @@ fn start_monitor(queue: SampleQueue) -> Result<Capture> {
 
     const READ_BYTES: usize = 960;
     let mut child = Command::new("parec")
-        .args(["--device=@DEFAULT_MONITOR@", "--format=s16le", "--rate=48000", "--channels=1", "--latency-msec=10"])
+        .args([
+            "--device=@DEFAULT_MONITOR@",
+            "--format=s16le",
+            "--rate=48000",
+            "--channels=1",
+            "--latency-msec=10",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| audio_error("parec", error))?;
-    let mut output = child.stdout.take().ok_or_else(|| Error::Audio("parec without output".into()))?;
+    let mut output = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Audio("parec without output".into()))?;
     let child = Arc::new(Mutex::new(child));
     let watched = child.clone();
     Capture::spawn_thread("sound-monitor", move |stop| {
@@ -128,14 +182,21 @@ fn start_monitor(queue: SampleQueue) -> Result<Capture> {
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                let mut child = watched.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut child = watched
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let _ = child.kill();
                 let _ = child.wait();
             }
         });
         let mut bytes = [0u8; READ_BYTES];
         while output.read_exact(&mut bytes).is_ok() {
-            let samples: Vec<i16> = bytes.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
+            let samples: Vec<i16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair))
+                .collect();
             queue.push(&samples);
         }
         let _ = watcher.join();
@@ -143,7 +204,12 @@ fn start_monitor(queue: SampleQueue) -> Result<Capture> {
     .map_err(|error| audio_error("monitor thread", error))
 }
 
-fn start_cpal_input(device: Device, format: SampleFormat, config: StreamConfig, queue: SampleQueue) -> Result<Capture> {
+fn start_cpal_input(
+    device: Device,
+    format: SampleFormat,
+    config: StreamConfig,
+    queue: SampleQueue,
+) -> Result<Capture> {
     let (ready_sender, ready) = mpsc::channel::<Result<()>>();
     let capture = Capture::spawn_thread("sound-input", move |stop| {
         match build_stream(&device, format, &config, queue) {
@@ -160,11 +226,18 @@ fn start_cpal_input(device: Device, format: SampleFormat, config: StreamConfig, 
         }
     })
     .map_err(|error| audio_error("input thread", error))?;
-    ready.recv().map_err(|_| Error::Audio("input thread ended".into()))??;
+    ready
+        .recv()
+        .map_err(|_| Error::Audio("input thread ended".into()))??;
     Ok(capture)
 }
 
-fn build_stream(device: &Device, format: SampleFormat, config: &StreamConfig, queue: SampleQueue) -> Result<Stream> {
+fn build_stream(
+    device: &Device,
+    format: SampleFormat,
+    config: &StreamConfig,
+    queue: SampleQueue,
+) -> Result<Stream> {
     let channels = usize::from(config.channels);
     let mut resampler = MonoResampler::new(config.sample_rate);
     let mut converted = Vec::new();

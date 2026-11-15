@@ -161,7 +161,10 @@ mod tests {
 
     #[test]
     fn explicit_state_wins_over_participation() {
-        assert!(!post_followed(Some(PostFollowState::ExplicitUnfollow), true));
+        assert!(!post_followed(
+            Some(PostFollowState::ExplicitUnfollow),
+            true
+        ));
         assert!(post_followed(Some(PostFollowState::ExplicitFollow), false));
         assert!(post_followed(Some(PostFollowState::ImplicitFollow), false));
         assert!(post_followed(None, true));

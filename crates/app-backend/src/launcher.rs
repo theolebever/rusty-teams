@@ -1,14 +1,14 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::watch;
 use std::time::Duration;
+use tokio::sync::watch;
 
 use calling::meeting::{LiveMeeting, fetch_live_meeting};
 use calling::{
-    AcceptMode, BackgroundCache, CallControl, CallEngine, CallHandle, CallSpec, CallState, CallUpdate,
-    DefaultBackground, DeviceChoice, EndReason, EngineConfig, EngineEvent, MeetingTarget,
-    call_channel,
+    AcceptMode, BackgroundCache, CallControl, CallEngine, CallHandle, CallSpec, CallState,
+    CallUpdate, DefaultBackground, DeviceChoice, EndReason, EngineConfig, EngineEvent,
+    MeetingTarget, call_channel,
 };
 use session::{Session, SessionConfig, Transport};
 
@@ -23,7 +23,6 @@ const START_RETRY_STEADY: Duration = Duration::from_secs(10);
 pub const NOT_READY: &str =
     "Could not reach the Teams calling service. Check your connection and try again.";
 const READY_WAIT: Duration = Duration::from_secs(30);
-const CALL_DUMPS_DIR: &str = "call-dumps";
 
 pub struct CallLauncher {
     engine: watch::Sender<Option<CallEngine>>,
@@ -163,16 +162,16 @@ impl CallLauncher {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn create_meeting(
+    pub async fn resolve_new_event(
         &self,
         draft: MeetingDraft,
-    ) -> Result<chatsvc::CreatedEvent, String> {
+    ) -> Result<chatsvc::NewEvent, String> {
         let session = self
             .ready_engine()
             .await
             .ok_or_else(|| NOT_READY.to_owned())?
             .session();
-        let graph = graph::Graph::new(session.clone());
+        let graph = graph::Graph::new(session);
         let mut attendees = Vec::with_capacity(draft.people.len());
         for invitee in &draft.people {
             let looked_up = match invitee.mail {
@@ -181,7 +180,7 @@ impl CallLauncher {
             };
             attendees.push(attendee_for(invitee, looked_up)?);
         }
-        let event = chatsvc::NewEvent {
+        Ok(chatsvc::NewEvent {
             subject: draft.subject,
             start: draft.start,
             end: draft.end,
@@ -191,9 +190,37 @@ impl CallLauncher {
             attendees,
             repeat: draft.repeat,
             details: draft.details,
-        };
+        })
+    }
+
+    pub async fn create_meeting(
+        &self,
+        draft: MeetingDraft,
+    ) -> Result<chatsvc::CreatedEvent, String> {
+        let session = self
+            .ready_engine()
+            .await
+            .ok_or_else(|| NOT_READY.to_owned())?
+            .session();
+        let event = self.resolve_new_event(draft).await?;
         chatsvc::Calendar::new(&session)
             .create_event(&event)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn create_meeting_with_join(
+        &self,
+        event: chatsvc::NewEvent,
+        join_url: &str,
+    ) -> Result<chatsvc::CreatedEvent, String> {
+        let session = self
+            .ready_engine()
+            .await
+            .ok_or_else(|| NOT_READY.to_owned())?
+            .session();
+        chatsvc::Calendar::new(&session)
+            .create_event_with_join(&event, join_url)
             .await
             .map_err(|error| error.to_string())
     }
@@ -213,6 +240,7 @@ impl CallLauncher {
         ical_uid: Option<&str>,
         reply: chatsvc::Reply,
         send_response: bool,
+        comment: &str,
     ) -> Result<(), String> {
         let session = self
             .ready_engine()
@@ -220,7 +248,39 @@ impl CallLauncher {
             .ok_or_else(|| NOT_READY.to_owned())?
             .session();
         chatsvc::Calendar::new(&session)
-            .respond(event_id, ical_uid, reply, send_response)
+            .respond(event_id, ical_uid, reply, send_response, comment)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn calendar_event_details(
+        &self,
+        event_id: &str,
+        ical_uid: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let session = self
+            .ready_engine()
+            .await
+            .ok_or_else(|| NOT_READY.to_owned())?
+            .session();
+        chatsvc::Calendar::new(&session)
+            .event_details(event_id, ical_uid)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn delete_calendar_event(
+        &self,
+        event_id: &str,
+        ical_uid: Option<&str>,
+    ) -> Result<(), String> {
+        let session = self
+            .ready_engine()
+            .await
+            .ok_or_else(|| NOT_READY.to_owned())?
+            .session();
+        chatsvc::Calendar::new(&session)
+            .delete_event(event_id, ical_uid)
             .await
             .map_err(|error| error.to_string())
     }
@@ -324,9 +384,10 @@ async fn start_engine(
 )> {
     let session = Session::with_transport(transport.clone(), SessionConfig::for_app()).await?;
     let poll_session = Session::with_transport(transport, SessionConfig::for_app()).await?;
+    let dump_dir = crate::support::call_dumps_dir();
     let config = EngineConfig {
         ringable,
-        dump_dir: crate::diagnostics::directory().map(|directory| directory.join(CALL_DUMPS_DIR)),
+        dump_dir,
         ..EngineConfig::default()
     };
     CallEngine::start(session, poll_session, config).await
@@ -423,24 +484,39 @@ mod tests {
     #[tokio::test]
     async fn waiting_gives_up_after_the_timeout() {
         let (_sender, receiver) = watch::channel(None::<u32>);
-        assert_eq!(wait_until_ready(receiver, Duration::from_millis(20)).await, None);
+        assert_eq!(
+            wait_until_ready(receiver, Duration::from_millis(20)).await,
+            None
+        );
     }
 
     #[tokio::test]
     async fn waiting_gives_up_when_the_launcher_is_gone() {
         let (sender, receiver) = watch::channel(None::<u32>);
         drop(sender);
-        assert_eq!(wait_until_ready(receiver, Duration::from_secs(5)).await, None);
+        assert_eq!(
+            wait_until_ready(receiver, Duration::from_secs(5)).await,
+            None
+        );
     }
 
     #[tokio::test]
     async fn queued_call_fails_with_notice_after_the_timeout() {
         let (_sender, receiver) = watch::channel(None);
         let (mut handle, control) = call_channel();
-        queue_outgoing(receiver, Duration::from_millis(20), CallSpec::Echo, OutgoingKind::Audio, control).await;
+        queue_outgoing(
+            receiver,
+            Duration::from_millis(20),
+            CallSpec::Echo,
+            OutgoingKind::Audio,
+            control,
+        )
+        .await;
         assert_eq!(
             handle.updates.recv().await,
-            Some(CallUpdate::State(CallState::Ended { reason: EndReason::Failed(NOT_READY.to_owned()) }))
+            Some(CallUpdate::State(CallState::Ended {
+                reason: EndReason::Failed(NOT_READY.to_owned())
+            }))
         );
     }
 
@@ -449,10 +525,19 @@ mod tests {
         let (_sender, receiver) = watch::channel(None);
         let (mut handle, control) = call_channel();
         handle.commands.send(CallCommand::Hangup).unwrap();
-        queue_outgoing(receiver, Duration::from_secs(30), CallSpec::Echo, OutgoingKind::Video, control).await;
+        queue_outgoing(
+            receiver,
+            Duration::from_secs(30),
+            CallSpec::Echo,
+            OutgoingKind::Video,
+            control,
+        )
+        .await;
         assert_eq!(
             handle.updates.recv().await,
-            Some(CallUpdate::State(CallState::Ended { reason: EndReason::Cancelled }))
+            Some(CallUpdate::State(CallState::Ended {
+                reason: EndReason::Cancelled
+            }))
         );
     }
 }

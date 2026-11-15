@@ -29,6 +29,10 @@ mod call_window;
 mod window_icon;
 mod calls_backend;
 mod calendar_grid;
+/// The path app-call-model's included agenda source imports its all-day rule from.
+mod week_grid {
+    pub(crate) use crate::calendar_grid::model::is_effective_all_day;
+}
 mod icons;
 mod cards;
 mod card_state;

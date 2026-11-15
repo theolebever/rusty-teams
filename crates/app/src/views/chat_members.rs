@@ -1,4 +1,3 @@
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
@@ -7,19 +6,21 @@ use gpui_kit::component::fluent::{
     MENU_ITEM_PADDING_X, MENU_LIST_PADDING,
 };
 use gpui_kit::component::popover::{Popover, PopoverState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::add_people_dialog::open_add_people;
 use super::avatar::{person_avatar, with_presence};
-use super::profile_card::opens_profile;
 use super::chat_menu::confirm_leave;
+use super::profile_card::opens_profile;
 use super::widgets::icon;
 use crate::app_state::AppState;
 use crate::chat_actions::TITLE_LIMIT;
 use crate::chat_members::{MemberRow, can_leave, member_rows};
 use crate::data::Directory;
+use crate::i18n::tr;
 use crate::notice::truncated;
 use crate::theme;
 
@@ -268,7 +269,11 @@ fn action_row(id: &'static str, icon_name: IconName, label: &'static str) -> Sta
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(icon_name, f32::from(MENU_ICON_GLYPH), theme::text_soft())),
+                .child(icon(
+                    icon_name,
+                    f32::from(MENU_ICON_GLYPH),
+                    theme::text_soft(),
+                )),
         )
         .child(label)
 }
@@ -289,10 +294,10 @@ fn confirm_remove(
     window.open_alert_dialog(cx, move |alert, _, _| {
         let (app, chat_id, user_id) = (app.clone(), chat_id.clone(), user_id.clone());
         let cancel = Button::new("remove-member-cancel")
-            .label("Cancel")
+            .label(tr("common.cancel"))
             .on_click(|_, window, cx| window.close_dialog(cx));
         let remove = Button::new("remove-member-confirm")
-            .label("Remove")
+            .label(tr("common.remove"))
             .danger()
             .on_click(move |_, window, cx| {
                 app.update(cx, |state, cx| {

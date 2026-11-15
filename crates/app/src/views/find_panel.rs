@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use chrono::{Local, NaiveDate, Offset};
-use gpui_kit::component::scroll::ScrollableElement as _;
+use chrono::{Local, NaiveDate};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -240,7 +240,16 @@ impl FindPanel {
             .filter_map(from_server)
             .filter(|hit| self.filters.admits(hit, today, offset))
             .collect();
+        let current = self
+            .current_index
+            .and_then(|index| self.hits.get(index))
+            .map(|hit| hit.message_id.clone());
         self.hits = merge(self.local_hits.clone(), server);
+        self.current_index = current.and_then(|message_id| {
+            self.hits
+                .iter()
+                .position(|hit| hit.message_id == message_id)
+        });
         self.status = Status::Ready;
         cx.notify();
     }
@@ -468,7 +477,7 @@ impl FindPanel {
         hit: &FindHit,
         index: usize,
         today: NaiveDate,
-        offset: chrono::FixedOffset,
+        offset: app_base::format::Zone,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let current = self.current_index == Some(index);
@@ -521,7 +530,8 @@ impl FindPanel {
                 div()
                     .text_size(px(13.))
                     .text_color(theme::text_soft())
-                    .line_clamp(2).text_ellipsis()
+                    .line_clamp(2)
+                    .text_ellipsis()
                     .child(StyledText::new(hit.text.clone()).with_highlights(marks)),
             )
             .on_click(cx.listener(move |panel, _, _, cx| panel.pick(index, cx)))
@@ -585,9 +595,8 @@ fn panel_title(selection: &Selection) -> &'static str {
     }
 }
 
-fn today_and_offset() -> (NaiveDate, chrono::FixedOffset) {
-    let now = Local::now();
-    (now.date_naive(), now.offset().fix())
+fn today_and_offset() -> (NaiveDate, app_base::format::Zone) {
+    (Local::now().date_naive(), app_base::format::Zone::Local)
 }
 
 fn local_hits(

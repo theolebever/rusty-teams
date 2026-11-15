@@ -1028,7 +1028,7 @@ impl Actions for Bridge {
         let id = id.to_owned();
         let ical_uid = ical_uid.map(str::to_owned);
         app_backend::runtime::handle().spawn(async move {
-            match calls.respond_to_event(&id, ical_uid.as_deref(), reply, send_response).await {
+            match calls.respond_to_event(&id, ical_uid.as_deref(), reply, send_response, "").await {
                 Ok(()) => {
                     if let Some(nudge) = &*shared.calendar_nudge.lock().unwrap_or_else(PoisonError::into_inner) { let _ = nudge.send(()); }
                     shared.publish(Update::CalendarRefresh);

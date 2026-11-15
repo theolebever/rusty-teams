@@ -13,6 +13,7 @@ use gpui_kit::*;
 
 use super::widgets::icon;
 use crate::app_state::AppState;
+use crate::i18n::tr;
 use crate::theme;
 
 pub const GROUP_NAME_FORM: &str = "shell/islands/main/group-name-form";
@@ -135,13 +136,13 @@ impl Render for GroupNameForm {
                     .gap(px(FORM_GAP))
                     .child(
                         Button::new("group-name-cancel")
-                            .label("Cancel")
+                            .label(tr("common.cancel"))
                             .on_click(cx.listener(|form, _, window, cx| form.close(window, cx))),
                     )
                     .child(
                         Button::new("group-name-save")
                             .primary()
-                            .label("Save")
+                            .label(tr("common.save"))
                             .disabled(problem.is_some())
                             .on_click(cx.listener(|form, _, window, cx| form.save(window, cx))),
                     ),
@@ -152,7 +153,12 @@ impl Render for GroupNameForm {
 #[derive(Clone, Default)]
 pub struct GroupNameSlot(Rc<RefCell<Option<Entity<GroupNameForm>>>>);
 
-pub fn group_name_button(app: &Entity<AppState>, slot: &GroupNameSlot, chat_id: &str, title: &str) -> AnyElement {
+pub fn group_name_button(
+    app: &Entity<AppState>,
+    slot: &GroupNameSlot,
+    chat_id: &str,
+    title: &str,
+) -> AnyElement {
     let (app, chat_id, title) = (app.clone(), chat_id.to_owned(), title.to_owned());
     let form = slot.0.clone();
     let reset = form.clone();
@@ -174,7 +180,8 @@ pub fn group_name_button(app: &Entity<AppState>, slot: &GroupNameSlot, chat_id: 
         })
         .content(move |_, window, cx| {
             let existing = form.borrow().clone();
-            if let Some(existing) = existing.filter(|existing| existing.read(cx).chat_id == chat_id) {
+            if let Some(existing) = existing.filter(|existing| existing.read(cx).chat_id == chat_id)
+            {
                 return existing;
             }
             let popover = cx.entity().downgrade();

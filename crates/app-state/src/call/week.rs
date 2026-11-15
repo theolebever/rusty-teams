@@ -27,6 +27,7 @@ impl AppState {
 
     pub fn open_calendar(&mut self, cx: &mut dyn Host) {
         self.calendar_week.start = Some(self.calendar_start());
+        self.request_calendar_scroll_to_now(cx);
         self.load_calendar_week(cx);
     }
 
@@ -41,6 +42,14 @@ impl AppState {
         self.open_calendar(cx);
     }
 
+    pub fn request_calendar_scroll_to_now(&mut self, cx: &mut dyn Host) {
+        if !crate::call::calendar_now::shows_hour_grid(self.calendar_week.span) {
+            return;
+        }
+        self.calendar_scroll_to_now = self.calendar_scroll_to_now.wrapping_add(1);
+        cx.notify();
+    }
+
     pub fn set_calendar_span(&mut self, span: CalendarSpan, cx: &mut dyn Host) {
         let today = Local::now().date_naive();
         let start = self.calendar_start();
@@ -48,6 +57,9 @@ impl AppState {
             start <= today && today < start + Duration::days(self.calendar_week.span.days());
         self.calendar_week.span = span;
         self.calendar_week.start = Some(span.start_for(if shown { today } else { start }));
+        if crate::call::calendar_now::shows_hour_grid(span) {
+            self.request_calendar_scroll_to_now(cx);
+        }
         self.load_calendar_week(cx);
     }
 
@@ -61,7 +73,7 @@ impl AppState {
         self.show_calendar_date(date, cx);
     }
 
-    fn load_calendar_week(&mut self, cx: &mut dyn Host) {
+    pub(crate) fn load_calendar_week(&mut self, cx: &mut dyn Host) {
         let start = self.calendar_start();
         let offset = Local::now().offset().fix();
         let (from, to) = week_range(start, self.calendar_week.span.days(), offset);
@@ -82,23 +94,114 @@ impl AppState {
         let request = self.calendar_week.request;
         self.calendar_week.loading = true;
         cx.notify();
-        let receiver = crate::runtime::spawn(async move { launcher.calendar_view(from, to).await });
+        let store = self.store.clone();
+        let receiver = crate::runtime::spawn(async move {
+            let mut accounts = store::load_calendar_accounts(&store);
+            let mut combined = Vec::new();
+            let mut outlook_failed = false;
+            if accounts.outlook_selected {
+                match launcher.calendar_view(from, to).await {
+                    Ok(events) => combined.extend(events),
+                    Err(error) => {
+                        outlook_failed = true;
+                        crate::diagnostics::record(format!(
+                            "calls: outlook calendar week not loaded: {error}"
+                        ));
+                    }
+                }
+            }
+            let mut google_error = None;
+            match crate::google_calendar_sync::fetch_google_events(&mut accounts, from, to).await {
+                Ok(events) => {
+                    let _ = store::save_calendar_accounts(&store, &accounts);
+                    combined.extend(events);
+                }
+                Err(error) => {
+                    crate::diagnostics::record(format!(
+                        "calls: google calendar week not loaded: {error}"
+                    ));
+                    google_error = Some(error);
+                }
+            }
+            if combined.is_empty() && outlook_failed && !accounts.has_google() {
+                return Err(CALENDAR_LOAD_FAILURE.to_owned());
+            }
+            Ok((chatsvc::merge_calendar_events(combined), google_error))
+        });
         let this = cx.handle();
         cx.spawn(Box::pin(async move {
-            let loaded = receiver.await.ok().and_then(Result::ok);
+            let loaded = receiver
+                .await
+                .unwrap_or_else(|_| Err(CALENDAR_LOAD_FAILURE.to_owned()));
             this.update(move |state, cx| {
                 if state.calendar_week.request != request {
                     return;
                 }
                 state.calendar_week.loading = false;
                 match loaded {
-                    Some(events) => state.calendar_week.events = events,
-                    None => state.raise_notice(CALENDAR_LOAD_FAILURE.to_owned(), None, cx),
+                    Ok((events, google_error)) => {
+                        // Keep detail enrichment (agenda/location/RSVP counts) across week reloads.
+                        let previous = std::mem::take(&mut state.calendar_week.events);
+                        let mut events = events;
+                        retain_peek_details(&previous, &mut events);
+                        state.calendar_week.events = events;
+                        if let Some(error) = google_error {
+                            if !state.google_sync_notice_shown {
+                                state.google_sync_notice_shown = true;
+                                state.raise_notice(error, None, cx);
+                            }
+                        }
+                    }
+                    Err(notice) => state.raise_notice(notice, None, cx),
                 }
                 cx.notify();
             })
             .await;
         }));
+    }
+}
+
+fn retain_peek_details(previous: &[CalendarEvent], events: &mut [CalendarEvent]) {
+    for event in events {
+        let Some(old) = previous
+            .iter()
+            .find(|candidate| candidate.object_id == event.object_id)
+        else {
+            continue;
+        };
+        if event.body_preview.is_none() {
+            event.body_preview = old.body_preview.clone();
+        }
+        if event.body_html.is_none() {
+            event.body_html = old.body_html.clone();
+        }
+        if event.attendees.is_empty() {
+            event.attendees = old.attendees.clone();
+        }
+        if event.location.is_none() {
+            event.location = old.location.clone();
+        }
+        if event.response_counts.is_none() {
+            event.response_counts = old.response_counts;
+        }
+        if event.series_master_id.is_none() {
+            event.series_master_id = old.series_master_id.clone();
+        }
+        if event.reminders.is_empty() {
+            event.reminders = old.reminders.clone();
+        }
+        if event.source_link.is_none() {
+            event.source_link = old.source_link.clone();
+        }
+        if event.web_link.is_none() {
+            event.web_link = old.web_link.clone();
+        }
+        if event.calendar_name.is_none() {
+            event.calendar_name = old.calendar_name.clone();
+        }
+        if old.series {
+            event.series = true;
+        }
     }
 }
 
@@ -201,6 +304,7 @@ fn demo_week(monday: NaiveDate, offset: FixedOffset) -> Vec<CalendarEvent> {
                 show_as: demo_show_as(subject, *response),
                 dial_in: None,
                 response: *response,
+                ..Default::default()
             }
         })
         .collect()

@@ -16,28 +16,30 @@ use chatsvc::{
     ConversationState, Conversations, ForcedAvailability, ForwardResult, Gif, Gifs, HistoryShare,
     InvokeRequest, InvokeResponse, Language, LanguageSettings, LanguageSettingsClient, LinkInfo,
     MemberHorizon, MessageEmotions, MessageLanguage, MessageLinks, MessageWindow, Messages,
-    PinnedMessage, Pins, PostFollowState, PresenceLookup, PresenceService, PresenceStatus, Receipts,
-    RecordingPolicy, SavedMessage, ScheduledDraft, ScheduledDrafts, StatusNote, ThreadMembers,
-    ThreadActivity, TranslateRequest, Translation, TranslationTrigger, Translator, WindowDirection,
-    WorkLocationKind,
+    PinnedMessage, Pins, PostFollowState, PresenceLookup, PresenceService, PresenceStatus,
+    Receipts, RecordingPolicy, SavedMessage, ScheduledDraft, ScheduledDrafts, StatusNote,
+    ThreadActivity, ThreadMembers, TranslateRequest, Translation, TranslationTrigger, Translator,
+    WindowDirection, WorkLocationKind,
 };
 use chrono::{DateTime, Utc};
 use graph::{
-    CloudFile, QuickSite,
-    Channel, Chat, DriveEntry, DriveFolder, Graph, Member, Message, MessageExtras, MessageTarget,
-    OutgoingMention, Photo, Presence, SharedFile, Tag, Team, UploadDestination, UploadedFile, User,
+    Channel, Chat, CloudFile, DriveEntry, DriveFolder, Graph, Member, Message, MessageExtras,
+    MessageTarget, OutgoingMention, Photo, Presence, QuickSite, SharedFile, Tag, Team,
+    UploadDestination, UploadedFile, User,
 };
 
 use crate::error::{Error, Result};
+use crate::native::NativeChats;
 use crate::profile::PersonProfile;
 
-pub const CHATSVC_CHAT_WRITES: bool = false;
+pub const CHATSVC_CHAT_WRITES: bool = true;
 const URGENT_ACK_EMOTION: &str = "acks";
 
 #[derive(Debug, Clone)]
 pub struct RemotePage {
     pub items: Vec<Message>,
     pub next_link: Option<String>,
+    pub oldest_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,13 +104,6 @@ pub trait Remote {
         channel_id: &str,
         root_ids: &[String],
     ) -> Result<Vec<Result<Vec<Message>>>>;
-    async fn send_chat_message(
-        &self,
-        chat_id: &str,
-        html: &str,
-        mentions: &[OutgoingMention],
-        extras: &MessageExtras,
-    ) -> Result<Message>;
     async fn send_channel_message(
         &self,
         team_id: &str,
@@ -147,16 +142,6 @@ pub trait Remote {
         message_id: &str,
         cards: &str,
     ) -> Result<()>;
-    async fn mark_chat_read(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()>;
-    async fn mark_chat_unread(
-        &self,
-        chat_id: &str,
-        user_id: &str,
-        tenant_id: &str,
-        last_read_at: DateTime<Utc>,
-    ) -> Result<()>;
-    async fn hide_chat(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()>;
-    async fn unhide_chat(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()>;
     async fn remove_chat_member(&self, chat_id: &str, user_id: &str) -> Result<()>;
     async fn add_chat_members(
         &self,
@@ -213,17 +198,6 @@ pub trait Remote {
         Err(Error::Unsupported("channel description"))
     }
 
-    async fn reply_with_quote(
-        &self,
-        _chat_id: &str,
-        _quoted_message_id: &str,
-        _html: &str,
-        _mentions: &[OutgoingMention],
-        _extras: &MessageExtras,
-    ) -> Result<Message> {
-        Err(Error::Unsupported("a quoted reply"))
-    }
-
     async fn channel_files_folder(&self, _team_id: &str, _channel_id: &str) -> Result<DriveFolder> {
         Err(Error::Unsupported("a channel files folder"))
     }
@@ -243,6 +217,14 @@ pub trait Remote {
 
     async fn channel_member_count(&self, _team_id: &str, _channel_id: &str) -> Result<usize> {
         Err(Error::Unsupported("a channel member count"))
+    }
+
+    async fn channel_members(
+        &self,
+        _team_id: &str,
+        _channel_id: &str,
+    ) -> Result<Vec<graph::Member>> {
+        Err(Error::Unsupported("a channel member list"))
     }
 
     async fn list_children(&self, _folder: &DriveFolder) -> Result<Vec<DriveEntry>> {
@@ -271,7 +253,10 @@ pub trait Remote {
         Err(Error::Unsupported("recent files"))
     }
 
-    async fn recent_files_with_owners(&self, _top: usize) -> Result<(Vec<CloudFile>, Vec<(String, String)>)> {
+    async fn recent_files_with_owners(
+        &self,
+        _top: usize,
+    ) -> Result<(Vec<CloudFile>, Vec<(String, String)>)> {
         Err(Error::Unsupported("recent files"))
     }
 
@@ -686,19 +671,19 @@ impl Remote for Graph {
     }
 
     async fn chats_page(&self, top: usize) -> Result<ChatsPage> {
-        Ok(Graph::chats_page(self, top).await?.into())
+        NativeChats::new(self.session()).first_page(top).await
     }
 
     async fn chats_at(&self, next_link: &str) -> Result<ChatsPage> {
-        Ok(Graph::chats_at(self, next_link).await?.into())
+        NativeChats::new(self.session()).page(next_link).await
     }
 
     async fn chat(&self, chat_id: &str) -> Result<Chat> {
-        Ok(Graph::chat(self, chat_id).await?)
+        NativeChats::new(self.session()).chat(chat_id).await
     }
 
     async fn chat_members(&self, chat_id: &str) -> Result<Vec<Member>> {
-        Ok(Graph::chat_members(self, chat_id).await?)
+        NativeChats::new(self.session()).members(chat_id).await
     }
 
     async fn joined_teams(&self) -> Result<Vec<Team>> {
@@ -719,13 +704,15 @@ impl Remote for Graph {
         before: Option<DateTime<Utc>>,
         top: usize,
     ) -> Result<RemotePage> {
-        Ok(Graph::chat_messages(self, chat_id, before, top)
-            .await?
-            .into())
+        NativeChats::new(self.session())
+            .messages(chat_id, before, top)
+            .await
     }
 
     async fn chat_message(&self, chat_id: &str, message_id: &str) -> Result<Message> {
-        Ok(Graph::chat_message(self, chat_id, message_id).await?)
+        NativeChats::new(self.session())
+            .message(chat_id, message_id)
+            .await
     }
 
     async fn channel_messages(
@@ -792,16 +779,6 @@ impl Remote for Graph {
             .collect())
     }
 
-    async fn send_chat_message(
-        &self,
-        chat_id: &str,
-        html: &str,
-        mentions: &[OutgoingMention],
-        extras: &MessageExtras,
-    ) -> Result<Message> {
-        Ok(Graph::send_chat_message(self, chat_id, html, mentions, extras).await?)
-    }
-
     async fn send_channel_message(
         &self,
         team_id: &str,
@@ -864,28 +841,6 @@ impl Remote for Graph {
         Ok(Messages::new(self.session())
             .set_cards(conversation, message_id, cards)
             .await?)
-    }
-
-    async fn mark_chat_read(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()> {
-        Ok(Graph::mark_chat_read(self, chat_id, user_id, tenant_id).await?)
-    }
-
-    async fn mark_chat_unread(
-        &self,
-        chat_id: &str,
-        user_id: &str,
-        tenant_id: &str,
-        last_read_at: DateTime<Utc>,
-    ) -> Result<()> {
-        Ok(Graph::mark_chat_unread(self, chat_id, user_id, tenant_id, last_read_at).await?)
-    }
-
-    async fn hide_chat(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()> {
-        Ok(Graph::hide_chat(self, chat_id, user_id, tenant_id).await?)
-    }
-
-    async fn unhide_chat(&self, chat_id: &str, user_id: &str, tenant_id: &str) -> Result<()> {
-        Ok(Graph::unhide_chat(self, chat_id, user_id, tenant_id).await?)
     }
 
     async fn remove_chat_member(&self, chat_id: &str, user_id: &str) -> Result<()> {
@@ -983,6 +938,9 @@ impl Remote for Graph {
                 .set_emotion(&conversation_ref(target), target.message_id(), &key)
                 .await?);
         }
+        if matches!(target, MessageTarget::Chat { .. }) {
+            return Err(Error::Unsupported("this reaction in a chat"));
+        }
         Ok(Graph::set_reaction(self, target, reaction_type).await?)
     }
 
@@ -993,6 +951,9 @@ impl Remote for Graph {
             return Ok(Messages::new(self.session())
                 .unset_emotions(&conversation_ref(target), target.message_id(), &keys)
                 .await?);
+        }
+        if matches!(target, MessageTarget::Chat { .. }) {
+            return Err(Error::Unsupported("this reaction in a chat"));
         }
         Ok(Graph::unset_reaction(self, target, reaction_type).await?)
     }
@@ -1011,10 +972,26 @@ impl Remote for Graph {
                     .edit_message(&conversation, target.message_id(), &html)
                     .await?)
             }
-            Some(_) => Err(Error::Unsupported(
-                "editing a channel message with mentions",
-            )),
-            None => Ok(Graph::edit_message(self, target, html, mentions, extras).await?),
+            Some(conversation @ ConversationRef::Chat { .. }) => {
+                let entries = crate::teams_quote::mention_entries(mentions).ok_or(
+                    Error::Unsupported("editing in a team, channel or tag mention"),
+                )?;
+                let html = format!(
+                    "{}{}{}",
+                    extras.kept_html(),
+                    crate::teams_quote::chatsvc_mention_html(html, mentions),
+                    extras.files_html()
+                );
+                Ok(Messages::new(self.session())
+                    .edit_message_with_mentions(
+                        &conversation,
+                        target.message_id(),
+                        &html,
+                        Some(&serde_json::Value::Array(entries).to_string()),
+                    )
+                    .await?)
+            }
+            Some(_) | None => Ok(Graph::edit_message(self, target, html, mentions, extras).await?),
         }
     }
 
@@ -1036,8 +1013,23 @@ impl Remote for Graph {
         }
     }
 
+    /// Teams names a 1:1 chat after its two members; the chat service creates it with the first message.
     async fn create_one_on_one(&self, my_user_id: &str, user_id: &str) -> Result<Chat> {
-        Ok(Graph::create_one_on_one(self, my_user_id, user_id).await?)
+        let mut pair = [my_user_id.to_owned(), user_id.to_owned()];
+        pair.sort();
+        let sorted_id = format!("19:{}_{}@unq.gbl.spaces", pair[0], pair[1]);
+        let reversed_id = format!("19:{}_{}@unq.gbl.spaces", pair[1], pair[0]);
+        let listing = chatsvc::ChatListing::new(self.session());
+        let chat_id = if listing.conversation(&sorted_id).await.is_err()
+            && listing.conversation(&reversed_id).await.is_ok()
+        {
+            reversed_id
+        } else {
+            sorted_id
+        };
+        NativeChats::new(self.session())
+            .created_chat(&chat_id, "oneOnOne", None, &pair)
+            .await
     }
 
     async fn create_group(
@@ -1046,7 +1038,19 @@ impl Remote for Graph {
         user_ids: &[String],
         topic: Option<&str>,
     ) -> Result<Chat> {
-        Ok(Graph::create_group(self, my_user_id, user_ids, topic).await?)
+        let mut members = vec![my_user_id.to_owned()];
+        members.extend(
+            user_ids
+                .iter()
+                .filter(|user_id| *user_id != my_user_id)
+                .cloned(),
+        );
+        let chat_id = ThreadMembers::new(self.session())
+            .create_group(&members, topic)
+            .await?;
+        NativeChats::new(self.session())
+            .created_chat(&chat_id, "group", topic, &members)
+            .await
     }
 
     async fn search_people(&self, query: &str) -> Result<Vec<User>> {
@@ -1059,20 +1063,6 @@ impl Remote for Graph {
 
     async fn channel_description(&self, team_id: &str, channel_id: &str) -> Result<String> {
         Ok(Graph::channel_description(self, team_id, channel_id).await?)
-    }
-
-    async fn reply_with_quote(
-        &self,
-        chat_id: &str,
-        quoted_message_id: &str,
-        html: &str,
-        mentions: &[OutgoingMention],
-        extras: &MessageExtras,
-    ) -> Result<Message> {
-        Ok(
-            Graph::reply_with_quote(self, chat_id, quoted_message_id, html, mentions, extras)
-                .await?,
-        )
     }
 
     async fn channel_files_folder(&self, team_id: &str, channel_id: &str) -> Result<DriveFolder> {
@@ -1094,6 +1084,10 @@ impl Remote for Graph {
 
     async fn channel_member_count(&self, team_id: &str, channel_id: &str) -> Result<usize> {
         Ok(Graph::channel_member_count(self, team_id, channel_id).await?)
+    }
+
+    async fn channel_members(&self, team_id: &str, channel_id: &str) -> Result<Vec<graph::Member>> {
+        Ok(Graph::channel_member_list(self, team_id, channel_id).await?)
     }
 
     async fn list_children(&self, folder: &DriveFolder) -> Result<Vec<DriveEntry>> {
@@ -1122,7 +1116,10 @@ impl Remote for Graph {
         Ok(Graph::recent_files(self, top).await?)
     }
 
-    async fn recent_files_with_owners(&self, top: usize) -> Result<(Vec<CloudFile>, Vec<(String, String)>)> {
+    async fn recent_files_with_owners(
+        &self,
+        top: usize,
+    ) -> Result<(Vec<CloudFile>, Vec<(String, String)>)> {
         Ok(Graph::recent_files_with_owners(self, top).await?)
     }
 
@@ -1164,6 +1161,8 @@ impl Remote for Graph {
     }
 
     async fn hosted_content(&self, url: &str) -> Result<Photo> {
+        let ams_url = chatsvc::hosted_content_image_url(url);
+        let url = ams_url.as_deref().unwrap_or(url);
         if chatsvc::is_link_image_url(url) {
             let image = Messages::new(self.session()).link_image(url).await?;
             return Ok(Photo {
@@ -1333,7 +1332,9 @@ impl Remote for Graph {
     }
 
     async fn chat_thread_activities(&self, chat_id: &str) -> Result<Vec<ThreadActivity>> {
-        Ok(Messages::new(self.session()).thread_activities(chat_id).await?)
+        Ok(Messages::new(self.session())
+            .thread_activities(chat_id)
+            .await?)
     }
 
     async fn chat_messages_by_id(
@@ -1341,11 +1342,13 @@ impl Remote for Graph {
         chat_id: &str,
         message_ids: &[String],
     ) -> Result<Vec<Result<Message>>> {
-        let messages = Graph::chat_messages_by_id(self, chat_id, message_ids).await?;
-        Ok(messages
-            .into_iter()
-            .map(|message| message.map_err(Into::into))
-            .collect())
+        let native = NativeChats::new(self.session());
+        Ok(futures_util::future::join_all(
+            message_ids
+                .iter()
+                .map(|message_id| native.message(chat_id, message_id)),
+        )
+        .await)
     }
 
     async fn chat_pins(&self, chat_id: &str) -> Result<Vec<PinnedMessage>> {
@@ -1396,11 +1399,15 @@ impl Remote for Graph {
     }
 
     async fn mark_activity_read(&self, message_id: &str) -> Result<()> {
-        Ok(ActivityFeed::new(self.session()).mark_read(message_id).await?)
+        Ok(ActivityFeed::new(self.session())
+            .mark_read(message_id)
+            .await?)
     }
 
     async fn mark_all_activity_read(&self, now_ms: i64) -> Result<()> {
-        Ok(ActivityFeed::new(self.session()).mark_all_read(now_ms).await?)
+        Ok(ActivityFeed::new(self.session())
+            .mark_all_read(now_ms)
+            .await?)
     }
 
     async fn app_consumption_horizon(&self) -> Result<AppConsumptionHorizon> {
@@ -1536,7 +1543,9 @@ impl Remote for Graph {
     }
 
     async fn save_chat_setting(&self, change: ChatSettingChange) -> Result<ChatSettingsDocument> {
-        Ok(ChatSettingsClient::new(self.session()).write(change).await?)
+        Ok(ChatSettingsClient::new(self.session())
+            .write(change)
+            .await?)
     }
 
     async fn set_chat_notifications(
@@ -1660,6 +1669,7 @@ impl From<graph::Page<Message>> for RemotePage {
         RemotePage {
             items: page.items,
             next_link: page.next_link,
+            oldest_at: None,
         }
     }
 }

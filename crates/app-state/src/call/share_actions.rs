@@ -1,9 +1,6 @@
 use calling::CallCommand;
 
-use super::share_view::{
-    SHARE_MOTION_META_KEY, SHARE_STANDOUT_META_KEY, STRIP_WIDTH_META_KEY, StripDrag,
-    clamp_strip_width,
-};
+use super::share_view::{SHARE_MOTION_META_KEY, SHARE_STANDOUT_META_KEY};
 use crate::Host;
 use crate::app_state::{AppEvent, AppState};
 
@@ -77,44 +74,6 @@ impl AppState {
 
     pub fn end_share_pan(&mut self, cx: &mut dyn Host) {
         self.change_share_stage(cx, |stage| stage.pan_from = None);
-    }
-
-    pub fn begin_strip_drag(&mut self, pointer_x: f32, cx: &mut dyn Host) {
-        let start_width = self.call_strip_width;
-        self.change_share_stage(cx, |stage| {
-            stage.strip_drag = Some(StripDrag {
-                start_pointer: pointer_x,
-                start_width,
-            })
-        });
-    }
-
-    pub fn drag_strip_to(&mut self, pointer_x: f32, cx: &mut dyn Host) {
-        let Some(drag) = self
-            .call
-            .as_ref()
-            .and_then(|call| call.share_stage.strip_drag)
-        else {
-            return;
-        };
-        self.call_strip_width = drag.width_at(pointer_x);
-        cx.notify();
-    }
-
-    pub fn end_strip_drag(&mut self, cx: &mut dyn Host) {
-        if self
-            .call
-            .as_ref()
-            .is_none_or(|call| call.share_stage.strip_drag.is_none())
-        {
-            return;
-        }
-        let width = clamp_strip_width(self.call_strip_width);
-        self.call_strip_width = width;
-        let _ = self
-            .store
-            .set_meta(STRIP_WIDTH_META_KEY, &width.to_string());
-        self.change_share_stage(cx, |stage| stage.strip_drag = None);
     }
 
     pub fn pop_out_stage(&mut self, cx: &mut dyn Host) {

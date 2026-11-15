@@ -56,8 +56,14 @@ pub fn chrome_arguments(spec: &ArgumentSpec) -> Vec<String> {
 }
 
 pub fn user_agent(platform: Platform, major: u32) -> String {
-    let system = if platform == Platform::Linux { "X11; Linux x86_64" } else { "Windows NT 10.0; Win64; x64" };
-    format!("Mozilla/5.0 ({system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36")
+    let system = match platform {
+        Platform::Linux => "X11; Linux x86_64",
+        Platform::Macos => "Macintosh; Intel Mac OS X 10_15_7",
+        Platform::Windows | Platform::Wsl => "Windows NT 10.0; Win64; x64",
+    };
+    format!(
+        "Mozilla/5.0 ({system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
 }
 
 pub(crate) fn major_from_directory_names<'a>(names: impl Iterator<Item = &'a str>) -> Option<u32> {
@@ -71,25 +77,60 @@ pub(crate) fn major_from_directory_names<'a>(names: impl Iterator<Item = &'a str
 }
 
 pub(crate) fn major_from_version_output(output: &str) -> Option<u32> {
-    output
-        .split_whitespace()
-        .find_map(|word| word.split('.').next()?.parse::<u32>().ok().filter(|_| word.contains('.')))
+    output.split_whitespace().find_map(|word| {
+        word.split('.')
+            .next()?
+            .parse::<u32>()
+            .ok()
+            .filter(|_| word.contains('.'))
+    })
 }
 
 const FALLBACK_MAJOR: u32 = 150;
 
+/// Marker directory used by `app_base::linux_fonts::hide_system_color_emoji`.
+/// Only that app-generated conf must be cleared for Chrome; a user-provided
+/// `FONTCONFIG_FILE` / `FONTCONFIG_PATH` stays inherited.
+const APP_EMOJI_FONTCONFIG_MARKER: &str = "fontconfig-emoji";
+
+fn is_app_emoji_fontconfig(value: &std::ffi::OsStr) -> bool {
+    std::path::Path::new(value)
+        .components()
+        .any(|component| component.as_os_str() == APP_EMOJI_FONTCONFIG_MARKER)
+}
+
+fn strip_app_fontconfig(command: &mut Command) {
+    for key in app_fontconfig_keys(|key| std::env::var_os(key)) {
+        command.env_remove(key);
+    }
+}
+
+fn app_fontconfig_keys(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<&'static str> {
+    ["FONTCONFIG_FILE", "FONTCONFIG_PATH"]
+        .into_iter()
+        .filter(|key| lookup(key).is_some_and(|value| is_app_emoji_fontconfig(&value)))
+        .collect()
+}
+
 fn chrome_major(platform: Platform, executable: &Path) -> u32 {
     let detected = match platform {
-        Platform::Linux => Command::new(executable)
-            .arg("--version")
-            .output()
-            .ok()
-            .and_then(|output| major_from_version_output(&String::from_utf8_lossy(&output.stdout))),
-        _ => executable.parent().and_then(|parent| std::fs::read_dir(parent).ok()).and_then(|entries| {
-            let names: Vec<String> =
-                entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
-            major_from_directory_names(names.iter().map(String::as_str))
-        }),
+        Platform::Linux | Platform::Macos => {
+            let mut command = Command::new(executable);
+            strip_app_fontconfig(&mut command);
+            command.arg("--version").output().ok().and_then(|output| {
+                major_from_version_output(&String::from_utf8_lossy(&output.stdout))
+            })
+        }
+        Platform::Windows | Platform::Wsl => executable
+            .parent()
+            .and_then(|parent| std::fs::read_dir(parent).ok())
+            .and_then(|entries| {
+                let names: Vec<String> = entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                major_from_directory_names(names.iter().map(String::as_str))
+            }),
     };
     detected.unwrap_or(FALLBACK_MAJOR)
 }
@@ -107,7 +148,10 @@ impl SystemLauncher {
 impl Launcher for SystemLauncher {
     fn spawn(&self, request: &LaunchRequest) -> Result<(), BrowserError> {
         let executable = self.config.chrome_executable()?;
-        let agent = user_agent(self.config.platform, chrome_major(self.config.platform, &executable));
+        let agent = user_agent(
+            self.config.platform,
+            chrome_major(self.config.platform, &executable),
+        );
         let arguments = chrome_arguments(&ArgumentSpec {
             port: self.config.port,
             profile: &self.config.profile,
@@ -116,7 +160,12 @@ impl Launcher for SystemLauncher {
             start_urls: &request.start_urls,
         });
         let mut command = Command::new(&executable);
-        command.args(arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        strip_app_fontconfig(&mut command);
+        command
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if self.config.platform == Platform::Wsl {
             command.current_dir("/mnt/c");
         }
@@ -152,7 +201,13 @@ mod tests {
     use super::*;
 
     fn spec<'a>(headless: bool, urls: &'a [String]) -> ArgumentSpec<'a> {
-        ArgumentSpec { port: 9222, profile: r"C:\p\rusty-teams-chrome", headless, user_agent: "UA", start_urls: urls }
+        ArgumentSpec {
+            port: 9222,
+            profile: r"C:\p\rusty-teams-chrome",
+            headless,
+            user_agent: "UA",
+            start_urls: urls,
+        }
     }
 
     #[test]
@@ -173,14 +228,22 @@ mod tests {
         );
         assert_eq!(&arguments[7..17], HEADLESS_MEMORY_FLAGS);
         assert_eq!(arguments[17], "https://teams.cloud.microsoft/");
-        assert!(!arguments.iter().any(|argument| argument == "--process-per-site"));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--process-per-site")
+        );
     }
 
     #[test]
     fn visible_arguments_have_no_headless_flags_and_all_urls() {
         let urls = vec!["https://a/".to_owned(), "https://b/".to_owned()];
         let arguments = chrome_arguments(&spec(false, &urls));
-        assert!(!arguments.iter().any(|argument| argument.contains("headless") || argument.contains("user-agent")));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.contains("headless") || argument.contains("user-agent"))
+        );
         assert_eq!(&arguments[4..], ["https://a/", "https://b/"]);
     }
 
@@ -189,19 +252,45 @@ mod tests {
         assert!(user_agent(Platform::Wsl, 154).contains("Windows NT 10.0; Win64; x64"));
         assert!(user_agent(Platform::Windows, 154).contains("Chrome/154.0.0.0"));
         assert!(user_agent(Platform::Linux, 140).contains("X11; Linux x86_64"));
+        assert!(user_agent(Platform::Macos, 154).contains("Macintosh; Intel Mac OS X 10_15_7"));
+        assert!(user_agent(Platform::Macos, 154).contains("Chrome/154.0.0.0"));
+        assert!(!user_agent(Platform::Macos, 154).contains("Windows NT"));
     }
 
     #[test]
     fn major_from_version_directories() {
-        let names = ["154.0.8037.98", "153.0.1.2", "Dictionaries", "chrome.exe", "1.2.3"];
+        let names = [
+            "154.0.8037.98",
+            "153.0.1.2",
+            "Dictionaries",
+            "chrome.exe",
+            "1.2.3",
+        ];
         assert_eq!(major_from_directory_names(names.into_iter()), Some(154));
         assert_eq!(major_from_directory_names(["x"].into_iter()), None);
     }
 
     #[test]
     fn major_from_version_text() {
-        assert_eq!(major_from_version_output("Google Chrome 154.0.8037.98 \n"), Some(154));
-        assert_eq!(major_from_version_output("Chromium 131.0.6778.85 snap"), Some(131));
+        assert_eq!(
+            major_from_version_output("Google Chrome 154.0.8037.98 \n"),
+            Some(154)
+        );
+        assert_eq!(
+            major_from_version_output("Chromium 131.0.6778.85 snap"),
+            Some(131)
+        );
         assert_eq!(major_from_version_output("nothing"), None);
+    }
+
+    #[test]
+    fn chrome_drops_only_app_emoji_fontconfig() {
+        let keys = app_fontconfig_keys(|key| match key {
+            "FONTCONFIG_FILE" => Some("/tmp/cache/fontconfig-emoji/fonts.conf".into()),
+            "FONTCONFIG_PATH" => Some("/etc/fonts".into()),
+            _ => None,
+        });
+        assert_eq!(keys, vec!["FONTCONFIG_FILE"]);
+        assert!(app_fontconfig_keys(|_| None).is_empty());
     }
 }

@@ -1,11 +1,11 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use chatsvc::{Calendar, Transcripts};
+use chatsvc::{Attendee, Calendar, NewEvent, Repeat, Transcripts};
 use chrono::{DateTime, Utc};
 use mcp::{
-    EncodedImage, Meeting, MessageExtras, SourceError, SourceFuture, TeamsSource, Transcript,
-    TranscriptTurn,
+    BusySlot, CreatedMeeting, EncodedImage, Meeting, MeetingDraft, MessageExtras,
+    PersonAvailability, SourceError, SourceFuture, TeamsSource, Transcript, TranscriptTurn,
 };
 use store::{MessageRecord, Store};
 use teams_core::CoreEvent;
@@ -173,6 +173,55 @@ impl TeamsSource for AppSource {
         })
     }
 
+    fn availability(
+        &self,
+        emails: Vec<String>,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> SourceFuture<'_, Vec<PersonAvailability>> {
+        Box::pin(async move {
+            let engine = self.engine()?;
+            let schedules = Calendar::new(engine.remote().session())
+                .schedules(&emails, start, end)
+                .await
+                .map_err(|error| SourceError::Failed(error.to_string()))?;
+            Ok(schedules
+                .into_iter()
+                .map(|schedule| PersonAvailability {
+                    email: schedule.email,
+                    busy: schedule
+                        .busy
+                        .into_iter()
+                        .map(|slot| BusySlot {
+                            start: slot.start,
+                            end: slot.end,
+                            status: slot.status,
+                        })
+                        .collect(),
+                    error: schedule.error,
+                })
+                .collect())
+        })
+    }
+
+    fn create_meeting(&self, draft: MeetingDraft) -> SourceFuture<'_, CreatedMeeting> {
+        Box::pin(async move {
+            let engine = self.engine()?;
+            let mut names = Vec::with_capacity(draft.attendees.len());
+            for address in &draft.attendees {
+                let users = engine.search_people(address).await.unwrap_or_default();
+                names.push(users.into_iter().find_map(|user| user.display_name));
+            }
+            let created = Calendar::new(engine.remote().session())
+                .create_event(&new_event(draft, names))
+                .await
+                .map_err(|error| SourceError::Failed(error.to_string()))?;
+            Ok(CreatedMeeting {
+                join_url: created.join_url,
+            })
+        })
+    }
+
     fn transcript<'a>(&'a self, meeting_chat_id: &'a str) -> SourceFuture<'a, Transcript> {
         Box::pin(async move {
             let engine = self.engine()?;
@@ -220,7 +269,26 @@ mod tests {
     use mcp::TeamsSource;
     use store::Store;
 
-    use super::AppSource;
+    use super::{AppSource, new_event};
+
+    #[test]
+    fn invitees_carry_their_name_or_fall_back_to_the_address() {
+        let now = chrono::Utc::now();
+        let draft = mcp::MeetingDraft {
+            subject: "Sync".to_owned(),
+            start: now,
+            end: now,
+            attendees: vec!["anna@example.com".to_owned(), "ext@example.org".to_owned()],
+            description: String::new(),
+        };
+        let event = new_event(draft, vec![Some("Anna Berg".to_owned()), None]);
+        let names: Vec<_> = event
+            .attendees
+            .iter()
+            .map(|attendee| attendee.name.as_str())
+            .collect();
+        assert_eq!(names, ["Anna Berg", "ext@example.org"]);
+    }
 
     fn source() -> AppSource {
         AppSource::new(Arc::new(Store::open_in_memory().unwrap()))
@@ -261,5 +329,27 @@ mod tests {
             .unwrap();
         assert_eq!(source.image_dimensions(&png), Some((3, 2)));
         assert_eq!(source.image_dimensions(b"nope"), None);
+    }
+}
+
+fn new_event(draft: MeetingDraft, names: Vec<Option<String>>) -> NewEvent {
+    NewEvent {
+        subject: draft.subject,
+        start: draft.start,
+        end: draft.end,
+        local_start: draft.start.naive_utc(),
+        local_end: draft.end.naive_utc(),
+        time_zone_name: None,
+        attendees: draft
+            .attendees
+            .into_iter()
+            .zip(names.into_iter().chain(std::iter::repeat(None)))
+            .map(|(address, name)| Attendee {
+                name: name.unwrap_or_else(|| address.clone()),
+                address,
+            })
+            .collect(),
+        repeat: Repeat::Never,
+        details: draft.description,
     }
 }

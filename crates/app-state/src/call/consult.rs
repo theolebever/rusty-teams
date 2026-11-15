@@ -101,7 +101,9 @@ impl AppState {
     }
 
     pub(super) fn is_held_call(&self, call_id: u64) -> bool {
-        self.held_call.as_ref().is_some_and(|held| held.id == call_id)
+        self.held_call
+            .as_ref()
+            .is_some_and(|held| held.id == call_id)
     }
 
     pub(super) fn apply_held_call_update(&mut self, update: CallUpdate, cx: &mut dyn Host) {
@@ -110,7 +112,7 @@ impl AppState {
         };
         match update {
             CallUpdate::Notice(text) => {
-                self.raise_notice(text, None, cx);
+                self.raise_notice(app_base::ui_locale::localize_notice(&text), None, cx);
                 return;
             }
             CallUpdate::TransferResult { succeeded } => {
@@ -269,10 +271,16 @@ mod tests {
                 let call = state.call.as_ref().unwrap();
                 assert_ne!(call.id, HELD_ID);
                 assert_eq!(call.model.peer_name, "Ana");
-                assert_eq!(call.consult.as_ref().unwrap().banner_text(), "Chris is on hold");
+                assert_eq!(
+                    call.consult.as_ref().unwrap().banner_text(),
+                    "Chris is on hold"
+                );
             })
         });
-        assert_eq!(held_control.try_recv_command(), Some(CallCommand::Hold(true)));
+        assert_eq!(
+            held_control.try_recv_command(),
+            Some(CallCommand::Hold(true))
+        );
     }
 
     #[gpui_kit::test]
@@ -309,20 +317,40 @@ mod tests {
             app.update(cx, |state, cx| {
                 state.apply_call_update(CONSULT_ID, CallUpdate::ReplacementLink(leg()), cx);
                 state.transfer_consulted(cx);
-                state.apply_call_update(HELD_ID, CallUpdate::TransferResult { succeeded: false }, cx);
+                state.apply_call_update(
+                    HELD_ID,
+                    CallUpdate::TransferResult { succeeded: false },
+                    cx,
+                );
                 state.transfer_consulted(cx);
-                state.apply_call_update(HELD_ID, CallUpdate::TransferResult { succeeded: true }, cx);
+                state.apply_call_update(
+                    HELD_ID,
+                    CallUpdate::TransferResult { succeeded: true },
+                    cx,
+                );
                 state.apply_call_update(HELD_ID, ended(), cx);
                 assert!(state.held_call.is_none());
                 assert!(state.call.as_ref().unwrap().consult.is_some());
                 state.apply_call_update(CONSULT_ID, ended(), cx);
                 assert!(state.call.is_none());
-                assert_eq!(state.notice.as_ref().unwrap().text, "Call transferred to Ana");
+                assert_eq!(
+                    state.notice.as_ref().unwrap().text,
+                    "Call transferred to Ana"
+                );
             })
         });
-        assert!(matches!(held_control.try_recv_command(), Some(CallCommand::Transfer { .. })));
-        assert!(matches!(held_control.try_recv_command(), Some(CallCommand::Transfer { .. })));
-        assert_eq!(consult_control.try_recv_command(), Some(CallCommand::Hangup));
+        assert!(matches!(
+            held_control.try_recv_command(),
+            Some(CallCommand::Transfer { .. })
+        ));
+        assert!(matches!(
+            held_control.try_recv_command(),
+            Some(CallCommand::Transfer { .. })
+        ));
+        assert_eq!(
+            consult_control.try_recv_command(),
+            Some(CallCommand::Hangup)
+        );
     }
 
     #[gpui_kit::test]
@@ -354,11 +382,20 @@ mod tests {
                 let call = state.call.as_ref().expect("held call is back");
                 assert_eq!(call.id, HELD_ID);
                 assert!(state.held_call.is_none());
-                assert_eq!(state.notice.as_ref().unwrap().text, "The consultation ended");
+                assert_eq!(
+                    state.notice.as_ref().unwrap().text,
+                    "The consultation ended"
+                );
             })
         });
-        assert_eq!(held_control.try_recv_command(), Some(CallCommand::Hold(false)));
-        assert_eq!(consult_control.try_recv_command(), Some(CallCommand::Hangup));
+        assert_eq!(
+            held_control.try_recv_command(),
+            Some(CallCommand::Hold(false))
+        );
+        assert_eq!(
+            consult_control.try_recv_command(),
+            Some(CallCommand::Hangup)
+        );
     }
 
     #[gpui_kit::test]
@@ -367,7 +404,10 @@ mod tests {
         cx.update(|cx| {
             app.update(cx, |state, cx| {
                 state.apply_call_update(HELD_ID, CallUpdate::Hold(HoldState::Active), cx);
-                assert_eq!(state.held_call.as_ref().unwrap().model.hold, HoldState::Active);
+                assert_eq!(
+                    state.held_call.as_ref().unwrap().model.hold,
+                    HoldState::Active
+                );
                 assert_eq!(state.call.as_ref().unwrap().model.hold, HoldState::Active);
                 assert_eq!(state.call.as_ref().unwrap().model.peer_name, "Ana");
                 assert!(!state.can_transfer_call());

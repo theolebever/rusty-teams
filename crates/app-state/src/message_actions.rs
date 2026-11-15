@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use chrono::{DateTime, Local, Offset, Utc};
+use chrono::{DateTime, Local, Utc};
 use store::MessageRecord;
 use teams_core::{PinnedMessage, SavedMessage};
 
@@ -97,11 +97,7 @@ fn saved_entry(record: &MessageRecord, is_channel: bool) -> SavedMessage {
 }
 
 impl AppState {
-    pub fn message_record(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-    ) -> Option<MessageRecord> {
+    pub fn message_record(&self, conversation_id: &str, message_id: &str) -> Option<MessageRecord> {
         self.store
             .messages_by_id(conversation_id, &[message_id.to_owned()])
             .ok()?
@@ -421,7 +417,7 @@ impl AppState {
 }
 
 fn forward_time(time: DateTime<Utc>, now: DateTime<Local>) -> String {
-    format::list_time_label(time, now.date_naive(), now.offset().fix())
+    format::list_time_label(time, now.date_naive(), app_base::format::Zone::Local)
 }
 
 #[cfg(test)]

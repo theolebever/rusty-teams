@@ -5,7 +5,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.3.0"
+version = "0.4.0"
 license = "MIT"
 publish = false
 
@@ -44,6 +44,7 @@ reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.8" }
 calling = { path = "crates/calling" }
 chatsvc = { path = "crates/chatsvc" }
 webview = { path = "crates/webview" }
+browser = { path = "crates/browser" }
 
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }

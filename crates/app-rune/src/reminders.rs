@@ -117,7 +117,7 @@ mod tests {
             object_id: id.into(), subject: format!("Meeting {id}"), start, end: start + Duration::minutes(30),
             all_day: false, cancelled: false, online: true, join_url: Some(format!("https://teams.microsoft.com/l/meetup-join/{id}")),
             thread_id: None, organizer_name: None, organizer_address: None, ical_uid: None, show_as: Default::default(),
-            dial_in: None, response: ResponseType::Accepted,
+            dial_in: None, response: ResponseType::Accepted, ..Default::default()
         }
     }
 

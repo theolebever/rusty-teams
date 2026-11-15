@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use gpui_kit::component::h_flex;
@@ -11,12 +12,17 @@ use crate::theme;
 const EMOTICON_SIZE: f32 = 50.;
 const GLYPH_SIZE: f32 = 40.;
 const EMOTICON_GAP: f32 = 4.;
-const APPEAR_LOOPS: u32 = 2;
-const HOVER_LOOPS: u32 = 5;
-
 struct Playback {
     started: Option<Instant>,
-    loops: u32,
+}
+
+#[derive(Default)]
+struct PlayedEmoticons(HashSet<ElementId>);
+
+impl Global for PlayedEmoticons {}
+
+fn first_play(id: &ElementId, cx: &mut App) -> bool {
+    cx.default_global::<PlayedEmoticons>().0.insert(id.clone())
 }
 
 #[derive(IntoElement)]
@@ -31,6 +37,7 @@ fn glyph(emoji: &JumboEmoji) -> AnyElement {
         .flex()
         .items_center()
         .text_size(px(GLYPH_SIZE))
+        .font_family(theme::EMOJI_FONT_FAMILY)
         .text_color(theme::text())
         .child(emoji.glyph.clone())
         .into_any_element()
@@ -46,21 +53,19 @@ impl RenderOnce for JumboEmoticon {
             Some(Err(_)) => return glyph(&self.emoji),
             None => return div().size(px(EMOTICON_SIZE)).into_any_element(),
         };
-        let playback = window.use_keyed_state(self.id.clone(), cx, |_, _| Playback {
-            started: None,
-            loops: APPEAR_LOOPS,
-        });
+        let playback =
+            window.use_keyed_state(self.id.clone(), cx, |_, _| Playback { started: None });
         let now = Instant::now();
         let active = window.is_window_active();
-        let (started, loops) = playback.update(cx, |playback, _| {
-            if !active {
-                playback.started = None;
+        let unplayed = active && playback.read(cx).started.is_none() && first_play(&self.id, cx);
+        let started = playback.update(cx, |playback, _| {
+            if unplayed {
+                playback.started = Some(now);
             }
-            let started = active.then(|| *playback.started.get_or_insert(now));
-            (started, playback.loops)
+            playback.started
         });
-        let playing = started
-            .is_some_and(|started| now.duration_since(started) < resolved.loop_duration() * loops);
+        let playing =
+            started.is_some_and(|started| now.duration_since(started) < resolved.loop_duration());
         let image = if playing {
             images.animated.clone()
         } else {
@@ -75,7 +80,6 @@ impl RenderOnce for JumboEmoticon {
                 if *hovered {
                     playback.update(cx, |playback, cx| {
                         playback.started = Some(Instant::now());
-                        playback.loops = HOVER_LOOPS;
                         cx.notify();
                     });
                 }

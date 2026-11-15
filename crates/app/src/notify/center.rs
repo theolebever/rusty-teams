@@ -1,9 +1,11 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use gpui_kit::*;
 use store::Sidebar;
+use teams_core::{ForcedAvailability, ForcedKind};
 
 use super::badge::{Badge, badge_for};
 use super::incoming::IncomingTracker;
@@ -28,12 +30,13 @@ use super::text::describe;
 use super::toast::{PillView, ToastView};
 use super::urgent_repeat::UrgentRepeats;
 use crate::active_appearance::{self, ActiveAppearance};
+use crate::active_locale::ActiveLocale;
 use crate::activity_center::ActivityCenter;
 use crate::agent_api::{self, pending::PendingProposal};
 use crate::agents::{AgentRun, AgentRunsEvent, RunState};
 use crate::app_state::{AppEvent, AppState, selection_for};
-use crate::autostart::{self, StartupSettings};
 use crate::appearance::AppIcon;
+use crate::autostart::{self, StartupSettings};
 use crate::call::DemoScene;
 use crate::data::{self, Directory, PresenceKind};
 use crate::runtime;
@@ -60,11 +63,17 @@ struct OpenWindow {
     handle: AnyWindowHandle,
     native: Option<NativeHandle>,
     opened: Instant,
+    placed: Cell<Option<(i32, i32, i32, i32)>>,
 }
 
 impl OpenWindow {
     fn place(&self, native: NativeHandle, slot: Slot, x: i32, cx: &mut App) {
-        platform::place(native, x, slot.y, slot.width, slot.height);
+        let rect = (x, slot.y, slot.width, slot.height);
+        match self.placed.replace(Some(rect)) {
+            Some(previous) if previous == rect => return,
+            Some(_) => platform::place_rect(native, x, slot.y, slot.width, slot.height),
+            None => platform::place(native, x, slot.y, slot.width, slot.height),
+        }
         // WM_SIZE arrives while the app is borrowed, so GPUI drops its own resize report.
         self.handle
             .update(cx, |_, window, cx| window.bounds_changed(cx))
@@ -97,12 +106,15 @@ pub struct NotificationCenter {
     hover_hold: bool,
     unread_mentions: HashSet<String>,
     tray: Option<Tray>,
+    tray_do_not_disturb: bool,
     app_icon: AppIcon,
     shown_badge: Option<Badge>,
+    shown_mention_dot: bool,
     animations: bool,
     _subscription: Subscription,
     _activity_observation: Subscription,
     _appearance_observation: Subscription,
+    _locale_observation: Subscription,
     _agent_subscription: Option<Subscription>,
     started_at: DateTime<Utc>,
     known_proposals: HashSet<String>,
@@ -119,18 +131,22 @@ impl NotificationCenter {
         let mut settings = settings::load(&app.read(cx).store);
         settings.account = app.read(cx).account_chat_settings().notifications;
         let app_icon = active_appearance::current(cx).app_icon;
+        let tray_do_not_disturb = own_do_not_disturb(app.read(cx));
         let tray = if app.read(cx).mode.demo {
             None
         } else {
             Tray::new(
                 settings.sounds.notification_sound,
-                settings.do_not_disturb,
+                tray_do_not_disturb,
                 app_icon.png(),
             )
         };
         platform::set_window_icon(window, app_icon.png());
         let appearance_observation = cx.observe_global::<ActiveAppearance>(|this, cx| {
             this.apply_app_icon(active_appearance::current(cx).app_icon, cx)
+        });
+        let locale_observation = cx.observe_global::<ActiveLocale>(|this, _| {
+            this.relocalize_tray();
         });
         let subscription = cx.subscribe(&app, |this, _, event: &AppEvent, cx| {
             this.on_app_event(event, cx);
@@ -173,14 +189,17 @@ impl NotificationCenter {
             hover_hold: false,
             unread_mentions: HashSet::new(),
             tray,
+            tray_do_not_disturb,
             app_icon,
             shown_badge: None,
+            shown_mention_dot: false,
             animations: platform::animations_enabled(),
             app,
             activity,
             _subscription: subscription,
             _activity_observation: activity_observation,
             _appearance_observation: appearance_observation,
+            _locale_observation: locale_observation,
             _agent_subscription: agent_subscription,
         };
         cx.spawn(async move |this, cx| {
@@ -282,7 +301,11 @@ impl NotificationCenter {
             && let Err(error) = autostart::set_enabled(crate::APP_NAME, enabled)
         {
             self.app.update(cx, |state, cx| {
-                state.raise_notice(format!("Auto-start could not be changed: {error}"), None, cx)
+                state.raise_notice(
+                    format!("Auto-start could not be changed: {error}"),
+                    None,
+                    cx,
+                )
             });
             return;
         }
@@ -296,20 +319,40 @@ impl NotificationCenter {
         cx.notify();
     }
 
-    pub fn start_in_background(&self, window: &mut Window) {
-        match (&self.tray, self.main_native) {
-            (Some(_), Some(native)) => platform::hide_window(native),
-            _ => window.minimize_window(),
-        }
+    /// Points at a main window reopened from the tray.
+    pub fn attach_main_window(&mut self, window: &mut Window) {
+        self.main_window = window.window_handle();
+        self.main_native = platform::native_handle(window);
+        platform::set_window_icon(window, self.app_icon.png());
     }
 
-    pub fn intercept_close(&self, _cx: &App) -> bool {
+    pub fn start_in_background(&self, window: &mut Window, cx: &mut App) {
+        match (&self.tray, self.main_native) {
+            (Some(_), Some(native)) => platform::hide_window(native),
+            #[cfg(target_os = "linux")]
+            (Some(_), None) => crate::main_window::hide(cx),
+            _ => window.minimize_window(),
+        }
+        let _ = cx;
+    }
+
+    /// True when the close is handled here (window hidden natively). On Linux the
+    /// window closes for real and the app stays in the tray.
+    pub fn intercept_close(&self, cx: &mut App) -> bool {
         match (self.settings.close_to_tray, &self.tray, self.main_native) {
             (true, Some(_), Some(native)) => {
                 platform::hide_window(native);
                 true
             }
-            _ => false,
+            #[cfg(target_os = "linux")]
+            (true, Some(_), None) => {
+                crate::main_window::mark_hiding(cx);
+                false
+            }
+            _ => {
+                let _ = cx;
+                false
+            }
         }
     }
 
@@ -317,7 +360,7 @@ impl NotificationCenter {
         let previous = self.settings.sounds.clone();
         change(&mut self.settings);
         settings::save(&self.app.read(cx).store, &self.settings);
-        self.sync_tray();
+        self.sync_tray(cx);
         if self.settings.sounds != previous {
             let updated = self.settings.sounds.clone();
             self.app.update(cx, |state, cx| {
@@ -342,7 +385,7 @@ impl NotificationCenter {
         }
         self.settings.sounds = account;
         settings::save(&self.app.read(cx).store, &self.settings);
-        self.sync_tray();
+        self.sync_tray(cx);
         if !self.demo_mode {
             self.prefetch_sounds();
         }
@@ -381,6 +424,7 @@ impl NotificationCenter {
             AppEvent::Messages(conversation_id) => self.on_messages(conversation_id, cx),
             AppEvent::Selection => self.on_selection(cx),
             AppEvent::Sidebar => self.refresh_badge(cx),
+            AppEvent::Directory => self.sync_tray_presence(cx),
             AppEvent::Ring => self.on_rings_changed(cx),
             AppEvent::MeetingReminder => self.on_meeting_reminder(cx),
             AppEvent::MeetingChime => self.on_meeting_chime(cx),
@@ -520,8 +564,17 @@ impl NotificationCenter {
         self.sync_windows(cx);
     }
 
+    fn own_feature_decision(&self, cx: &mut Context<Self>) -> Decision {
+        let environment = self.environment("", cx);
+        decide_proposal(
+            &self.settings,
+            teams_core::DesktopNotifications::MatchAllChats,
+            environment,
+        )
+    }
+
     fn present_status_change(&mut self, user_id: &str, text: &str, cx: &mut Context<Self>) {
-        if self.settings.do_not_disturb {
+        if !self.own_feature_decision(cx).toast {
             return;
         }
         let (name, conversation_id) = {
@@ -532,11 +585,14 @@ impl NotificationCenter {
                 .find(|person| person.user_id == user_id)
                 .map(|person| person.name.clone())
                 .unwrap_or_default();
-            (name, state.one_on_one_chat_with(user_id).unwrap_or_default())
+            (
+                name,
+                state.one_on_one_chat_with(user_id).unwrap_or_default(),
+            )
         };
-        let id = self
-            .stack
-            .push_status_change(user_id, &name, text, &conversation_id, Instant::now());
+        let id =
+            self.stack
+                .push_status_change(user_id, &name, text, &conversation_id, Instant::now());
         if let Some(model) = self.stack.get_mut(id) {
             model.time = chrono::Local::now()
                 .format(crate::format::clock_format())
@@ -549,6 +605,10 @@ impl NotificationCenter {
     }
 
     pub fn present_agent_run(&mut self, run: &AgentRun, cx: &mut Context<Self>) {
+        let decision = self.own_feature_decision(cx);
+        if !decision.toast {
+            return;
+        }
         let failed = matches!(run.state, RunState::Failed { .. });
         let verb = if failed { "failed" } else { "finished" };
         let body = if failed {
@@ -587,8 +647,7 @@ impl NotificationCenter {
                 .format(crate::format::clock_format())
                 .to_string();
         }
-        let quiet = self.settings.do_not_disturb || self.app.read(cx).mode.demo;
-        if self.settings.sounds.notification_sound && !quiet {
+        if decision.sound && !self.app.read(cx).mode.demo {
             self.play_notification_sound();
         }
         self.sync_windows(cx);
@@ -827,6 +886,7 @@ impl NotificationCenter {
                 .handle
                 .update(cx, |_, window, _| window.remove_window())
                 .is_ok()
+                || !window_is_open(window.handle.window_id(), cx)
         });
         if closed {
             self.call_windows.remove(&key);
@@ -865,9 +925,7 @@ impl NotificationCenter {
     }
 
     fn reminders_quiet(&self, cx: &App) -> bool {
-        self.settings.do_not_disturb
-            || platform::system_quiet()
-            || own_do_not_disturb(self.app.read(cx))
+        platform::system_quiet() || own_do_not_disturb(self.app.read(cx))
     }
 
     fn on_rings_changed(&mut self, cx: &mut Context<Self>) {
@@ -989,6 +1047,7 @@ impl NotificationCenter {
                 .handle
                 .update(cx, |_, window, _| window.remove_window())
                 .is_ok()
+                || !window_is_open(window.handle.window_id(), cx)
         });
         if closed {
             self.windows.remove(&id);
@@ -1115,13 +1174,11 @@ impl NotificationCenter {
                 TrayCommand::ToggleSound => self.update_settings(cx, |settings| {
                     settings.sounds.notification_sound = !settings.sounds.notification_sound
                 }),
-                TrayCommand::ToggleDoNotDisturb => self.update_settings(cx, |settings| {
-                    settings.do_not_disturb = !settings.do_not_disturb
-                }),
+                TrayCommand::ToggleDoNotDisturb => self.toggle_own_do_not_disturb(cx),
                 TrayCommand::Settings => {
                     self.raise_main_window(cx);
                     self.app.update(cx, |state, cx| {
-                        state.open_settings(SettingsSection::General, cx)
+                        state.open_settings(SettingsSection::Notifications, cx)
                     });
                 }
                 TrayCommand::Quit => cx.quit(),
@@ -1129,10 +1186,29 @@ impl NotificationCenter {
         }
     }
 
+    fn toggle_own_do_not_disturb(&mut self, cx: &mut Context<Self>) {
+        let forced = (!own_do_not_disturb(self.app.read(cx))).then_some(ForcedAvailability {
+            kind: ForcedKind::DoNotDisturb,
+            expires_at: None,
+        });
+        self.app
+            .update(cx, |state, cx| state.set_own_availability(forced, cx));
+        self.sync_tray(cx);
+    }
+
+    fn sync_tray_presence(&mut self, cx: &App) {
+        if self.tray_do_not_disturb != own_do_not_disturb(self.app.read(cx)) {
+            self.sync_tray(cx);
+        }
+    }
+
     fn toggle_main_window(&mut self, cx: &mut Context<Self>) {
         if self.main_window_active(cx) {
             if let Some(native) = self.main_native {
                 platform::hide_window(native);
+            } else {
+                #[cfg(target_os = "linux")]
+                crate::main_window::hide(cx);
             }
         } else {
             self.raise_main_window(cx);
@@ -1141,10 +1217,16 @@ impl NotificationCenter {
 
     pub fn accept_ring(&mut self, ring_id: u64, mode: calling::AcceptMode, cx: &mut Context<Self>) {
         self.raise_main_window(cx);
-        self.app.update(cx, |state, cx| state.accept_ring(ring_id, mode, cx));
+        self.app
+            .update(cx, |state, cx| state.accept_ring(ring_id, mode, cx));
     }
 
     fn raise_main_window(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if crate::main_window::is_hidden(cx) {
+            crate::main_window::show(cx);
+            return;
+        }
         if let Some(native) = self.main_native {
             platform::restore_and_raise(native);
         }
@@ -1154,9 +1236,12 @@ impl NotificationCenter {
     }
 
     fn apply_app_icon(&mut self, icon: AppIcon, cx: &mut Context<Self>) {
-        if icon == self.app_icon {
-            return;
+        if icon != self.app_icon {
+            self.show_app_icon(icon, cx);
         }
+    }
+
+    fn show_app_icon(&mut self, icon: AppIcon, cx: &mut Context<Self>) {
         self.app_icon = icon;
         let mention = !self.unread_mentions.is_empty();
         if let Some(tray) = &mut self.tray {
@@ -1167,11 +1252,18 @@ impl NotificationCenter {
         });
     }
 
-    fn sync_tray(&self) {
+    fn relocalize_tray(&self) {
+        if let Some(tray) = &self.tray {
+            tray.relocalize();
+        }
+    }
+
+    fn sync_tray(&mut self, cx: &App) {
+        self.tray_do_not_disturb = own_do_not_disturb(self.app.read(cx));
         if let Some(tray) = &self.tray {
             tray.sync(
                 self.settings.sounds.notification_sound,
-                self.settings.do_not_disturb,
+                self.tray_do_not_disturb,
                 !self.unread_mentions.is_empty(),
             );
         }
@@ -1188,17 +1280,21 @@ impl NotificationCenter {
         self.unread_mentions
             .retain(|conversation_id| still_unread.contains(conversation_id.as_str()));
         let badge = badge_for(count);
-        if badge == self.shown_badge {
+        let mention_dot = !self.unread_mentions.is_empty();
+        if badge == self.shown_badge && mention_dot == self.shown_mention_dot {
             return;
         }
-        if let Some(native) = self.main_native {
+        self.shown_mention_dot = mention_dot;
+        if badge != self.shown_badge
+            && let Some(native) = self.main_native
+        {
             platform::set_badge(native, badge.as_ref());
             if badge.is_none() && self.shown_badge.is_some() {
                 platform::stop_flash(native);
             }
         }
         self.shown_badge = badge;
-        self.sync_tray();
+        self.sync_tray(cx);
     }
 
     pub fn set_hover(&mut self, id: u64, hovered: bool, cx: &mut Context<Self>) {
@@ -1420,9 +1516,16 @@ fn open_popup<V: Into<AnyView>>(
             handle,
             native,
             opened: Instant::now(),
+            placed: Cell::new(None),
         };
         center.update(cx, |this, _| opened(this, Some(window)));
     });
+}
+
+fn window_is_open(window_id: WindowId, cx: &App) -> bool {
+    cx.windows()
+        .iter()
+        .any(|window| window.window_id() == window_id)
 }
 
 fn own_presence(state: &AppState) -> PresenceKind {

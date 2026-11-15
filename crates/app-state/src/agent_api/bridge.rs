@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -157,6 +157,7 @@ pub fn apply(
         } => {
             reactions.remove(&(conversation_id, message_id));
         }
+        UiEvent::MeetingProposalsChanged | UiEvent::WakeupScheduled(_) => {}
     }
 }
 
@@ -474,8 +475,14 @@ pub fn spawn_message_bridge(engine: Arc<Engine>, hub: Arc<AgentHub>, source: Arc
         loop {
             let conversation_id = match receiver.recv().await {
                 Ok(CoreEvent::MessagesChanged { conversation_id }) => conversation_id,
-                Ok(CoreEvent::MessagesStoredLate { conversation_id, message_ids }) => {
-                    stored_late.entry(conversation_id).or_default().extend(message_ids);
+                Ok(CoreEvent::MessagesStoredLate {
+                    conversation_id,
+                    message_ids,
+                }) => {
+                    stored_late
+                        .entry(conversation_id)
+                        .or_default()
+                        .extend(message_ids);
                     continue;
                 }
                 Ok(_) => continue,
@@ -587,7 +594,7 @@ mod tests {
         AgentPolicy {
             enabled: true,
             chats: Access::All,
-            propose: true,
+            write: true,
             ..AgentPolicy::default()
         }
     }

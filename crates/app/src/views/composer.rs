@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::views::title_bar::TITLE_BAR_HEIGHT;
 use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -23,7 +24,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use crate::views::title_bar::TITLE_BAR_HEIGHT;
 use teams_core::{
     Draft, DraftLine, Edit, EnterKeyBehavior, FileReference, FormatState, LineKind, LinkPreview,
     MarkKind, MentionCandidate, MentionInput, OBJECT_MARK, SizeStep, TABLE_MARK, TableEdit,
@@ -31,9 +31,9 @@ use teams_core::{
     reverse_edits,
 };
 
-pub(crate) mod delivery;
 mod attach_menu;
 mod cloud_picker;
+pub(crate) mod delivery;
 mod drafts;
 mod format_menus;
 pub(crate) mod plus_menu;
@@ -52,8 +52,8 @@ mod table;
 use super::actions::{
     COMPOSER_KEY_CONTEXT, DeleteTable, DeleteTableColumn, DeleteTableRow, EditLastMessage,
     EditLink, InsertTableColumnLeft, InsertTableColumnRight, InsertTableLine, InsertTableRowAbove,
-    InsertTableRowBelow, OpenSwitcher, PastePlainText, RemoveTableLine, ScheduleSend,
-    SetHeading1, SetHeading2, SetHeading3, SetParagraph, ToggleBold, ToggleCode, ToggleCodeBlock,
+    InsertTableRowBelow, OpenSwitcher, PastePlainText, RemoveTableLine, ScheduleSend, SetHeading1,
+    SetHeading2, SetHeading3, SetParagraph, ToggleBold, ToggleCode, ToggleCodeBlock,
     ToggleFormatBar, ToggleItalic, ToggleQuote, ToggleStrike, ToggleSubscript, ToggleSuperscript,
     ToggleUnderline,
 };
@@ -250,6 +250,8 @@ pub struct Composer {
     saved_images: Option<drafts::ImageFingerprint>,
     schedule: Option<schedule::SchedulePopover>,
     scheduling: Option<String>,
+    scheduling_for: Option<String>,
+    draft_before_edit: Option<(Outgoing, Vec<u64>)>,
     pending_anchors: HashMap<u64, usize>,
     link: ComposeLink,
     fun_picker: Entity<FunPicker>,
@@ -525,6 +527,8 @@ impl Composer {
             saved_images: None,
             schedule: None,
             scheduling: None,
+            scheduling_for: None,
+            draft_before_edit: None,
             pending_anchors: HashMap::new(),
             link: ComposeLink::default(),
             fun_picker,
@@ -1791,6 +1795,7 @@ impl Composer {
             self.save_draft_now(cx);
             self.draft_save = None;
             self.saved_images = None;
+            self.draft_before_edit = None;
             let carry = self.carry_images_into.take().as_deref() == Some(conversation_id);
             self.conversation_id = Some(conversation_id.to_owned());
             self.close_rewrite();
@@ -1842,13 +1847,41 @@ impl Composer {
     }
 
     pub fn begin_edit(&mut self, draft: Outgoing, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.is_none() {
+            self.save_draft_now(cx);
+            let image_ids = self.live_image_ids(cx);
+            self.draft_before_edit = Some((self.compose(cx), image_ids));
+        }
         self.restore(&draft, window, cx);
         self.focus(window, cx);
     }
 
     pub fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing = None;
-        self.set_text("", window, cx);
+        self.restore_draft_before_edit(window, cx);
+    }
+
+    fn live_image_ids(&self, cx: &App) -> Vec<u64> {
+        self.input
+            .read(cx)
+            .tokens()
+            .iter()
+            .filter_map(|span| image_id(span.token()))
+            .filter(|id| self.tray.image(*id).is_some())
+            .collect()
+    }
+
+    fn restore_draft_before_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.draft_before_edit.take() {
+            Some((outgoing, image_ids)) => {
+                let image_ids = image_ids
+                    .into_iter()
+                    .filter(|id| self.tray.image(*id).is_some())
+                    .collect();
+                self.restore_content(&outgoing, image_ids, window, cx);
+            }
+            None => self.set_text("", window, cx),
+        }
     }
 
     fn outgoing(&self, cx: &App) -> Option<Outgoing> {
@@ -2372,9 +2405,10 @@ impl Composer {
     }
 
     pub fn submit_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.scheduling.is_some() {
+        if self.scheduling.is_some() && self.scheduling_for == self.conversation_id {
             return;
         }
+        let was_editing = self.editing.is_some();
         let Some(outgoing) = self.outgoing(cx) else {
             return;
         };
@@ -2391,6 +2425,9 @@ impl Composer {
         self.close_popup();
         self.reset_importance();
         self.close_announcement(window, cx);
+        if was_editing {
+            self.restore_draft_before_edit(window, cx);
+        }
         cx.emit(ComposerEvent::Submit(Box::new(outgoing)));
         cx.notify();
     }
@@ -2423,13 +2460,23 @@ impl Composer {
     }
 
     pub fn restore(&mut self, outgoing: &Outgoing, window: &mut Window, cx: &mut Context<Self>) {
-        self.mention_inputs.clear();
         let image_ids = if outgoing.edit.is_none() {
             self.cancel_uploads();
             self.tray.restore(&outgoing.images, &outgoing.files)
         } else {
             Vec::new()
         };
+        self.restore_content(outgoing, image_ids, window, cx);
+    }
+
+    fn restore_content(
+        &mut self,
+        outgoing: &Outgoing,
+        image_ids: Vec<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mention_inputs.clear();
         let text = outgoing.draft.text();
         let mut content = InputContent::new(text.to_owned());
         for ((offset, _), id) in text.match_indices(OBJECT_MARK).zip(image_ids) {
@@ -2495,6 +2542,10 @@ impl Composer {
         self.update_mention(cx);
         self.update_link_preview(cx);
         cx.notify();
+    }
+
+    pub fn unsent(&self, cx: &App) -> Option<Outgoing> {
+        (!self.draft.is_blank() && self.editing.is_none()).then(|| self.compose(cx))
     }
 
     pub fn is_empty(&self, cx: &App) -> bool {
@@ -2590,9 +2641,15 @@ impl Composer {
         };
         let room_above = f32::from(anchor.top()) - POPUP_GAP - TITLE_BAR_HEIGHT;
         let (position, corner) = if room_above >= popup_height {
-            (point(anchor.left(), anchor.top() - px(POPUP_GAP)), Anchor::BottomLeft)
+            (
+                point(anchor.left(), anchor.top() - px(POPUP_GAP)),
+                Anchor::BottomLeft,
+            )
         } else {
-            (point(anchor.left(), anchor.bottom() + px(POPUP_GAP)), Anchor::TopLeft)
+            (
+                point(anchor.left(), anchor.bottom() + px(POPUP_GAP)),
+                Anchor::TopLeft,
+            )
         };
         Some(
             deferred(
@@ -2718,7 +2775,11 @@ impl Composer {
     }
 
     fn format_bar_fit(&self) -> format_toolbar::BarFit {
-        let toggle_width = if self.post_layout() { COMPOSER_BUTTON_SIZE } else { 0. };
+        let toggle_width = if self.post_layout() {
+            COMPOSER_BUTTON_SIZE
+        } else {
+            0.
+        };
         let available = self.composer_bounds.get().map_or(f32::INFINITY, |bounds| {
             f32::from(bounds.size.width) - 2. * (COMPOSER_BUTTON_INSET + 1.) - toggle_width
         });
@@ -3034,7 +3095,11 @@ impl Render for Composer {
                 .is_some_and(|bounds| f32::from(bounds.size.width) < STACKED_ACTIONS_WIDTH);
         let mut send = Some(send);
         let (row_actions, stacked_actions, post_footer) = if post_layout {
-            (None, None, Some(self.render_post_footer(actions, can_send, cx)))
+            (
+                None,
+                None,
+                Some(self.render_post_footer(actions, can_send, cx)),
+            )
         } else if stacked {
             (None, Some((actions, send.take())), None)
         } else {
@@ -3215,9 +3280,9 @@ impl Render for Composer {
             .on_action(cx.listener(|this, _: &ToggleFormatBar, window, cx| {
                 this.toggle_format_bar(window, cx)
             }))
-            .on_action(cx.listener(|_, _: &EditLastMessage, _, cx| {
-                cx.emit(ComposerEvent::EditLast)
-            }))
+            .on_action(
+                cx.listener(|_, _: &EditLastMessage, _, cx| cx.emit(ComposerEvent::EditLast)),
+            )
             .on_action(cx.listener(|this, _: &InsertTableLine, window, cx| {
                 this.open_table_menu(TableLineMenu::Insert, window, cx);
             }))
@@ -3471,7 +3536,8 @@ impl Render for Composer {
                 if this.slash_popup.is_some() {
                     this.slash_dismissed = true;
                 }
-                if this.popup.is_some() || this.emoji_popup.is_some() || this.slash_popup.is_some() {
+                if this.popup.is_some() || this.emoji_popup.is_some() || this.slash_popup.is_some()
+                {
                     this.close_popup();
                     cx.notify();
                     cx.stop_propagation();
@@ -4703,7 +4769,10 @@ mod tests {
             typist.press("enter");
             typist.type_text("b");
             typist.press("up end delete");
-            assert_eq!(typist.outgoing().html(), "<pre class=\"language-plaintext skipProofing\" spellcheck=\"false\"><code>ab</code></pre>");
+            assert_eq!(
+                typist.outgoing().html(),
+                "<pre class=\"language-plaintext skipProofing\" spellcheck=\"false\"><code>ab</code></pre>"
+            );
         }
 
         #[cfg_attr(target_os = "macos", ignore = "needs Ctrl bindings")]
@@ -4867,7 +4936,10 @@ mod tests {
                     .update(|cx| composer.read(cx).paste_hint.is_none())
             );
             let outgoing = typist.outgoing();
-            assert_eq!(outgoing.html(), "<pre class=\"language-plaintext skipProofing\" spellcheck=\"false\"><code>:) **x**</code></pre>");
+            assert_eq!(
+                outgoing.html(),
+                "<pre class=\"language-plaintext skipProofing\" spellcheck=\"false\"><code>:) **x**</code></pre>"
+            );
         }
 
         #[gpui_kit::test]
@@ -5293,6 +5365,7 @@ mod tests {
                         files: Vec::new(),
                         importance: Default::default(),
                     };
+                    composer.set_text("half reply", window, cx);
                     composer.begin_edit(draft, window, cx);
                 });
             })
@@ -5312,6 +5385,7 @@ mod tests {
                 let composer = composer.read(cx);
                 assert_eq!(composer.tray.items().len(), 1);
                 assert!(composer.can_send(cx));
+                assert_eq!(composer.outgoing(cx).unwrap().text(), "half reply");
             });
         }
 

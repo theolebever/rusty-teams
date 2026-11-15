@@ -6,6 +6,8 @@ use gpui_kit::*;
 
 use super::title_bar::{TITLE_BAR_HEIGHT, app_icon_image};
 use crate::backend::ConnectionState;
+use crate::browser_sign_in::BrowserSignInState;
+use crate::i18n::tr;
 use crate::theme;
 
 const MIN_VISIBLE: Duration = Duration::from_millis(400);
@@ -33,6 +35,7 @@ pub const STILL_RECHECK: Duration = Duration::from_millis(250);
 pub struct StartupFacts<'a> {
     pub elapsed: Duration,
     pub connection: &'a ConnectionState,
+    pub browser_sign_in: &'a BrowserSignInState,
     pub has_chats: bool,
     pub synced: bool,
     pub demo: bool,
@@ -41,11 +44,20 @@ pub struct StartupFacts<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
-    Loading { status: String, running: bool, hint: Option<&'static str> },
+    Loading {
+        status: String,
+        running: bool,
+        hint: Option<String>,
+    },
     Ready,
 }
 
 pub fn phase(facts: &StartupFacts) -> Phase {
+    // Managed-browser phases must win over a warm cache, or re-auth would
+    // skip the splash and never show opening/awaiting/finishing/failed copy.
+    if let Some(phase) = browser_phase(facts) {
+        return phase;
+    }
     let content_ready = facts.has_chats || facts.synced || facts.demo;
     if facts.elapsed >= MIN_VISIBLE && content_ready && facts.opening.is_none() {
         return Phase::Ready;
@@ -54,28 +66,61 @@ pub fn phase(facts: &StartupFacts) -> Phase {
     if facts.elapsed >= GIVE_UP_AFTER && !(signing_in && !content_ready) {
         return Phase::Ready;
     }
+    let late_hint =
+        (facts.elapsed >= HINT_AFTER && !content_ready).then(|| tr("auth.splash.first_start_hint"));
     let loading = |status: String| Phase::Loading {
         status,
         running: true,
-        hint: (facts.elapsed >= HINT_AFTER && !content_ready).then_some("First start: this takes a little longer once"),
+        hint: late_hint.clone(),
     };
-    if signing_in {
+    if matches!(facts.connection, ConnectionState::LoginRequired) {
         return Phase::Loading {
-            status: "Sign in to Teams in the window that opened".to_owned(),
+            status: tr("auth.splash.awaiting_browser"),
             running: false,
             hint: None,
         };
     }
     if facts.elapsed < STARTING_FOR {
-        return loading("Starting Rusty Teams".to_owned());
+        return loading(tr("auth.splash.starting"));
     }
     if content_ready {
-        return loading(facts.opening.as_ref().map_or_else(|| "Syncing new messages".to_owned(), |title| format!("Opening {title}")));
+        return loading(facts.opening.as_ref().map_or_else(
+            || tr("auth.splash.syncing"),
+            |title| tr("auth.splash.opening").replace("%{title}", title),
+        ));
     }
     match facts.connection {
-        ConnectionState::Connecting => loading("Signing in".to_owned()),
-        ConnectionState::Online => loading("Loading your chats".to_owned()),
-        _ => loading("Cannot reach Teams, trying again".to_owned()),
+        ConnectionState::Connecting => loading(tr("auth.splash.signing_in")),
+        ConnectionState::Online => loading(tr("auth.splash.loading_chats")),
+        _ => loading(tr("auth.splash.cannot_reach")),
+    }
+}
+
+fn browser_phase(facts: &StartupFacts) -> Option<Phase> {
+    let late_browser_hint =
+        (facts.elapsed >= HINT_AFTER).then(|| tr("auth.splash.browser_still_loading_hint"));
+    match facts.browser_sign_in {
+        BrowserSignInState::Idle => None,
+        BrowserSignInState::Opening => Some(Phase::Loading {
+            status: tr("auth.splash.opening_browser"),
+            running: true,
+            hint: late_browser_hint,
+        }),
+        BrowserSignInState::AwaitingSignIn => Some(Phase::Loading {
+            status: tr("auth.splash.awaiting_browser"),
+            running: false,
+            hint: late_browser_hint,
+        }),
+        BrowserSignInState::Finishing => Some(Phase::Loading {
+            status: tr("auth.splash.finishing"),
+            running: true,
+            hint: None,
+        }),
+        BrowserSignInState::Failed(detail) => Some(Phase::Loading {
+            status: tr("auth.splash.browser_failed"),
+            running: false,
+            hint: Some(detail.clone()),
+        }),
     }
 }
 
@@ -87,7 +132,11 @@ pub struct Splash {
 
 impl Default for Splash {
     fn default() -> Self {
-        Splash { started: Instant::now(), hidden_at: None, recheck_scheduled: false }
+        Splash {
+            started: Instant::now(),
+            hidden_at: None,
+            recheck_scheduled: false,
+        }
     }
 }
 
@@ -105,7 +154,9 @@ impl Splash {
     }
 
     pub fn content_rising(&self) -> Option<Duration> {
-        self.hidden_at.map(|hidden_at| hidden_at.elapsed()).filter(|since| *since < CONTENT_RISE)
+        self.hidden_at
+            .map(|hidden_at| hidden_at.elapsed())
+            .filter(|since| *since < CONTENT_RISE)
     }
 
     pub fn render(&self, phase: &Phase, cx: &App) -> Option<AnyElement> {
@@ -116,7 +167,11 @@ impl Splash {
         let still = cx.reduce_motion();
         let app_icon = crate::active_appearance::current(cx).app_icon;
         let (status, running, hint) = match phase {
-            Phase::Loading { status, running, hint } => (status.clone(), *running, *hint),
+            Phase::Loading {
+                status,
+                running,
+                hint,
+            } => (status.clone(), *running, hint.clone()),
             Phase::Ready => (String::new(), true, None),
         };
         let overlay = v_flex()
@@ -144,9 +199,11 @@ impl Splash {
             );
         Some(match fading {
             Some(_) if !still => overlay
-                .with_animation("startup-splash-fade", Animation::new(FADE_OUT).with_easing(ease_out_quint()), |overlay, delta| {
-                    overlay.opacity(1. - delta)
-                })
+                .with_animation(
+                    "startup-splash-fade",
+                    Animation::new(FADE_OUT).with_easing(ease_out_quint()),
+                    |overlay, delta| overlay.opacity(1. - delta),
+                )
                 .into_any_element(),
             _ => overlay.into_any_element(),
         })
@@ -155,21 +212,37 @@ impl Splash {
 
 fn logo(app_icon: crate::appearance::AppIcon, still: bool) -> AnyElement {
     let image = img(app_icon_image(app_icon)).size(px(LOGO_SIZE));
-    let frame = div().size(px(LOGO_SIZE * (1. + LOGO_BREATH))).flex().items_center().justify_center();
+    let frame = div()
+        .size(px(LOGO_SIZE * (1. + LOGO_BREATH)))
+        .flex()
+        .items_center()
+        .justify_center();
     if still {
         return frame.child(image).into_any_element();
     }
     frame
-        .child(image.with_animation("startup-splash-logo", Animation::new(BREATH_PERIOD).repeat(), |image, delta| {
-            let wave = (1. - (delta * std::f32::consts::TAU).cos()) / 2.;
-            image.size(px(LOGO_SIZE * (1. + LOGO_BREATH * wave)))
-        }))
+        .child(image.with_animation(
+            "startup-splash-logo",
+            Animation::new(BREATH_PERIOD).repeat(),
+            |image, delta| {
+                let wave = (1. - (delta * std::f32::consts::TAU).cos()) / 2.;
+                image.size(px(LOGO_SIZE * (1. + LOGO_BREATH * wave)))
+            },
+        ))
         .into_any_element()
 }
 
 fn bar(running: bool, still: bool) -> Div {
     let sweep_width = BAR_WIDTH * SWEEP_SHARE;
-    let sweep = || div().absolute().top_0().bottom_0().w(px(sweep_width)).rounded(px(BAR_HEIGHT)).bg(theme::accent());
+    let sweep = || {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(sweep_width))
+            .rounded(px(BAR_HEIGHT))
+            .bg(theme::accent())
+    };
     div()
         .relative()
         .mt(px(BAR_TOP_GAP))
@@ -179,30 +252,45 @@ fn bar(running: bool, still: bool) -> Div {
         .overflow_hidden()
         .bg(theme::border_strong())
         .when(!running, |bar| bar.invisible())
-        .when(running && still, |bar| bar.child(sweep().left(px((BAR_WIDTH - sweep_width) / 2.))))
+        .when(running && still, |bar| {
+            bar.child(sweep().left(px((BAR_WIDTH - sweep_width) / 2.)))
+        })
         .when(running && !still, |bar| {
-            bar.child(sweep().with_animation(
-                "startup-splash-sweep",
-                Animation::new(SWEEP_PERIOD).repeat().with_easing(ease_in_out),
-                move |sweep, delta| {
-                    let head = (BAR_WIDTH + sweep_width) * delta;
-                    let start = (head - sweep_width).max(0.);
-                    sweep.left(px(start)).w(px(head.min(BAR_WIDTH) - start))
-                },
-            ))
+            bar.child(
+                sweep().with_animation(
+                    "startup-splash-sweep",
+                    Animation::new(SWEEP_PERIOD)
+                        .repeat()
+                        .with_easing(ease_in_out),
+                    move |sweep, delta| {
+                        let head = (BAR_WIDTH + sweep_width) * delta;
+                        let start = (head - sweep_width).max(0.);
+                        sweep.left(px(start)).w(px(head.min(BAR_WIDTH) - start))
+                    },
+                ),
+            )
         })
 }
 
 fn status_line(status: String, still: bool) -> AnyElement {
-    let line = div().text_size(px(STATUS_SIZE)).text_color(theme::text_muted()).child(status.clone());
-    let slot = div().mt(px(STATUS_TOP_GAP)).h(px(STATUS_SIZE * 1.4)).relative();
+    let line = div()
+        .text_size(px(STATUS_SIZE))
+        .text_color(theme::text_muted())
+        .child(status.clone());
+    let slot = div()
+        .mt(px(STATUS_TOP_GAP))
+        .h(px(STATUS_SIZE * 1.4))
+        .relative();
     if still {
         return slot.child(line).into_any_element();
     }
     slot.child(line.relative().with_animation(
         ElementId::Name(format!("startup-splash-status-{status}").into()),
         Animation::new(STATUS_SWAP).with_easing(ease_out_quint()),
-        |line, delta| line.top(px(STATUS_SWAP_OFFSET * (1. - delta))).opacity(delta),
+        |line, delta| {
+            line.top(px(STATUS_SWAP_OFFSET * (1. - delta)))
+                .opacity(delta)
+        },
     ))
     .into_any_element()
 }
@@ -212,11 +300,21 @@ mod tests {
     use std::time::Duration;
 
     use super::{ConnectionState, Phase, StartupFacts, phase};
+    use crate::browser_sign_in::BrowserSignInState;
 
     fn facts(elapsed_ms: u64, connection: &ConnectionState) -> StartupFacts<'_> {
+        facts_with(elapsed_ms, connection, &BrowserSignInState::Idle)
+    }
+
+    fn facts_with<'a>(
+        elapsed_ms: u64,
+        connection: &'a ConnectionState,
+        browser_sign_in: &'a BrowserSignInState,
+    ) -> StartupFacts<'a> {
         StartupFacts {
             elapsed: Duration::from_millis(elapsed_ms),
             connection,
+            browser_sign_in,
             has_chats: false,
             synced: false,
             demo: false,
@@ -234,37 +332,108 @@ mod tests {
     #[test]
     fn a_warm_cache_shows_the_app_after_the_minimum() {
         let online = ConnectionState::Connecting;
-        let warm = StartupFacts { has_chats: true, ..facts(100, &online) };
-        assert_eq!(status(phase(&warm)), "Starting Rusty Teams");
-        let warm = StartupFacts { has_chats: true, ..facts(450, &online) };
+        let warm = StartupFacts {
+            has_chats: true,
+            ..facts(100, &online)
+        };
+        assert_translated(&status(phase(&warm)));
+        let warm = StartupFacts {
+            has_chats: true,
+            ..facts(450, &online)
+        };
         assert_eq!(phase(&warm), Phase::Ready);
     }
 
     #[test]
     fn the_open_chat_holds_the_splash_until_its_messages_show() {
         let online = ConnectionState::Online;
-        let opening = StartupFacts { has_chats: true, opening: Some("Release planning".to_owned()), ..facts(900, &online) };
-        assert_eq!(status(phase(&opening)), "Opening Release planning");
+        let opening = StartupFacts {
+            has_chats: true,
+            opening: Some("Release planning".to_owned()),
+            ..facts(900, &online)
+        };
+        assert!(status(phase(&opening)).contains("Release planning"));
+    }
+
+    fn assert_translated(status: &str) {
+        assert!(!status.is_empty());
+        assert!(
+            !status.starts_with("auth.splash."),
+            "raw i18n key leaked: {status}"
+        );
     }
 
     #[test]
     fn a_first_start_walks_through_sign_in_and_chats_with_a_late_hint() {
         let connecting = ConnectionState::Connecting;
-        assert_eq!(status(phase(&facts(500, &connecting))), "Signing in");
+        assert_translated(&status(phase(&facts(500, &connecting))));
         let online = ConnectionState::Online;
-        assert_eq!(status(phase(&facts(2000, &online))), "Loading your chats");
-        let Phase::Loading { hint, .. } = phase(&facts(9000, &online)) else { panic!("still loading") };
+        assert_translated(&status(phase(&facts(2000, &online))));
+        let Phase::Loading { hint, .. } = phase(&facts(9000, &online)) else {
+            panic!("still loading")
+        };
         assert!(hint.is_some());
-        let synced = StartupFacts { synced: true, ..facts(9000, &online) };
+        let synced = StartupFacts {
+            synced: true,
+            ..facts(9000, &online)
+        };
         assert_eq!(phase(&synced), Phase::Ready);
     }
 
     #[test]
     fn sign_in_stops_the_bar_and_never_gives_up_without_content() {
         let login = ConnectionState::LoginRequired;
-        let Phase::Loading { running, .. } = phase(&facts(60_000, &login)) else { panic!("still loading") };
+        let Phase::Loading { running, .. } = phase(&facts(60_000, &login)) else {
+            panic!("still loading")
+        };
         assert!(!running);
         let offline = ConnectionState::Failed("down".to_owned());
         assert_eq!(phase(&facts(31_000, &offline)), Phase::Ready);
+    }
+
+    #[test]
+    fn browser_awaiting_sign_in_stops_the_bar() {
+        let connecting = ConnectionState::Connecting;
+        let awaiting = BrowserSignInState::AwaitingSignIn;
+        let Phase::Loading {
+            running, status, ..
+        } = phase(&facts_with(2_000, &connecting, &awaiting))
+        else {
+            panic!("still loading")
+        };
+        assert!(!running);
+        assert_translated(&status);
+    }
+
+    #[test]
+    fn browser_opening_keeps_the_bar_running() {
+        let connecting = ConnectionState::Connecting;
+        let opening = BrowserSignInState::Opening;
+        let Phase::Loading {
+            running, status, ..
+        } = phase(&facts_with(2_000, &connecting, &opening))
+        else {
+            panic!("still loading")
+        };
+        assert!(running);
+        assert_translated(&status);
+    }
+
+    #[test]
+    fn warm_cache_still_shows_managed_browser_phases() {
+        let online = ConnectionState::Online;
+        let awaiting = BrowserSignInState::AwaitingSignIn;
+        let warm = StartupFacts {
+            has_chats: true,
+            ..facts_with(450, &online, &awaiting)
+        };
+        let Phase::Loading {
+            running, status, ..
+        } = phase(&warm)
+        else {
+            panic!("managed browser must keep splash over warm cache")
+        };
+        assert!(!running);
+        assert_translated(&status);
     }
 }

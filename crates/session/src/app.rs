@@ -3,23 +3,23 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum App {
     Teams,
-    Outlook,
 }
 
 impl App {
-    pub const ALL: [App; 2] = [App::Teams, App::Outlook];
+    pub const ALL: [App; 1] = [App::Teams];
 
     pub fn origins(self) -> &'static [&'static str] {
         match self {
-            App::Teams => &["https://teams.cloud.microsoft", "https://teams.microsoft.com"],
-            App::Outlook => &["https://outlook.office.com", "https://outlook.cloud.microsoft"],
+            App::Teams => &[
+                "https://teams.cloud.microsoft",
+                "https://teams.microsoft.com",
+            ],
         }
     }
 
     pub fn start_url(self) -> &'static str {
         match self {
             App::Teams => "https://teams.cloud.microsoft/",
-            App::Outlook => "https://outlook.cloud.microsoft/mail/",
         }
     }
 
@@ -27,7 +27,6 @@ impl App {
     pub fn park_url(self) -> &'static str {
         match self {
             App::Teams => "https://teams.cloud.microsoft/robots.txt",
-            App::Outlook => "https://outlook.cloud.microsoft/owa/favicon.ico",
         }
     }
 
@@ -40,12 +39,14 @@ impl std::fmt::Display for App {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             App::Teams => "teams",
-            App::Outlook => "outlook",
         })
     }
 }
 
-const LOGIN_ORIGINS: [&str; 2] = ["https://login.microsoftonline.com", "https://login.live.com"];
+const LOGIN_ORIGINS: [&str; 2] = [
+    "https://login.microsoftonline.com",
+    "https://login.live.com",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Target {
@@ -61,7 +62,10 @@ pub fn find_app_tab(targets: &[Target], app: App) -> Option<&Target> {
     targets.iter().find(|target| {
         target.kind == "page"
             && target.websocket_url.is_some()
-            && app.origins().iter().any(|origin| target.url.starts_with(origin))
+            && app
+                .origins()
+                .iter()
+                .any(|origin| target.url.starts_with(origin))
     })
 }
 
@@ -70,7 +74,9 @@ pub fn is_login_url(url: &str) -> bool {
 }
 
 pub fn has_login_tab(targets: &[Target]) -> bool {
-    targets.iter().any(|target| target.kind == "page" && is_login_url(&target.url))
+    targets
+        .iter()
+        .any(|target| target.kind == "page" && is_login_url(&target.url))
 }
 
 #[cfg(test)]
@@ -92,8 +98,13 @@ mod tests {
     #[test]
     fn finds_page_tabs_per_app() {
         let targets = targets();
-        assert_eq!(find_app_tab(&targets, App::Teams).unwrap().websocket_url.as_deref(), Some("ws://x/3"));
-        assert_eq!(find_app_tab(&targets, App::Outlook).unwrap().websocket_url.as_deref(), Some("ws://x/2"));
+        assert_eq!(
+            find_app_tab(&targets, App::Teams)
+                .unwrap()
+                .websocket_url
+                .as_deref(),
+            Some("ws://x/3")
+        );
     }
 
     #[test]
@@ -111,7 +122,6 @@ mod tests {
         .unwrap();
         let teams = find_app_tab(&parked, App::Teams).unwrap();
         assert!(App::Teams.is_park_url(&teams.url));
-        assert!(App::Outlook.is_park_url(&find_app_tab(&parked, App::Outlook).unwrap().url));
         assert!(!App::Teams.is_park_url("https://teams.cloud.microsoft/v2/"));
     }
 

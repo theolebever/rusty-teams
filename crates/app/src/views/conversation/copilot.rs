@@ -7,23 +7,20 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::ConversationView;
+use crate::agents::message_context;
 use crate::app_state::Selection;
 use crate::render::{layout_card_blocks, render_blocks};
 use crate::runtime;
 use crate::theme;
 use crate::views::scroll_edge::with_top_edge;
+use crate::views::widgets::symbol;
 
 pub const COPILOT_PANE_TAG: &str = "shell/islands/copilot";
 const COPILOT_SCROLL_DIVIDER: &str = "shell/islands/copilot/divider-scroll";
-const TITLE: &str = "Copilot";
-const OPEN_LABEL: &str = "Open Copilot";
-const CLOSE_LABEL: &str = "Close Copilot";
-const PLACEHOLDER: &str = "Message Copilot";
-const WORKING: &str = "Copilot is reading the chat ...";
-const UNAVAILABLE: &str = "Copilot needs a signed-in account.";
-const FAILED: &str = "Copilot could not answer:";
+const COPILOT_NAME: &str = "Copilot";
 const GREETING: &str = "Hi, how can I help?";
 const LOGO_ASSET: &str = "symbols/copilot_color.svg";
+const LOCAL_ICON: &str = "smart_toy";
 const LOGO_BUTTON: f32 = 18.;
 const LOGO_TITLE: f32 = 20.;
 const INPUT_MIN_HEIGHT: f32 = 72.;
@@ -40,6 +37,7 @@ const PANE_PADDING: f32 = 16.;
 const HEADER_HEIGHT: f32 = 48.;
 const BUTTON_SIZE: f32 = 32.;
 const BUBBLE_RADIUS: f32 = 8.;
+const ASK_SYSTEM: &str = "You answer questions about a Teams chat. Use only the messages provided. Do not invent messages. Reply in plain text. Answer in the same language as the chat messages.";
 
 #[derive(Default)]
 pub(super) struct CopilotPane {
@@ -70,21 +68,28 @@ impl ConversationView {
         }
     }
 
-    pub(super) fn copilot_label(&self) -> &'static str {
-        if self.copilot.open { CLOSE_LABEL } else { OPEN_LABEL }
+    pub(super) fn copilot_label(&self, cx: &App) -> String {
+        let name = writer_display_name(cx);
+        if self.copilot.open {
+            format!("Close {name}")
+        } else {
+            format!("Open {name}")
+        }
     }
 
     pub(super) fn copilot_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.copilot_chat_id()?;
         let open = self.copilot.open;
+        let local = crate::agents::local_writer(cx).is_some();
+        let label = self.copilot_label(cx);
         Some(
             Button::new("copilot-toggle")
-                .child(copilot_logo(LOGO_BUTTON))
+                .child(identity_mark(local, LOGO_BUTTON, theme::text_muted()))
                 .ghost()
                 .size(px(BUTTON_SIZE))
                 .rounded(px(8.))
                 .when(open, |button| button.selected(true))
-                .tooltip(if open { CLOSE_LABEL } else { OPEN_LABEL })
+                .tooltip(label)
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_copilot(window, cx)))
                 .into_any_element(),
         )
@@ -93,16 +98,21 @@ impl ConversationView {
     pub(super) fn toggle_copilot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.copilot.open = !self.copilot.open;
         if self.copilot.open && self.copilot.input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
-            let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    let prompt = input.read(cx).value().trim().to_owned();
-                    if !prompt.is_empty() {
-                        input.update(cx, |input, cx| input.set_value("", window, cx));
-                        this.ask_copilot(prompt, cx);
+            let placeholder = format!("Message {}", writer_display_name(cx));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            let subscription = cx.subscribe_in(
+                &input,
+                window,
+                |this, input, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        let prompt = input.read(cx).value().trim().to_owned();
+                        if !prompt.is_empty() {
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                            this.ask_copilot(prompt, cx);
+                        }
                     }
-                }
-            });
+                },
+            );
             self.copilot.input = Some(input);
             self.copilot._input_events = Some(subscription);
         }
@@ -144,19 +154,62 @@ impl ConversationView {
         });
         self.copilot.scroll.scroll_to_bottom();
         cx.notify();
+        let failed = failed_answer(&writer_display_name(cx));
+        if let Some(profile) = crate::agents::local_writer(cx) {
+            let state = self.app.read(cx);
+            let chat = message_context::chat_title(state, &chat_id);
+            let thread = message_context::recent_thread(state, &chat_id);
+            let user = message_context::ask_prompt(&chat, &thread, &prompt);
+            let receiver =
+                runtime::spawn(
+                    async move { agents::complete_text(&profile, ASK_SYSTEM, &user).await },
+                );
+            cx.spawn(async move |this, cx| {
+                let answer = match receiver.await {
+                    Ok(Ok(text)) => Ok(text),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(error.to_string()),
+                };
+                this.update(cx, |this, cx| {
+                    this.settle_copilot(
+                        generation,
+                        index,
+                        answer.map_err(|error| format!("{failed} {error}")),
+                        cx,
+                    )
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let Some(engine) = self.app.read(cx).engine.clone() else {
-            self.settle_copilot(generation, index, Err(UNAVAILABLE.to_owned()), cx);
+            self.settle_copilot(
+                generation,
+                index,
+                Err(unavailable_message(&writer_display_name(cx))),
+                cx,
+            );
             return;
         };
         let receiver = runtime::spawn(async move { engine.ask_copilot(&chat_id, &prompt).await });
         cx.spawn(async move |this, cx| {
             let answer = match receiver.await {
                 Ok(Ok(text)) => Ok(text),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(error)) => Err(format!(
+                    "{failed} {}",
+                    error
+                        .to_string()
+                        .split(" (https://")
+                        .next()
+                        .unwrap_or_default()
+                )),
+                Err(error) => Err(format!("{failed} {error}")),
             };
-            this.update(cx, |this, cx| this.settle_copilot(generation, index, answer, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.settle_copilot(generation, index, answer, cx)
+            })
+            .ok();
         })
         .detach();
     }
@@ -176,10 +229,7 @@ impl ConversationView {
         };
         turn.answer = match answer {
             Ok(text) => CopilotAnswer::Ready(text),
-            Err(error) => CopilotAnswer::Failed(format!(
-                "{FAILED} {}",
-                error.split(" (https://").next().unwrap_or_default()
-            )),
+            Err(error) => CopilotAnswer::Failed(error),
         };
         self.copilot.scroll.scroll_to_bottom();
         cx.notify();
@@ -190,6 +240,8 @@ impl ConversationView {
             return None;
         }
         self.copilot_chat_id()?;
+        let local = crate::agents::local_writer(cx).is_some();
+        let name = writer_display_name(cx);
         let busy = self
             .copilot
             .turns
@@ -205,27 +257,30 @@ impl ConversationView {
                 .bg(theme::surface_raised())
                 .child(Input::new(input).appearance(false).bordered(false))
         });
+        let working = working_message(&name);
         let content = if self.copilot.turns.is_empty() {
-            let suggestions = v_flex().w_full().gap(px(8.)).children(
-                SUGGESTIONS.iter().enumerate().map(|(index, prompt)| {
-                    div()
-                        .id(("copilot-suggestion", index))
-                        .w_full()
-                        .px(px(12.))
-                        .py(px(10.))
-                        .rounded(px(CHIP_RADIUS))
-                        .bg(theme::surface_raised())
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .cursor_pointer()
-                        .hover(|chip| chip.bg(theme::row_hover()))
-                        .child(*prompt)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.ask_copilot((*prompt).to_owned(), cx)
-                        }))
-                }),
-            );
+            let suggestions =
+                v_flex()
+                    .w_full()
+                    .gap(px(8.))
+                    .children(SUGGESTIONS.iter().enumerate().map(|(index, prompt)| {
+                        div()
+                            .id(("copilot-suggestion", index))
+                            .w_full()
+                            .px(px(12.))
+                            .py(px(10.))
+                            .rounded(px(CHIP_RADIUS))
+                            .bg(theme::surface_raised())
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .cursor_pointer()
+                            .hover(|chip| chip.bg(theme::row_hover()))
+                            .child(*prompt)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ask_copilot((*prompt).to_owned(), cx)
+                            }))
+                    }));
             v_flex()
                 .flex_1()
                 .min_h_0()
@@ -250,9 +305,12 @@ impl ConversationView {
                 .pb(px(PANE_PADDING))
                 .gap(px(12.));
             for (index, turn) in self.copilot.turns.iter().enumerate() {
-                body = body
-                    .child(prompt_bubble(&turn.prompt))
-                    .child(answer_view(index, &turn.answer, cx));
+                body = body.child(prompt_bubble(&turn.prompt)).child(answer_view(
+                    index,
+                    &turn.answer,
+                    &working,
+                    cx,
+                ));
             }
             v_flex()
                 .flex_1()
@@ -301,13 +359,13 @@ impl ConversationView {
                                     h_flex()
                                         .gap(px(8.))
                                         .items_center()
-                                        .child(copilot_logo(LOGO_TITLE))
+                                        .child(identity_mark(local, LOGO_TITLE, theme::text()))
                                         .child(
                                             div()
                                                 .text_size(px(15.))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(theme::text())
-                                                .child(TITLE),
+                                                .child(name),
                                         ),
                                 )
                                 .child(
@@ -316,7 +374,7 @@ impl ConversationView {
                                         .ghost()
                                         .size(px(BUTTON_SIZE))
                                         .rounded(px(8.))
-                                        .tooltip(CLOSE_LABEL)
+                                        .tooltip(format!("Close {}", writer_display_name(cx)))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.copilot.open = false;
                                             cx.notify();
@@ -330,8 +388,33 @@ impl ConversationView {
     }
 }
 
-fn copilot_logo(size: f32) -> Img {
-    img(LOGO_ASSET).size(px(size)).flex_none()
+fn writer_display_name(cx: &App) -> String {
+    crate::agents::local_writer(cx)
+        .map(|profile| profile.name)
+        .unwrap_or_else(|| COPILOT_NAME.to_owned())
+}
+
+fn working_message(name: &str) -> String {
+    format!("{name} is reading the chat ...")
+}
+
+fn failed_answer(name: &str) -> String {
+    format!("{name} could not answer:")
+}
+
+fn unavailable_message(name: &str) -> String {
+    format!("{name} needs a signed-in account.")
+}
+
+fn identity_mark(local: bool, size: f32, color: Hsla) -> AnyElement {
+    if local {
+        symbol(LOCAL_ICON, size, color).into_any_element()
+    } else {
+        img(LOGO_ASSET)
+            .size(px(size))
+            .flex_none()
+            .into_any_element()
+    }
 }
 
 fn prompt_bubble(prompt: &str) -> Div {
@@ -348,12 +431,12 @@ fn prompt_bubble(prompt: &str) -> Div {
     )
 }
 
-fn answer_view(index: usize, answer: &CopilotAnswer, cx: &App) -> AnyElement {
+fn answer_view(index: usize, answer: &CopilotAnswer, working: &str, cx: &App) -> AnyElement {
     match answer {
         CopilotAnswer::Waiting => div()
             .text_size(px(13.))
             .text_color(theme::text_muted())
-            .child(WORKING)
+            .child(working.to_owned())
             .into_any_element(),
         CopilotAnswer::Failed(error) => div()
             .text_size(px(13.))

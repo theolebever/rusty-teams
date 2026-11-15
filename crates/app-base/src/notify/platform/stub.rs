@@ -1,11 +1,15 @@
+#[cfg(not(target_os = "linux"))]
 use std::sync::Arc;
+#[cfg(not(target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 
 use raw_window_handle::HasWindowHandle;
 
 use calling::ShareKind;
 
-use super::{NativeHandle, ScreenRect, ShareGeometry, TrayCommand, WorkArea};
+#[cfg(not(target_os = "linux"))]
+use super::TrayCommand;
+use super::{NativeHandle, ScreenRect, ShareGeometry, WorkArea};
 use crate::notify::badge::Badge;
 
 pub fn native_handle(_window: &impl HasWindowHandle) -> Option<NativeHandle> {
@@ -33,8 +37,6 @@ pub fn stack_group_above(_shared: NativeHandle, _group: &[NativeHandle]) {}
 pub fn show_window_inactive(_handle: NativeHandle) {}
 
 pub fn exclude_from_capture(_handle: NativeHandle) {}
-
-pub fn include_in_capture(_handle: NativeHandle) {}
 
 #[cfg(target_os = "linux")]
 pub fn make_window_click_through(window: &impl HasWindowHandle) {
@@ -88,16 +90,25 @@ pub fn stop_flash(_handle: NativeHandle) {}
 
 pub fn set_badge(_handle: NativeHandle, _badge: Option<&Badge>) {}
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use super::linux_sound::{play_mp3, play_mp3_until, play_sound, set_sound_output};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn play_sound() {}
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn set_sound_output(_device_key: Option<String>) {}
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn play_mp3(_bytes: Vec<u8>) {}
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn play_mp3_until(_bytes: Vec<u8>, _looped: bool, _stop: Arc<AtomicBool>) {}
 
+#[cfg(not(target_os = "linux"))]
 pub struct Tray;
 
+#[cfg(not(target_os = "linux"))]
 impl Tray {
     pub fn new(_sound_on: bool, _do_not_disturb: bool, _icon_png: &[u8]) -> Option<Self> {
         None
@@ -110,6 +121,8 @@ impl Tray {
     }
 
     pub fn sync(&self, _sound_on: bool, _do_not_disturb: bool, _mention: bool) {}
+
+    pub fn relocalize(&self) {}
 }
 
 pub fn animations_enabled() -> bool {

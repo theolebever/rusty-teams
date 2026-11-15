@@ -1,11 +1,12 @@
 # Tests per README "Quick start": `cargo test`, on Windows, the target this fork focuses on.
 name: Test
 
-# Tests gate pushes to main; releases build from tags in build.yml.
+# Tests gate pushes to main and pull requests; releases build from tags in build.yml.
 on:
   push:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', '.github/readme/**']
+  pull_request:
   workflow_dispatch:
 
 permissions:

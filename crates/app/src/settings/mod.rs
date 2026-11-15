@@ -1,11 +1,13 @@
 mod about;
 mod account;
 mod appearance;
+mod calendar;
 mod calls;
 mod chats;
 mod devices;
 mod dialog;
 mod general;
+mod help;
 mod mcp;
 mod nav;
 mod notifications;

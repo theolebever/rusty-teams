@@ -5,9 +5,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeZone, Utc};
 use mcp::{
-    Access, AgentHub, AgentPolicy, EncodedImage, FileInfo, ForwardedInfo, ImageInfo, ImageKind,
-    LinkInfo, Meeting, MentionInfo, MessageExtras, Outcome, QuoteInfo, ReactionInfo, ServerHandle,
-    SourceError, SourceFuture, TeamsSource, Transcript, TranscriptTurn,
+    Access, AgentHub, AgentPolicy, BusySlot, CreatedMeeting, EncodedImage, FileInfo, ForwardedInfo,
+    ImageInfo, ImageKind, LinkInfo, Meeting, MeetingDraft, MeetingOutcome, MentionInfo,
+    MessageExtras, Outcome, PersonAvailability, QuoteInfo, ReactionInfo, ServerHandle, SourceError,
+    SourceFuture, TeamsSource, Transcript, TranscriptTurn,
 };
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientConfig};
@@ -15,7 +16,9 @@ use rmcp::service::RunningService;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
-use store::{ChannelReadState, ChannelRecord, ChatRecord, MemberRecord, MessageRecord, Store, TeamRecord};
+use store::{
+    ChannelReadState, ChannelRecord, ChatRecord, MemberRecord, MessageRecord, Store, TeamRecord,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -193,6 +196,36 @@ impl TeamsSource for FakeSource {
         })
     }
 
+    fn availability(
+        &self,
+        emails: Vec<String>,
+        start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> SourceFuture<'_, Vec<PersonAvailability>> {
+        Box::pin(async move {
+            Ok(emails
+                .into_iter()
+                .map(|email| PersonAvailability {
+                    email,
+                    busy: vec![BusySlot {
+                        start,
+                        end: start + chrono::Duration::hours(1),
+                        status: "busy".to_owned(),
+                    }],
+                    error: None,
+                })
+                .collect())
+        })
+    }
+
+    fn create_meeting(&self, _draft: MeetingDraft) -> SourceFuture<'_, CreatedMeeting> {
+        Box::pin(async {
+            Ok(CreatedMeeting {
+                join_url: Some("https://teams.example/new".to_owned()),
+            })
+        })
+    }
+
     fn transcript<'a>(&'a self, meeting_chat_id: &'a str) -> SourceFuture<'a, Transcript> {
         Box::pin(async move {
             if meeting_chat_id != MEETING_CHAT {
@@ -221,11 +254,11 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start(propose: bool) -> Harness {
-        Harness::start_with(propose, false, false).await
+    async fn start(write: bool) -> Harness {
+        Harness::start_with(write, false, false).await
     }
 
-    async fn start_with(propose: bool, calendar: bool, transcripts: bool) -> Harness {
+    async fn start_with(write: bool, calendar: bool, transcripts: bool) -> Harness {
         let store = Arc::new(Store::open_in_memory().unwrap());
         seed(&store);
         let policy = AgentPolicy {
@@ -236,7 +269,7 @@ impl Harness {
                 LIVE_MEETING_CHAT.to_owned(),
             ])),
             channels: Access::Selected(BTreeSet::from([CHANNEL.to_owned()])),
-            propose,
+            write,
             calendar,
             transcripts,
             ..AgentPolicy::default()
@@ -401,7 +434,7 @@ async fn raw_status(addr: std::net::SocketAddr, host: &str, authorization: Optio
 }
 
 #[tokio::test]
-async fn lists_all_eleven_tools_and_marks_reads_read_only() {
+async fn lists_all_fourteen_tools_and_marks_reads_read_only() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let tools = client.list_all_tools().await.unwrap();
@@ -412,9 +445,15 @@ async fn lists_all_eleven_tools_and_marks_reads_read_only() {
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.read_only_hint);
-        let proposes = tool.name.starts_with("propose_");
-        assert_eq!(read_only == Some(true), !proposes, "{}", tool.name);
-        if proposes {
+        let writes = [
+            "write_message",
+            "add_reaction",
+            "create_meeting",
+            "schedule_wakeup",
+        ]
+        .contains(&tool.name.as_ref());
+        assert_eq!(read_only == Some(true), !writes, "{}", tool.name);
+        if writes {
             let annotations = tool.annotations.as_ref().unwrap();
             assert_eq!(annotations.read_only_hint, Some(false), "{}", tool.name);
             assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
@@ -423,17 +462,20 @@ async fn lists_all_eleven_tools_and_marks_reads_read_only() {
     assert_eq!(
         names,
         [
+            "add_reaction",
+            "create_meeting",
+            "find_availability",
             "get_image",
             "get_transcript",
             "list_channels",
             "list_chats",
             "list_meetings",
-            "propose_message",
-            "propose_reaction",
             "read_messages",
             "recent_messages",
+            "schedule_wakeup",
             "search_messages",
-            "wait_for_event"
+            "wait_for_event",
+            "write_message"
         ]
     );
     let info = client.peer_info().unwrap();
@@ -564,7 +606,7 @@ async fn proposal_resolution_reaches_wait_for_event() {
 
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "Sounds good", "agent": "test"}),
     )
     .await;
@@ -587,12 +629,59 @@ async fn proposal_resolution_reaches_wait_for_event() {
 }
 
 #[tokio::test]
-async fn propose_is_refused_when_turned_off_or_out_of_scope() {
+async fn without_review_messages_and_reactions_go_out_directly() {
+    let harness = Harness::start(true).await;
+    let mut policy = harness.hub.policy();
+    policy.review = false;
+    harness.hub.set_policy(policy);
+    let client = harness.client().await;
+    let (is_error, body) = call(
+        &client,
+        "write_message",
+        json!({"conversation_id": ALLOWED_CHAT, "text": "On it"}),
+    )
+    .await;
+    assert!(!is_error, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["state"], "sending");
+    assert!(harness.hub.pending_proposal(ALLOWED_CHAT).unwrap().direct);
+}
+
+#[tokio::test]
+async fn an_agent_asks_for_a_window_and_writes_freely_once_it_is_granted() {
+    let harness = Harness::start(true).await;
+    let client = harness.client().await;
+    let ask = json!({"conversation_id": ALLOWED_CHAT, "text": "First answer", "ask_free_writing": {"minutes": 2000, "reason": "Following the release thread"}});
+    let (is_error, body) = call(&client, "write_message", ask).await;
+    assert!(!is_error, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["state"], "pending");
+    let pending = harness.hub.pending_proposal(ALLOWED_CHAT).unwrap();
+    assert_eq!(pending.free_writing_ask.unwrap().minutes, 480);
+
+    harness.hub.grant_free_writing(
+        ALLOWED_CHAT,
+        chrono::Utc::now() + chrono::Duration::minutes(30),
+        None,
+    );
+    let (_, body) = call(
+        &client,
+        "write_message",
+        json!({"conversation_id": ALLOWED_CHAT, "text": "Second"}),
+    )
+    .await;
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["state"], "sending");
+    assert!(body["free_until"].is_string());
+}
+
+#[tokio::test]
+async fn write_is_refused_when_turned_off_or_out_of_scope() {
     let harness = Harness::start(false).await;
     let client = harness.client().await;
     let (is_error, text) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "hi"}),
     )
     .await;
@@ -601,7 +690,7 @@ async fn propose_is_refused_when_turned_off_or_out_of_scope() {
 
     let (is_error, text) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": HIDDEN_CHAT, "text": "hi"}),
     )
     .await;
@@ -727,12 +816,12 @@ async fn get_transcript_returns_turns_and_live_captions() {
 }
 
 #[tokio::test]
-async fn propose_rejects_a_reply_target_from_another_conversation() {
+async fn write_rejects_a_reply_target_from_another_conversation() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let (is_error, text) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "ok", "reply_to_message_id": "m3"}),
     )
     .await;
@@ -743,7 +832,7 @@ async fn propose_rejects_a_reply_target_from_another_conversation() {
     );
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "ok", "reply_to_message_id": "m1"}),
     )
     .await;
@@ -1050,22 +1139,22 @@ fn image_argument(bytes: &[u8], mime_type: &str) -> Value {
     json!({"data_base64": STANDARD.encode(bytes), "mime_type": mime_type})
 }
 
-async fn propose_error(
+async fn write_error(
     client: &RunningService<rmcp::RoleClient, ClientConfig>,
     arguments: Value,
 ) -> String {
-    let (is_error, text) = call(client, "propose_message", arguments).await;
+    let (is_error, text) = call(client, "write_message", arguments).await;
     assert!(is_error, "{text}");
     text
 }
 
 #[tokio::test]
-async fn propose_keeps_mentions_in_text_order() {
+async fn write_keeps_mentions_in_text_order() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": ALLOWED_CHAT,
             "text": "Thanks @Ada Example and @Bob Sample",
@@ -1090,17 +1179,17 @@ async fn propose_keeps_mentions_in_text_order() {
 }
 
 #[tokio::test]
-async fn propose_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
+async fn write_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let base = |text: &str, mentions: Value| json!({"conversation_id": ALLOWED_CHAT, "text": text, "mentions": mentions});
     let ada = json!({"user_id": "user-ada", "name": "Ada Example"});
     let bob = json!({"user_id": "user-bob", "name": "Bob Sample"});
 
-    let text = propose_error(&client, base("Hello Ada Example", json!([ada]))).await;
+    let text = write_error(&client, base("Hello Ada Example", json!([ada]))).await;
     assert!(text.contains("@Ada Example"), "{text}");
 
-    let text = propose_error(
+    let text = write_error(
         &client,
         base("@Bob Sample and @Ada Example", json!([ada, bob])),
     )
@@ -1108,20 +1197,20 @@ async fn propose_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
     assert!(text.contains("@Bob Sample"), "{text}");
 
     let stranger = json!({"user_id": "user-eve", "name": "Eve"});
-    let text = propose_error(&client, base("hi @Eve", json!([stranger]))).await;
+    let text = write_error(&client, base("hi @Eve", json!([stranger]))).await;
     assert!(text.contains("not a member"), "{text}");
 
     let wrong_name = json!({"user_id": "user-ada", "name": "Bob"});
-    let text = propose_error(&client, base("hi @Bob", json!([wrong_name]))).await;
+    let text = write_error(&client, base("hi @Bob", json!([wrong_name]))).await;
     assert!(text.contains("does not match"), "{text}");
 
-    let text = propose_error(&client, base("hi @Ada Examples", json!([ada]))).await;
+    let text = write_error(&client, base("hi @Ada Examples", json!([ada]))).await;
     assert!(text.contains("whole word"), "{text}");
 
     let first_name = json!({"user_id": "user-ada", "name": "Ada"});
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         base("hi @Ada!", json!([first_name])),
     )
     .await;
@@ -1132,14 +1221,14 @@ async fn propose_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
     );
 
     let blank = json!({"user_id": " ", "name": "Ada Example"});
-    let text = propose_error(&client, base("hi @Ada Example", json!([blank]))).await;
+    let text = write_error(&client, base("hi @Ada Example", json!([blank]))).await;
     assert!(text.contains("user_id and a name"), "{text}");
 
     assert!(harness.hub.pending_proposal(ALLOWED_CHAT).is_none());
 
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": CHANNEL,
             "text": "hi @Ada",
@@ -1150,7 +1239,7 @@ async fn propose_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
     assert!(!is_error, "{body}");
     let (is_error, text) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": CHANNEL,
             "text": "hi @Eve",
@@ -1163,7 +1252,7 @@ async fn propose_rejects_mentions_that_do_not_fit_the_text_or_the_chat() {
 }
 
 #[tokio::test]
-async fn propose_stores_four_images_of_four_megabytes() {
+async fn write_stores_four_images_of_four_megabytes() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let four_megabytes = padded_png(4 * 1024 * 1024);
@@ -1172,7 +1261,7 @@ async fn propose_stores_four_images_of_four_megabytes() {
         .collect();
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "look", "images": images}),
     )
     .await;
@@ -1189,30 +1278,30 @@ async fn propose_stores_four_images_of_four_megabytes() {
 }
 
 #[tokio::test]
-async fn propose_rejects_bad_images() {
+async fn write_rejects_bad_images() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let with_images = |images: Vec<Value>| json!({"conversation_id": ALLOWED_CHAT, "text": "look", "images": images});
     let png = image_argument(&PIXEL_PNG, "image/png");
 
-    let text = propose_error(&client, with_images(vec![png.clone(); 5])).await;
+    let text = write_error(&client, with_images(vec![png.clone(); 5])).await;
     assert!(text.contains("at most 4"), "{text}");
 
     let too_big = image_argument(&padded_png(4 * 1024 * 1024 + 1), "image/png");
-    let text = propose_error(&client, with_images(vec![too_big])).await;
+    let text = write_error(&client, with_images(vec![too_big])).await;
     assert!(text.contains("larger than 4 MB"), "{text}");
 
     let fake = image_argument(b"<svg></svg>", "image/png");
-    let text = propose_error(&client, with_images(vec![fake])).await;
+    let text = write_error(&client, with_images(vec![fake])).await;
     assert!(text.contains("not a png, jpeg, gif or webp"), "{text}");
 
     let mislabelled = image_argument(&PIXEL_PNG, "image/jpeg");
-    let text = propose_error(&client, with_images(vec![mislabelled])).await;
+    let text = write_error(&client, with_images(vec![mislabelled])).await;
     assert!(text.contains("does not match"), "{text}");
 
     let mut wide = PIXEL_PNG.to_vec();
     wide[16..20].copy_from_slice(&9000u32.to_be_bytes());
-    let text = propose_error(
+    let text = write_error(
         &client,
         with_images(vec![image_argument(&wide, "image/png")]),
     )
@@ -1222,7 +1311,7 @@ async fn propose_rejects_bad_images() {
     let mut megapixels = PIXEL_PNG.to_vec();
     megapixels[16..20].copy_from_slice(&8000u32.to_be_bytes());
     megapixels[20..24].copy_from_slice(&6000u32.to_be_bytes());
-    let text = propose_error(
+    let text = write_error(
         &client,
         with_images(vec![image_argument(&megapixels, "image/png")]),
     )
@@ -1230,7 +1319,7 @@ async fn propose_rejects_bad_images() {
     assert!(text.contains("megapixels"), "{text}");
 
     let broken = json!({"data_base64": "!!!", "mime_type": "image/png"});
-    let text = propose_error(&client, with_images(vec![broken])).await;
+    let text = write_error(&client, with_images(vec![broken])).await;
     assert!(text.contains("not valid base64"), "{text}");
 
     assert!(harness.hub.pending_proposal(ALLOWED_CHAT).is_none());
@@ -1310,7 +1399,7 @@ async fn reaction_proposal_resolution_reaches_wait_for_event() {
     let cursor = event_cursor(&client).await;
     let (is_error, body) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         json!({"conversation_id": ALLOWED_CHAT, "message_id": "m2", "emoji": "\u{1F44D}", "agent": "claude"}),
     )
     .await;
@@ -1338,14 +1427,14 @@ async fn a_message_and_a_reaction_proposal_stay_pending_side_by_side() {
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "Sounds good"}),
     )
     .await;
     assert!(!is_error, "{body}");
     let (is_error, body) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         json!({"conversation_id": ALLOWED_CHAT, "message_id": "m2", "emoji": "\u{2764}"}),
     )
     .await;
@@ -1357,7 +1446,7 @@ async fn a_message_and_a_reaction_proposal_stay_pending_side_by_side() {
 }
 
 #[tokio::test]
-async fn propose_reaction_checks_scope_message_and_emoji() {
+async fn add_reaction_checks_scope_message_and_emoji() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let reaction = |conversation_id: &str, message_id: &str, emoji: &str| json!({"conversation_id": conversation_id, "message_id": message_id, "emoji": emoji});
@@ -1376,7 +1465,7 @@ async fn propose_reaction_checks_scope_message_and_emoji() {
         ),
     ];
     for (arguments, expected) in cases {
-        let (is_error, text) = call(&client, "propose_reaction", arguments).await;
+        let (is_error, text) = call(&client, "add_reaction", arguments).await;
         assert!(is_error, "{text}");
         assert!(text.contains(expected), "{text}");
     }
@@ -1392,7 +1481,7 @@ async fn propose_reaction_checks_scope_message_and_emoji() {
     harness.store.upsert_messages(&[deleted]).unwrap();
     let (is_error, text) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         reaction(ALLOWED_CHAT, "m2", "\u{1F44D}"),
     )
     .await;
@@ -1402,7 +1491,7 @@ async fn propose_reaction_checks_scope_message_and_emoji() {
     let client = off.client().await;
     let (is_error, text) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         reaction(ALLOWED_CHAT, "m2", "\u{1F44D}"),
     )
     .await;
@@ -1451,7 +1540,7 @@ async fn pending_reaction_proposals_are_capped_per_conversation() {
     }
     let (is_error, text) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         json!({"conversation_id": ALLOWED_CHAT, "message_id": "m2", "emoji": "\u{1F44D}"}),
     )
     .await;
@@ -1469,7 +1558,7 @@ async fn proposals_wait_for_a_free_permit_but_other_tools_do_not() {
         std::time::Duration::from_millis(300),
         call(
             &client,
-            "propose_message",
+            "write_message",
             json!({"conversation_id": ALLOWED_CHAT, "text": "hi"}),
         ),
     )
@@ -1480,7 +1569,7 @@ async fn proposals_wait_for_a_free_permit_but_other_tools_do_not() {
     drop(held);
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "hi"}),
     )
     .await;
@@ -1493,17 +1582,17 @@ async fn mention_names_follow_whole_word_and_comma_rules() {
     let client = harness.client().await;
     let later_whole_word = json!({"conversation_id": ALLOWED_CHAT, "text": "@Adam and @Ada",
         "mentions": [{"user_id": "user-ada", "name": "Ada"}]});
-    let (is_error, body) = call(&client, "propose_message", later_whole_word).await;
+    let (is_error, body) = call(&client, "write_message", later_whole_word).await;
     assert!(!is_error, "{body}");
 
     let only_a_prefix = json!({"conversation_id": ALLOWED_CHAT, "text": "@Adam only",
         "mentions": [{"user_id": "user-ada", "name": "Ada"}]});
-    let (is_error, body) = call(&client, "propose_message", only_a_prefix).await;
+    let (is_error, body) = call(&client, "write_message", only_a_prefix).await;
     assert!(is_error, "{body}");
 
     let at_the_end = json!({"conversation_id": ALLOWED_CHAT, "text": "ping @Ada",
         "mentions": [{"user_id": "user-ada", "name": "Ada"}]});
-    let (is_error, body) = call(&client, "propose_message", at_the_end).await;
+    let (is_error, body) = call(&client, "write_message", at_the_end).await;
     assert!(!is_error, "{body}");
 }
 
@@ -1521,7 +1610,7 @@ async fn an_exact_full_name_is_mentioned_without_the_mentions_parameter() {
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "Done, @ada example and @Bob Sample!"}),
     )
     .await;
@@ -1540,7 +1629,7 @@ async fn explicit_and_automatic_mentions_merge_in_text_order_without_duplicates(
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": ALLOWED_CHAT,
             "text": "@Bob Sample then @Ada Example and @Bob Sample again",
@@ -1562,7 +1651,7 @@ async fn a_first_name_alone_is_not_mentioned_but_reported() {
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": ALLOWED_CHAT, "text": "Thanks @Ada, mail me at a@b.example"}),
     )
     .await;
@@ -1606,7 +1695,7 @@ async fn people_with_the_same_name_are_not_mentioned_and_are_reported() {
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({"conversation_id": CHANNEL, "text": "@Twin Name please look, @Ada Example too"}),
     )
     .await;
@@ -1626,7 +1715,7 @@ async fn mentions_in_links_code_and_after_words_are_skipped_and_reported() {
     let client = harness.client().await;
     let (is_error, body) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": ALLOWED_CHAT,
             "text": "see medium.com/@Ada and ` @Ada Example ` and ops@Bob Sample, but @Ada Example please",
@@ -1650,7 +1739,7 @@ async fn an_explicit_mention_that_only_sits_in_code_is_rejected() {
     let client = harness.client().await;
     let (is_error, text) = call(
         &client,
-        "propose_message",
+        "write_message",
         json!({
             "conversation_id": ALLOWED_CHAT,
             "text": "run `@Ada Example` now",
@@ -1663,16 +1752,80 @@ async fn an_explicit_mention_that_only_sits_in_code_is_rejected() {
 }
 
 #[tokio::test]
-async fn proposing_a_reaction_the_user_already_made_is_refused() {
+async fn adding_a_reaction_the_user_already_made_is_refused() {
     let harness = Harness::start(true).await;
     let client = harness.client().await;
     let (is_error, text) = call(
         &client,
-        "propose_reaction",
+        "add_reaction",
         json!({"conversation_id": ALLOWED_CHAT, "message_id": RICH_MESSAGE, "emoji": "\u{1F44D}"}),
     )
     .await;
     assert!(is_error);
     assert!(text.contains("already reacted"), "{text}");
     assert!(harness.hub.pending_reactions(ALLOWED_CHAT).is_empty());
+}
+
+#[tokio::test]
+async fn meetings_need_the_permission_and_go_through_review() {
+    let harness = Harness::start(true).await;
+    let client = harness.client().await;
+    let meeting = json!({
+        "subject": "Release review",
+        "start": "2099-11-20T09:00:00Z",
+        "end": "2099-11-20T09:30:00Z",
+        "attendees": ["mara@example.com"],
+        "description": "Agenda",
+    });
+    let (is_error, text) = call(&client, "create_meeting", meeting.clone()).await;
+    assert!(
+        is_error && text.contains("organizing meetings is turned off"),
+        "{text}"
+    );
+
+    let mut policy = harness.hub.policy();
+    policy.meetings = true;
+    harness.hub.set_policy(policy.clone());
+    let (is_error, body) = call(
+        &client,
+        "find_availability",
+        json!({"attendees": ["mara@example.com"], "start": "2099-11-20T08:00:00Z", "end": "2099-11-20T18:00:00Z"}),
+    )
+    .await;
+    assert!(!is_error, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["people"][0]["busy"][0]["status"], "busy");
+
+    let (is_error, body) = call(&client, "create_meeting", meeting.clone()).await;
+    assert!(!is_error, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["state"], "pending");
+    let pending = harness.hub.pending_meetings();
+    assert_eq!(pending[0].draft.subject, "Release review");
+    harness.hub.resolve_meeting(
+        &pending[0].id,
+        MeetingOutcome::Created,
+        Some("https://teams.example/new".to_owned()),
+    );
+    let (_, events) = call(
+        &client,
+        "wait_for_event",
+        json!({"timeout_seconds": 1, "since": 0}),
+    )
+    .await;
+    assert!(
+        events.contains("meeting_resolved") && events.contains("teams.example/new"),
+        "{events}"
+    );
+    assert!(harness.hub.pending_meetings().is_empty());
+
+    policy.review = false;
+    harness.hub.set_policy(policy);
+    let (is_error, body) = call(&client, "create_meeting", meeting).await;
+    assert!(!is_error, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (body["state"].as_str(), body["join_url"].as_str()),
+        (Some("created"), Some("https://teams.example/new"))
+    );
 }

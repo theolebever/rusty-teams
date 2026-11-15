@@ -2,9 +2,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use store::{
     AvatarRecord, ChannelLayoutRecord, ChannelMentions, ChannelNotificationLevel,
-    ChannelNotifications, ChannelReadState, ChannelRecord, ChannelTabRecord, ChatPreview, ChatRecord, FolderRecord,
-    MemberRecord, MessageImportance, MessageRecord, ReadHorizonRecord, RecentScope, Store,
-    SyncState, TeamLayoutRecord, TeamRecord, TeamRights, UNKNOWN_USER_NAME,
+    ChannelNotifications, ChannelReadState, ChannelRecord, ChannelTabRecord, ChatPreview,
+    ChatRecord, FolderRecord, MemberRecord, MessageImportance, MessageRecord, ReadHorizonRecord,
+    RecentScope, Store, SyncState, TeamLayoutRecord, TeamRecord, TeamRights, UNKNOWN_USER_NAME,
 };
 
 #[test]
@@ -289,7 +289,10 @@ fn chat_upsert_keeps_a_real_title_over_the_only_you_fallback() {
     store
         .upsert_chats(&[chat("chat-3", UNKNOWN_USER_NAME, Some(at(2)))])
         .unwrap();
-    assert_eq!(store.chat("chat-3").unwrap().unwrap().title, UNKNOWN_USER_NAME);
+    assert_eq!(
+        store.chat("chat-3").unwrap().unwrap().title,
+        UNKNOWN_USER_NAME
+    );
 }
 
 #[test]
@@ -608,11 +611,11 @@ fn file_database_uses_wal_persists_and_migrates_once() {
     let path = directory.path().join("nested").join("cache.sqlite3");
     {
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 29);
+        assert_eq!(store.schema_version().unwrap(), store::latest_version());
         store.upsert_messages(&[message("c", "m1", 1)]).unwrap();
     }
     let reopened = Store::open(&path).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 29);
+    assert_eq!(reopened.schema_version().unwrap(), store::latest_version());
     assert_eq!(reopened.message_count("c").unwrap(), 1);
     drop(reopened);
     let mode: String = rusqlite_open(&path)
@@ -644,7 +647,7 @@ fn old_schema_is_upgraded_in_place() {
     connection.execute_batch("ALTER TABLE team_layout DROP COLUMN owner; ALTER TABLE team_layout DROP COLUMN add_channel; ALTER TABLE team_layout DROP COLUMN add_private_channel; ALTER TABLE team_layout DROP COLUMN edit_channel; ALTER TABLE team_layout DROP COLUMN delete_channel; ALTER TABLE channel_layout DROP COLUMN substrate_group_id; DROP TABLE messages; DROP TABLE sync_state; DROP TABLE chats; DROP TABLE chat_members; DROP TABLE channels; DROP TABLE teams; DROP TABLE meta; DROP TABLE avatars; DROP TABLE folder_items; DROP TABLE folders; DROP TABLE pinned_channels; DROP TABLE images; DROP TABLE search_keys; DROP TABLE message_search; DROP TABLE title_search; DROP TABLE team_layout; DROP TABLE channel_layout; DROP TABLE channel_tabs; DROP TABLE presence; DROP TABLE activity; DROP TABLE outbox; DROP TABLE drafts; DROP TABLE attachment_images; DROP TABLE agent_reaction_proposals; DROP TABLE agent_proposals; PRAGMA user_version = 0").unwrap();
     drop(connection);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), store::latest_version());
     store.upsert_messages(&[message("c", "m1", 1)]).unwrap();
 }
 
@@ -710,7 +713,7 @@ fn migration_to_v2_keeps_existing_sync_state() {
     let store = Store::open(&path).unwrap();
     let state = store.sync_state("c").unwrap().unwrap();
     assert_eq!(state.delta_link, None);
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), store::latest_version());
 }
 
 #[test]
@@ -1621,7 +1624,7 @@ fn migration_to_v20_adds_the_call_event_column() {
             .unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), store::latest_version());
     let old = store.messages("c", None, 10).unwrap();
     assert_eq!(old[0].call_event_json, None);
     assert!(store.sync_state("c").unwrap().is_none());
@@ -1671,7 +1674,7 @@ fn migration_to_v21_refetches_chats_and_channels_for_recordings() {
             .unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), store::latest_version());
     assert!(store.sync_state("c").unwrap().is_none());
     assert!(store.sync_state("channel").unwrap().is_none());
     assert!(store.sync_state("other").unwrap().is_some());
@@ -1701,7 +1704,7 @@ fn migration_to_v22_adds_read_horizons_that_survive_a_reopen() {
             .unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), store::latest_version());
     assert!(store.read_horizons("c").unwrap().is_empty());
     let horizons = [
         horizon("8:orgid:ada", 3, Some(4)),
@@ -1778,7 +1781,10 @@ fn migration_to_v25_drops_copies_stored_under_a_float_id() {
     {
         let store = Store::open(&path).unwrap();
         store
-            .upsert_messages(&[message("c", "1793871826192.0", 1), message("c", "1793871826192", 1)])
+            .upsert_messages(&[
+                message("c", "1793871826192.0", 1),
+                message("c", "1793871826192", 1),
+            ])
             .unwrap();
         drop(store);
         Connection::open(&path)
@@ -1802,7 +1808,10 @@ fn team_rights_come_back_with_the_sidebar() {
             name: "Team".to_owned(),
         }])
         .unwrap();
-    assert_eq!(store.sidebar().unwrap().teams[0].rights, TeamRights::default());
+    assert_eq!(
+        store.sidebar().unwrap().teams[0].rights,
+        TeamRights::default()
+    );
     let rights = TeamRights {
         owner: false,
         add_channel: true,
@@ -1828,7 +1837,9 @@ fn migration_to_v29_names_departed_people_from_their_messages() {
     {
         let store = Store::open(&path).unwrap();
         store.upsert_chats(&[chat("c", "?", Some(at(1)))]).unwrap();
-        store.upsert_chats(&[chat("gone", "?", Some(at(2)))]).unwrap();
+        store
+            .upsert_chats(&[chat("gone", "?", Some(at(2)))])
+            .unwrap();
         store.upsert_messages(&[message("c", "m1", 1)]).unwrap();
         store.set_meta("me_user_id", "user-me").unwrap();
         drop(store);
@@ -1847,5 +1858,50 @@ fn migration_to_v29_names_departed_people_from_their_messages() {
     let named = store.chat("c").unwrap().unwrap();
     assert_eq!(named.title, "Ada Example");
     assert_eq!(named.member_summary, "Ada Example");
-    assert_eq!(store.chat("gone").unwrap().unwrap().title, UNKNOWN_USER_NAME);
+    assert_eq!(
+        store.chat("gone").unwrap().unwrap().title,
+        UNKNOWN_USER_NAME
+    );
+}
+
+#[test]
+fn a_chat_without_a_last_message_keeps_the_time_of_its_last_real_activity() {
+    let store = Store::open_in_memory().unwrap();
+    store
+        .upsert_chats(&[chat("meeting", "Review", Some(at(1)))])
+        .unwrap();
+    let left = MessageRecord {
+        call_event_json: Some(
+            r#"{"roster":{"change":"Left","member_ids":["user-bob"]}}"#.to_owned(),
+        ),
+        ..call_message("left", 40)
+    };
+    store
+        .upsert_messages(&[
+            MessageRecord {
+                conversation_id: "meeting".to_owned(),
+                ..call_message("ended", 10)
+            },
+            MessageRecord {
+                conversation_id: "meeting".to_owned(),
+                ..left
+            },
+        ])
+        .unwrap();
+    let mut bumped = chat("meeting", "Review", Some(at(40)));
+    bumped.without_last_message = true;
+    store.upsert_chats(&[bumped]).unwrap();
+    assert_eq!(
+        store.chat("meeting").unwrap().unwrap().last_message_at,
+        Some(at(10))
+    );
+
+    let mut never_used = chat("empty", "Planning", Some(at(3)));
+    never_used.without_last_message = true;
+    store.upsert_chats(&[never_used.clone()]).unwrap();
+    store.upsert_chats(&[never_used]).unwrap();
+    assert_eq!(
+        store.chat("empty").unwrap().unwrap().last_message_at,
+        Some(at(3))
+    );
 }

@@ -1,18 +1,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Utc};
+use app_base::format::Zone;
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use crate::inline_image::ImageData;
 use store::{MessageImportance, MessageRecord};
 use teams_core::roster_event::{RosterEvent, roster_event};
 use teams_core::{
-    AnnouncementBanner, attachments,
-    JumboEmoji, jumbo_emoji,
-    AdaptiveCard, CallEvent, CallPhase, Draft, FileCard, ForwardHeader, ForwardInfo,
-    ImageRef, LinkPreview, forwards,
-    ReactionInfo, Span, adaptive_cards, call_event, card_texts, files,
-    forwarded_texts, images, is_forwarded, link_preview, linked_message_spans_with, meeting_link_in_html, message_spans, quotes,
-    reactions, readable_text, translated_spans,
+    AdaptiveCard, AnnouncementBanner, CallEvent, CallPhase, Draft, FileCard, ForwardHeader,
+    ForwardInfo, ImageRef, JumboEmoji, LinkPreview, ReactionInfo, Span, adaptive_cards,
+    attachments, call_event, card_texts, files, forwarded_texts, forwards, images, is_forwarded,
+    jumbo_emoji, link_preview, linked_message_spans_with, meeting_link_in_html, message_spans,
+    quotes, reactions, readable_text, translated_spans,
 };
 
 pub use crate::call_rows::{
@@ -139,7 +138,10 @@ pub enum Receipt {
 pub fn receipt_label(state: &teams_core::ReceiptState) -> Option<String> {
     match state {
         teams_core::ReceiptState::Sent => Some("Sent".to_owned()),
-        teams_core::ReceiptState::Read { readers, total_others } if *total_others > 1 => {
+        teams_core::ReceiptState::Read {
+            readers,
+            total_others,
+        } if *total_others > 1 => {
             if readers.len() >= *total_others {
                 Some("Seen by everyone".to_owned())
             } else {
@@ -290,10 +292,11 @@ fn continues_series(previous: &MessageRow, next: &MessageRow) -> bool {
 pub fn assign_series(rows: &mut [Row]) {
     let mut previous: Option<usize> = None;
     for index in 0..rows.len() {
-        let Row::Message(_) = &rows[index] else {
+        let Row::Message(message) = &mut rows[index] else {
             previous = None;
             continue;
         };
+        message.series = Series::default();
         if let Some(before) = previous {
             let joined = match (&rows[before], &rows[index]) {
                 (Row::Message(a), Row::Message(b)) => continues_series(a, b),
@@ -398,8 +401,10 @@ pub struct Thread {
     pub reply_ids: Vec<String>,
 }
 
-pub fn clock_label(time: DateTime<Utc>, offset: FixedOffset) -> String {
-    time.with_timezone(&offset)
+pub fn clock_label(time: DateTime<Utc>, offset: impl Into<Zone>) -> String {
+    offset
+        .into()
+        .at(time)
         .format(app_base::format::clock_format())
         .to_string()
 }
@@ -631,7 +636,7 @@ pub fn reply_excerpt(record: &MessageRecord) -> String {
 }
 
 pub struct RowContext {
-    pub offset: FixedOffset,
+    pub offset: Zone,
     pub today: NaiveDate,
     pub my_user_id: Option<String>,
     pub names: HashMap<String, String>,
@@ -765,10 +770,7 @@ fn event_row(
         series: Series::default(),
         author: author.name,
         day_header: Some(format::day_label(
-            record
-                .created_at
-                .with_timezone(&context.offset)
-                .date_naive(),
+            context.offset.at(record.created_at).date_naive(),
             context.today,
         )),
         blocks: Vec::new(),
@@ -815,8 +817,16 @@ pub fn quoted_texts(records: &[MessageRecord]) -> HashMap<String, String> {
             if text.is_empty() {
                 text = forwarded_texts(record).join("\n");
             }
-            let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
-            let mut shown = lines.iter().take(QUOTE_LINES).copied().collect::<Vec<_>>().join("\n");
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            let mut shown = lines
+                .iter()
+                .take(QUOTE_LINES)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
             if lines.len() > QUOTE_LINES {
                 shown.push_str(" …");
             }
@@ -868,7 +878,7 @@ fn message_row_with(
     if let Some(event) = roster_event(record) {
         return roster_row(record, &event, context);
     }
-    let local = record.created_at.with_timezone(&context.offset);
+    let local = context.offset.at(record.created_at);
     let images = images(record);
     let own = context.my_user_id.is_some() && record.sender_id == context.my_user_id;
     let translation = context.translation.resolve(record, own);
@@ -960,10 +970,7 @@ pub fn flat_rows(records: &[MessageRecord], context: &RowContext, has_older: boo
         if let Some(call) = row.call.as_mut() {
             call.started &= timeline.is_live_start(index);
         }
-        let day = record
-            .created_at
-            .with_timezone(&context.offset)
-            .date_naive();
+        let day = context.offset.at(record.created_at).date_naive();
         if previous_day == Some(day) {
             row.day_header = None;
         }
@@ -1103,7 +1110,10 @@ fn is_blank_system_record(record: &MessageRecord) -> bool {
     record.sender_id.is_none()
         && record.call_event_json.is_none()
         && record.body_html.trim().is_empty()
-        && record.subject.as_deref().is_none_or(|subject| subject.trim().is_empty())
+        && record
+            .subject
+            .as_deref()
+            .is_none_or(|subject| subject.trim().is_empty())
         && record.attachments_json.trim() == "[]"
 }
 
@@ -1250,6 +1260,7 @@ pub fn changed_indices(old: &[Row], new: &[Row]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::FixedOffset;
     use chrono::TimeZone;
     use teams_core::CallType;
 
@@ -1262,12 +1273,21 @@ mod tests {
             at: Utc::now(),
         };
         let read = |readers: Vec<teams_core::ReceiptReader>, total_others| {
-            receipt_label(&teams_core::ReceiptState::Read { readers, total_others })
+            receipt_label(&teams_core::ReceiptState::Read {
+                readers,
+                total_others,
+            })
         };
         assert_eq!(read(vec![reader("Bea")], 1).as_deref(), Some("Seen"));
-        assert_eq!(read(vec![reader("Bea"), reader("Cy")], 2).as_deref(), Some("Seen by everyone"));
+        assert_eq!(
+            read(vec![reader("Bea"), reader("Cy")], 2).as_deref(),
+            Some("Seen by everyone")
+        );
         assert_eq!(read(vec![reader("Bea")], 3).as_deref(), Some("Seen by Bea"));
-        assert_eq!(receipt_label(&teams_core::ReceiptState::Sent).as_deref(), Some("Sent"));
+        assert_eq!(
+            receipt_label(&teams_core::ReceiptState::Sent).as_deref(),
+            Some("Sent")
+        );
         assert_eq!(receipt_label(&teams_core::ReceiptState::Unknown), None);
     }
 
@@ -1308,7 +1328,9 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let Some(Block::Reply { children, .. }) = reply.first() else { panic!("{reply:?}") };
+        let Some(Block::Reply { children, .. }) = reply.first() else {
+            panic!("{reply:?}")
+        };
         let text = format!("{children:?}");
         assert!(text.contains(r"first link\nsecond link"), "{text}");
     }
@@ -1382,15 +1404,26 @@ mod tests {
         assert_eq!(reaction_text(key), ":absolute-cinema:");
         assert_eq!(reaction_text("like"), "\u{1F44D}");
         let image = custom_emoji_image(key).expect("image");
-        assert!(image.url.ends_with("/0-wcde-d3-5f5e4f463d6bb959b08614fd1d9680b8/views/imgt2_anim"));
+        assert!(
+            image
+                .url
+                .ends_with("/0-wcde-d3-5f5e4f463d6bb959b08614fd1d9680b8/views/imgt2_anim")
+        );
         assert_eq!(custom_emoji_image("like"), None);
     }
 
     #[test]
     fn teams_only_emoticon_loads_its_cdn_image() {
         let image = custom_emoji_image("oreoyum").expect("image");
-        assert!(image.url.ends_with("/oreoyum/default/50_f.png"), "{}", image.url);
-        assert_eq!(custom_emoji_image("(oreoyum)").map(|image| image.url), Some(image.url));
+        assert!(
+            image.url.ends_with("/oreoyum/default/50_f.png"),
+            "{}",
+            image.url
+        );
+        assert_eq!(
+            custom_emoji_image("(oreoyum)").map(|image| image.url),
+            Some(image.url)
+        );
     }
 
     #[test]
@@ -1444,7 +1477,10 @@ mod tests {
         };
         let lines: Vec<String> = children.iter().filter_map(Block::markdown).collect();
         assert!(lines[0].contains("Priya Nair Yesterday 07:00"), "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("original words")), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("original words")),
+            "{lines:?}"
+        );
         assert_eq!(reply_excerpt(&forwarded), "original words");
         assert_eq!(message_text(&forwarded), "original words");
     }
@@ -1487,7 +1523,7 @@ mod tests {
 
     fn context() -> RowContext {
         RowContext {
-            offset: FixedOffset::east_opt(0).unwrap(),
+            offset: FixedOffset::east_opt(0).unwrap().into(),
             today: NaiveDate::from_ymd_opt(2026, 10, 7).unwrap(),
             my_user_id: None,
             names: HashMap::new(),
@@ -1947,6 +1983,21 @@ mod tests {
     }
 
     #[test]
+    fn a_new_messages_marker_set_later_breaks_the_series() {
+        let records = vec![
+            record_by("a", "ada", 9, 0, 7),
+            record_by("b", "ada", 9, 1, 7),
+        ];
+        let mut rows = flat_rows(&records, &context(), false);
+        assert_eq!(series_of(&rows), vec![(false, true), (true, false)]);
+        if let Some(Row::Message(message)) = rows.last_mut() {
+            message.new_marker = true;
+        }
+        assign_series(&mut rows);
+        assert_eq!(series_of(&rows), vec![(false, false), (false, false)]);
+    }
+
+    #[test]
     fn series_breaks_at_a_new_day() {
         let records = vec![
             record_by("a", "ada", 23, 58, 6),
@@ -2360,10 +2411,7 @@ mod tests {
         assert_eq!(post.hidden_reply_count, 0);
         let saved = post.replies[0].call.as_ref().unwrap();
         assert_eq!(saved.icon, CallIcon::Saved);
-        assert_eq!(
-            saved.notice.text,
-            "Recording has been saved to OneDrive."
-        );
+        assert_eq!(saved.notice.text, "Recording has been saved to OneDrive.");
         let thread = thread_rows(&records, &root_id, &call_context());
         let calls = thread
             .iter()

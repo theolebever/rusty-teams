@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
+use app_base::format::Zone;
 use app_base::read_state::Unread;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Utc};
 use store::{
     ChannelNotificationLevel, ChannelRecord, ChatRecord, MessageImportance, Sidebar, SidebarTeam,
     is_bot_id,
@@ -100,7 +101,7 @@ pub struct SectionInput<'a> {
     pub expanded_lists: &'a HashSet<String>,
     pub typing: &'a TypingState,
     pub now: DateTime<Utc>,
-    pub offset: FixedOffset,
+    pub offset: Zone,
 }
 
 pub fn preview_for(chat: &ChatRecord, me: Option<&Person>) -> Preview {
@@ -201,11 +202,7 @@ pub fn chat_item(chat: &ChatRecord, input: &SectionInput<'_>, folder_id: Option<
             .preview_at
             .or(chat.last_message_at)
             .map(|time| {
-                format::list_time_label(
-                    time,
-                    input.now.with_timezone(&input.offset).date_naive(),
-                    input.offset,
-                )
+                format::list_time_label(time, input.offset.at(input.now).date_naive(), input.offset)
             })
             .unwrap_or_default(),
         preview,
@@ -522,11 +519,7 @@ pub fn step_id(ids: &[&str], current: Option<&str>, step: Step) -> Option<String
     ids.get(target).map(|id| (*id).to_owned())
 }
 
-pub fn step_unread_id(
-    sections: &[Section],
-    current: Option<&str>,
-    step: Step,
-) -> Option<String> {
+pub fn step_unread_id(sections: &[Section], current: Option<&str>, step: Step) -> Option<String> {
     let items: Vec<&ChatItem> = sections
         .iter()
         .filter(|section| !section.collapsed)
@@ -810,7 +803,7 @@ mod tests {
             expanded_lists: &NO_EXPANDED,
             typing,
             now: Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap(),
-            offset: FixedOffset::east_opt(0).unwrap(),
+            offset: chrono::FixedOffset::east_opt(0).unwrap().into(),
         }
     }
 
@@ -870,7 +863,10 @@ mod tests {
             step_unread_id(&sections, None, Step::Next).as_deref(),
             Some(first_unread)
         );
-        assert_eq!(step_unread_id(&sections, Some(last_unread), Step::Next), None);
+        assert_eq!(
+            step_unread_id(&sections, Some(last_unread), Step::Next),
+            None
+        );
         assert_eq!(
             step_unread_id(&sections, Some(last_unread), Step::Previous).as_deref(),
             Some(first_unread)

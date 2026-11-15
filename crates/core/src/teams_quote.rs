@@ -45,35 +45,44 @@ pub(crate) fn teams_quote(record: &MessageRecord) -> Option<TeamsQuote> {
 }
 
 /// The `properties` Teams' `sendMessageInConv` writes; `None` when a mention has no chatsvc shape here.
-pub(crate) fn quote_reply_properties(
-    quote: &TeamsQuote,
+pub(crate) fn message_properties(
+    quote: Option<&TeamsQuote>,
     mentions: &[OutgoingMention],
     importance: Option<&str>,
+    files: &Value,
 ) -> Option<Value> {
-    let mention_entries = mentions
-        .iter()
-        .map(mention_entry)
-        .collect::<Option<Vec<_>>>()?;
+    let mention_entries = mention_entries(mentions)?;
+    let quoted: Vec<Value> = quote
+        .map(|quote| quote.quoted_message.clone())
+        .into_iter()
+        .collect();
     Some(json!({
         "importance": importance.unwrap_or_default(),
         "links": "[]",
         "mentions": Value::Array(mention_entries).to_string(),
         "onbehalfof": null,
-        "files": "[]",
-        "qtdMsgs": Value::Array(vec![quote.quoted_message.clone()]).to_string(),
+        "files": files.to_string(),
+        "qtdMsgs": Value::Array(quoted).to_string(),
         "formatVariant": FORMAT_VARIANT,
     }))
 }
 
+/// The chatsvc `mentions` entries; `None` when a mention is not a person.
+pub(crate) fn mention_entries(mentions: &[OutgoingMention]) -> Option<Vec<Value>> {
+    mentions.iter().map(mention_entry).collect()
+}
+
 fn mention_entry(mention: &OutgoingMention) -> Option<Value> {
-    let MentionTarget::User { user_id } = &mention.target else {
-        return None;
+    let (mri, mention_type) = match &mention.target {
+        MentionTarget::User { user_id } => (user_mri(user_id), "person"),
+        MentionTarget::Everyone { chat_id } => (chat_id.clone(), "everyone"),
+        _ => return None,
     };
     Some(json!({
         "@type": MENTION_ITEMTYPE,
         "itemid": mention.id.to_string(),
-        "mri": user_mri(user_id),
-        "mentionType": "person",
+        "mri": mri,
+        "mentionType": mention_type,
         "displayName": mention.text,
     }))
 }
@@ -132,7 +141,7 @@ mod tests {
 
     #[test]
     fn a_quote_reply_gets_the_teams_property_set() {
-        let properties = quote_reply_properties(&quote(), &[], None).unwrap();
+        let properties = message_properties(Some(&quote()), &[], None, &json!([])).unwrap();
         assert_eq!(
             properties,
             json!({
@@ -160,7 +169,8 @@ mod tests {
             html,
             "hi <span itemscope=\"\" itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Ada</span>"
         );
-        let properties = quote_reply_properties(&quote(), &mentions, Some("high")).unwrap();
+        let properties =
+            message_properties(Some(&quote()), &mentions, Some("high"), &json!([])).unwrap();
         assert_eq!(properties["importance"], "high");
         assert_eq!(properties["qtdMsgs"], "[{\"messageId\":\"1\"}]");
         let entries: Value =
@@ -178,6 +188,19 @@ mod tests {
     }
 
     #[test]
+    fn an_everyone_mention_names_the_chat_itself() {
+        let everyone = mention(
+            0,
+            MentionTarget::Everyone {
+                chat_id: "19:g@thread.v2".into(),
+            },
+        );
+        let entries = mention_entries(&[everyone]).unwrap();
+        assert_eq!(entries[0]["mri"], "19:g@thread.v2");
+        assert_eq!(entries[0]["mentionType"], "everyone");
+    }
+
+    #[test]
     fn group_mentions_have_no_chatsvc_shape() {
         for target in [
             MentionTarget::Channel {
@@ -186,15 +209,12 @@ mod tests {
             MentionTarget::Team {
                 team_id: "team-1".into(),
             },
-            MentionTarget::Everyone {
-                chat_id: "19:g@thread.v2".into(),
-            },
             MentionTarget::Tag {
                 tag_id: "tag-1".into(),
             },
         ] {
             let mentions = [mention(0, target)];
-            assert!(quote_reply_properties(&quote(), &mentions, None).is_none());
+            assert!(message_properties(Some(&quote()), &mentions, None, &json!([])).is_none());
         }
     }
 

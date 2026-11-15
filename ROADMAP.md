@@ -2,29 +2,30 @@
 
 Feature parity with the Microsoft Teams desktop client.
 
-**Parity: 84 %** (93 done, 19 partial, 10 missing of 122). Partial counts half.
+**Parity: 87 %** (103 done, 21 partial, 6 missing of 130). Partial counts half.
 
 ## By area
 
 | Area | Parity | Done | Partial | Missing |
 |---|---|---|---|---|
-| [Sign-in and app](#sign-in-and-app) | 92 % | 5 | 1 | 0 |
+| [Sign-in and app](#sign-in-and-app) | 100 % | 7 | 0 | 0 |
 | [Chat list](#chat-list) | 100 % | 10 | 0 | 0 |
-| [Reading](#reading) | 95 % | 18 | 0 | 1 |
-| [Writing](#writing) | 100 % | 14 | 0 | 0 |
+| [Reading](#reading) | 98 % | 19 | 1 | 0 |
+| [Writing](#writing) | 100 % | 15 | 0 | 0 |
 | [Message actions](#message-actions) | 100 % | 5 | 0 | 0 |
 | [Channels](#channels) | 100 % | 7 | 0 | 0 |
-| [Notifications](#notifications) | 89 % | 8 | 0 | 1 |
-| [Search and navigation](#search-and-navigation) | 92 % | 5 | 1 | 0 |
+| [Notifications](#notifications) | 94 % | 8 | 1 | 0 |
+| [Search and navigation](#search-and-navigation) | 100 % | 6 | 0 | 0 |
 | [Presence and people](#presence-and-people) | 100 % | 4 | 0 | 0 |
-| [Look and settings](#look-and-settings) | 50 % | 2 | 0 | 2 |
-| [Calls and meetings](#calls-and-meetings) | 62 % | 15 | 18 | 6 |
+| [Look and settings](#look-and-settings) | 100 % | 5 | 0 | 0 |
+| [Calls and meetings](#calls-and-meetings) | 63 % | 17 | 19 | 6 |
 
 ## Next
 
 | # | Feature | Note |
 |---|---|---|
-| 1 | Sign in on Linux without Chrome on a debug port |  |
+| 1 | Desktop toasts on Linux | Sounds are in, toasts are not |
+| 2 | Incoming and 1:1 calls with a second person | Built, not yet rung live |
 
 ## Sign-in and app
 
@@ -33,9 +34,11 @@ Feature parity with the Microsoft Teams desktop client.
 | Sign in on Windows through embedded WebView2, single sign-on | Done |  |
 | Start from the local cache, no spinner | Done |  |
 | Self-update | Done |  |
-| Tray icon, close to tray | Done |  |
-| Sign in on Linux without starting Chrome by hand | Partial | Works with a Chrome on a debug port |
+| Tray icon, close to tray | Done | Linux: StatusNotifierItem tray (KDE, GNOME with AppIndicator); close really closes the window and the tray opens a new one, since GPUI cannot hide a Wayland window |
+| Linux install, menu entry and self-update | Done | Offers to install itself to `~/.local/share/rusty-teams` with a `.desktop` entry (Settings > General to install, replace, remove or ask again); the installed release build offers new GitHub releases in a dialog (download with progress, then Restart now); the Teams icon is downloaded from Microsoft, not shipped |
+| Sign in on Linux without starting Chrome by hand | Done | The app starts Chrome or Chromium headless with its own profile, shows the window for the login and hides it again afterwards; a watchdog restarts a dead or hung Chrome |
 | Single instance, second start brings the window to front | Done |  |
+| Sign in on macOS without starting Chrome by hand | Done | Same managed Chrome as on Linux, profile in Application Support |
 
 ## Chat list
 
@@ -73,7 +76,8 @@ Feature parity with the Microsoft Teams desktop client.
 | Adaptive Cards | Done | Schema 1.6 plus Teams extras: all elements incl. Table, CodeBlock, Badge, Icon, Rating, Carousel, Media and charts; all inputs with date and time pickers, live validation and Data.Query typeahead; all actions incl. overflow menu; Universal Actions auto refresh. URL task dialogs run in a hosted window on Windows, in the browser on Linux. Not yet: message-level carousel layout, chart tooltips |
 | Typing indicator | Done | Shows who types as avatars above the composer (names on hover) and in the list preview; sends your own typing |
 | Link previews | Done | One card per message from the chat service |
-| Loop components | Missing |  |
+| Loop components | Partial | Card that opens the component in the browser; no inline editing |
+| Copilot pane in a chat | Done | Summarize, open items, decisions and own questions with the chat as context; needs a Microsoft 365 Copilot licence |
 | Translate a message | Done | Menu item on every message; offer line under foreign messages (Translate, Never translate language); See original toggle; auto-translate; settings under the avatar menu > Translation, synced with Teams |
 
 ## Writing
@@ -91,6 +95,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Emoji picker | Done | For reactions and in the composer |
 | Formatting toolbar, Ctrl+B and Ctrl+I | Done | Bar over a selection; Ctrl+U, Ctrl+Shift+X/C, Ctrl+K link; lists, quote, code block; superscript, subscript (Ctrl+Shift+= / Ctrl+=) and Small/Large shown at real size while typing |
 | Attach a file, paste or drag an image | Done | Images sit in the text at the cursor as a large preview and send at that spot; files via OneDrive or the channel's Files |
+| Write with Copilot | Done | Rewrite, Proofread, Adjust in the composer like Teams; chats only, needs a Microsoft 365 Copilot licence |
 | GIFs and stickers | Done | Show and send; composer picker with Emoji, GIF and Sticker tabs; GIF search needs the org to allow it |
 | Schedule send | Done | Server-side, Teams delivers. Text and formatting only for now |
 | Unsent messages survive a restart | Done | Sends are saved before they go out and resent on start without duplicates; failed ones keep Retry and Delete. Drafts are kept per chat and show as "Draft:" in the list |
@@ -129,7 +134,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Stack of 3, queue, Hide all, fade-out | Done |  |
 | Muted chats stay quiet | Done | Toast, sound and taskbar badge only for @mentions |
 | Mute notifications during calls and meetings | Done | Settings > Notifications switch, default off; message toasts and sounds stay away while a call is active, call rings still show |
-| Notifications on Linux | Missing |  |
+| Notifications on Linux | Partial | Message and ring sounds; desktop toasts still Windows only |
 
 ## Search and navigation
 
@@ -138,7 +143,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Ctrl+K switcher over chats, channels, people | Done |  |
 | Full-text search over cached messages | Done |  |
 | Jump to a message from search | Done |  |
-| Server search over the full history like Teams | Partial | Substrate search client in the engine (typeahead, results by tab, find in chat, KQL filters); palette and results page still use the local index |
+| Server search over the full history like Teams | Done | Ctrl+K palette and the title bar search dropdown merge Substrate hits (typeahead, people, messages) with the local index; Find in chat and channel query the server |
 | Esc closes the open conversation or editor | Done | Back to the channel keeps the feed position |
 | Keyboard shortcuts like Teams | Done | Ctrl+1 Activity, 2 Chats, 3 Channels, 4 Saved; Alt+Up/Down previous and next chat or channel in the visible list, also while typing; calls Ctrl+Shift+A accept, D decline, H hang up, O camera, E share menu, K raise hand, Y lobby, M mute, J join from a meeting reminder, Space held with Ctrl to talk while muted, F11 full screen, Alt+Shift+A / V start an audio / video call in the open chat; Ctrl+. lists all shortcuts. Ctrl+5..9 not used |
 
@@ -157,8 +162,9 @@ Feature parity with the Microsoft Teams desktop client.
 |---|---|---|
 | Dark theme | Done |  |
 | Notification settings | Done |  |
-| Light theme, follow system theme | Missing |  |
-| UI scale | Missing |  |
+| Light theme, follow system theme | Done | Follow OS, Light, Dark, High contrast |
+| UI scale | Done | Ctrl+= / Ctrl+- / Ctrl+0, 50-400 %, also in the status menu |
+| UI language | Done | English and German, follows the OS by default |
 
 ## Calls and meetings
 
@@ -169,6 +175,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Incoming call: ring, accept, decline | Partial | Ring toast, ring tone, missed call in Activity, registrar endpoint, attach + accept. Built from the Teams code, not yet rung by a second person |
 | 1:1 and group calls | Partial | Phone button, Calling and Ringing tiles, end notices, direct to mixer renegotiation. Not yet tried with a second person |
 | Join a meeting from a chat | Done | Join button from the live meeting state, joins muted, roster tiles, lobby, Leave and End meeting. Audio only. Live at engine level with up to 9 anonymous guests: roster, lobby, audio both ways, End meeting. The chat Join button itself not driven live |
+| Screen share on Wayland and macOS | Done | System picker: desktop ScreenCast portal on Wayland, ScreenCaptureKit on macOS |
 | Video and screen sharing | Done | Send and receive over libwebrtc H264, source requests through `applyChannelParameters`, stage, strip, self view, share banner. Live with guests: camera and screen received (screen 1280x720), own camera and screen decoded by a guest |
 | Meeting extras | Done | Share menu switch "Include computer sound" (remembered, mixed into the one audio track with the mic, own playback excluded on Windows 10 build 20348+), raise hand with queue badge, lower hand and Lower all hands for organizers, reactions on the sender's tile for 3 s, meeting chat in a 320 px side panel with unread badge. Live with guests: hands raised and lowered (one and all), reactions both ways, meeting chat both ways. "Include computer sound" not checked live |
 | Organizer controls | Done | Amber lobby banner with View (Admit, Deny per person) and Admit all, tile menu (right-click or "..." on hover): Pin for me, Spotlight for everyone, Mute, Lower hand, Remove from meeting with a confirm dialog, "..." controls menu with Mute all. Live with guests: admit, deny, Admit all (admits each waiting person; the service's admitAll leaves anonymous guests waiting), spotlight on and off, mute, Mute all (`specified` scope; `all` mutes nobody), lower hand, remove |
@@ -181,7 +188,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Recording | Done | Organizer "..." > Record and transcribe: Start recording, Record audio only, Start transcription only; Stop recording / Stop transcription / Stop both (confirm) through the recorder bot; header chip red "Recording" / "Recording audio" or blue "Transcribing" for everyone from the meeting state, consent notice that keeps mic and camera off until OK. Bodies unit tested; video, audio only, transcription only and every stop variant run live; a stop sent while the recorder still settles is retried. Consent needs a tenant with the policy on |
 | Meeting recap tab | Partial | Recap in meeting chats with a recording: occurrence picker, recording card (duration, Audio only, expiry amber under 7 days), Play in the browser, Download with save dialog and percent, organizer Delete with confirm, searchable read-only transcript with .vtt and .docx download, attendance (muted note when the tenant has reports off), files shared in the chat. Parsing and expiry unit tested, demo checked; occurrences, details and delete run live against real recordings. Transcription-only sessions (item media source `Transcript`) show the transcript without a recording card. "Audio only" comes from the chat event (`videoContent="CurtainOnly"`), with the video size check as fallback. Both signals read live on real recordings, fixtures unit tested; the transcript-only path was not run live |
 | Hold, resume, transfer | Partial | 1:1 "..." > Hold renegotiates every line inactive, "On hold" view with Resume, "You're on hold" when the other side holds, Transfer... person picker with Transfer now (blind) and Consult first (second call, first held, Transfer now). Needs a second person; redirect and park not built |
-| Noise suppression, music mode | Partial | Mic menu and Settings > Devices: Auto (device track with WebRTC echo cancellation, AGC, NS plus RNNoise ML suppression), Low (same without RNNoise) or Off, Music mode keeps echo cancellation only. No High level. Off and Music mode run a cpal mic through our own APM; checked with synthetic sources only, not with a real mic in a call |
+| Noise suppression, music mode | Partial | Mic menu and Settings > Devices: Auto and Low on Linux keep the Pulse ADM device track (same path as Web Teams); on Windows Auto runs the software chain with DeepFilterNet. Off and Music mode run a cpal mic through our own APM. No High level. Checked with synthetic sources; Linux Auto aligned with Pulse after the mic-quality fix |
 | Push to talk | Partial | Hold Ctrl+Space while muted to talk, release to mute; main window focused, not inside text fields; hint chip on the stage. Unit tested, not tried on the Windows build |
 | Breakout rooms (participant) | Partial | Move message from the participant update or the replacement invite: notice "Moving you to <room>", leave and join the room, "Return to main meeting" in the header, a closed room goes back to the main meeting. Parsing unit tested; needs an organizer who moves people |
 | Call health and encryption | Partial | Header shows signal bars and a shield; click opens "Call health" with loss, round trip, jitter, bitrate, "Secured by Teams encryption", DTLS-SRTP cipher and media path (direct or via Microsoft media server). Unstable network banner with "Turn off incoming video", overloaded computer banner with "Turn off effects". Thresholds unit tested; not yet seen on a bad live network |
@@ -193,9 +200,10 @@ Feature parity with the Microsoft Teams desktop client.
 | Calls in chat history | Done | Card per call in the chat on the caller's side: "Call ended" with duration and end time, red "Missed call" with Call back, "Meeting started" / "Meeting ended", live start with Join. Started card hides once the call ended. From Graph call events, cached chats refetch once. Missed incoming call not seen live yet |
 | Join by link or meeting ID | Done | "Join with ID" dialog, "Paste a meeting link", Join chip next to Teams meeting links in the composer and messages. IDs and /meet/ links resolve through a roster-only conversation like Teams web; verified live with a self-created scheduled meeting (same meeting chat found) |
 | In a call shown in presence | Done | "In a call", "In a meeting", "Presenting" from Teams activity on profile cards and chat headers; no notification sounds during a native call |
-| Schedule a meeting | Partial | Calls tab "New meeting": title, people chips, date, start, end (next half hour, 30 min), Repeat (does not repeat, daily, weekdays, weekly), details, Teams meeting always on. Graph `POST /me/events` with `isOnlineMeeting` and `teamsForBusiness`, local wall time in the own mailbox time zone (series keep their time across DST, weekday from the local date). Body building unit tested; never run against a real calendar |
-| Answer meeting invitations | Partial | Upcoming rows of invited meetings show Accepted / Tentative / Declined / Respond as a menu with "Send a response" (default on); own meetings say Organizer. Graph `accept`, `tentativelyAccept`, `decline`, falls back to the iCalUId lookup when the Teams id is not a Graph id. Not run against a real invitation |
-| Meeting start reminder | Partial | Toast 5 min before the start of an Upcoming meeting: title, time, Join, Snooze (back at the start or first join). Corner X dismisses for good. Snooze and X are saved to the Outlook reminder (Graph snoozeReminder / dismissReminder, occurrence id); reminders snoozed or dismissed in Outlook or on another device are read from reminderView every 60 s near a meeting and are not shown again. Live state (green dot) from polled live-meeting state. One chime at the start or first join; quiet with sound off and during Do not disturb or a call. Ctrl+Shift+J joins from the latest. Driven by the polled calendar; push event 128 not wired (the realtime layer does not receive it) |
+| Schedule a meeting | Partial | Calls tab "New meeting": title, people chips, date, start, end (next half hour, 30 min), Repeat (does not repeat, daily, weekdays, weekly), details, Teams meeting always on. Outlook-only home keeps Graph `POST /me/events` with `isOnlineMeeting`. With Google home or extra write targets: Teams join link first, then inserts per target (Outlook with join in location; Google `events.insert`). Settings > Calendar chooses home + dual-write. Body builders unit tested; live Google create needs `TEAMS_GOOGLE_CLIENT_ID` |
+| Answer meeting invitations | Partial | Upcoming rows of invited meetings show Accepted / Tentative / Declined / Respond as a menu with "Send a response" (default on); own meetings say Organizer. Outlook: Graph `accept` / `tentativelyAccept` / `decline` (+ iCalUId fallback). Google: Calendar API attendee `responseStatus` patch with `sendUpdates`. Source shown on calendar blocks |
+| Meeting start reminder | Partial | Toast 5 min before the start of an Upcoming meeting: title, time, Join, Snooze (back at the start or first join). Corner X dismisses for good. Outlook: Snooze and X go to Graph snoozeReminder / dismissReminder; reminderView every 60 s near a meeting. Google: snooze/dismiss stay local only. Live state (green dot) from polled live-meeting state. One chime at the start or first join; quiet with sound off and during Do not disturb or a call. Ctrl+Shift+J joins from the latest. Driven by the polled calendar (Outlook + optional Google merge); push event 128 not wired |
+| Google Calendar accounts | Partial | Settings > Calendar: Connect Google (OAuth Desktop + PKCE, env `TEAMS_GOOGLE_CLIENT_ID` / optional secret), list calendars, home calendar, extra write targets. Poll merges with Outlook by iCal UID / Teams join URL. Disconnect clears tokens. Manual smoke still needed against a real Google account |
 | Pre-join screen | Partial | Join from Upcoming, chat, Join with ID, link or reminder opens a screen in the chat pane: camera preview, camera and mic switches, background menu, camera, microphone and speaker selects, "Computer audio" or "Don't use audio" (audio off in both directions), Join now, Cancel. Camera, mic and devices remembered. 1:1 calls and Meet now skip it. Checked in the demo only |
 | Narrow windows in a call | Done | Controls that do not fit move into "..." (View, Reactions, Raise hand, People, Chat; mic, camera, share, "..." and Leave always stay). Below 960 px, or when a side panel would leave the call under 720 px, the chat list hides; still too narrow, the panel overlays the call. Layout guard checks 640x480, 1280x800, 1920x1080 |
 | Give and take control | Missing | Protocol known (main-channel data channel, action codes 0-11); needs a second person and a security review |
@@ -214,19 +222,22 @@ After parity. Not counted in the parity score.
 | Delegate a message to an agent CLI (Claude Code, Copilot, any CLI) from the hover toolbar | Done | Robot button in the hover toolbar, actions and agents in Settings > Agents |
 | Run status: chip under the message, Agents rail entry, toast, Open session | Done | Live step and time on the chip, Agents rail popover with running and done runs, toast on finish or failure, Open session resumes the agent session in a terminal |
 | Local API in the app | Done | MCP only, no CLI by design. Tokens and chat access stay in the app |
-| MCP server on the same API | Done | Read tools (messages with images, reactions, files, quotes, cards, links; `get_image`; `recent_messages`; `search_messages`; `list_meetings` and `get_transcript` when allowed), `wait_for_event` to follow new messages and proposals, `propose_message` (@mentions, up to 4 images), `propose_reaction` and `reaction_changed` events for the user's own messages. Settings > MCP, default port 40615 |
+| MCP server on the same API | Done | Read tools (messages with images, reactions, files, quotes, cards, links; `get_image`; `recent_messages`; `search_messages`; `list_meetings` and `get_transcript` when allowed), `wait_for_event` to follow new messages and proposals, `write_message` (@mentions, up to 4 images), `add_reaction` (both reviewed by the user unless review is off) and `reaction_changed` events for the user's own messages. Settings > MCP, default port 40615 |
 | One-click MCP install | Done | Settings > MCP installs the server into Claude Code, Codex CLI, Copilot CLI, VS Code and Cursor, on Windows and in WSL (needs `networkingMode=mirrored`) |
 | Start dialog per run | Done | Pick the action, the agent session (new or resume) and the working directory for each delegated message |
 | Runs survive a restart | Done | Interrupted runs resume after the app restarts; WSL "Open session" starts the agent through a login shell |
-| Agent permissions in Settings: chats/channels All/Selected/None, propose, calendar, transcripts | Done | Other chats are invisible to agents, search included |
+| Agent permissions in Settings: chats/channels All/Selected/None, write, review before sending, calendar, transcripts | Done | Other chats are invisible to agents, search included |
 | Proposals: card above the composer, send, edit, discard | Done | Agents never send. A proposal is stale once you answered first |
+| Write without review for a time window | Done | The agent asks for 5 to 480 minutes with a reason; the card offers 15 min, 1 h, 4 h; a bar shows the window with Stop |
+| Find free times and organize meetings | Done | `find_availability` and `create_meeting`, off by default, reviewed on the Calendar page unless review is off |
+| Agent providers and chat runs | Done | Provider catalog in Settings > Agents, runs that answer in the chat, Write with an agent identity in the composer |
 
 ## Out of scope
 
 | Feature | Why |
 |---|---|
 | Personal apps in the app bar | Outside chat and channels |
-| Copilot, intelligent recap, AI notes, Facilitator, Interpreter | Needs a Microsoft 365 Copilot licence; left out on purpose |
+| Copilot in meetings, intelligent recap, AI notes, Facilitator, Interpreter | Needs a Microsoft 365 Copilot licence; left out on purpose |
 | Teams Premium features (translated captions, watermark, E2EE meetings, templates, branding) | Needs a Teams Premium licence |
 | Phone system: dial pad, park, forwarding, voicemail, delegation, queues | Needs a Teams Phone licence; none on the test account |
 | PowerPoint Live, annotation, polls, Q&A, Whiteboard editing, Live Share, meeting apps | Microsoft-hosted web apps; Whiteboard opens in the browser |

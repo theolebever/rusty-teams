@@ -9,6 +9,7 @@ use super::call_pop_out::zoom_listener;
 use super::call_stage::render_stage_overlay;
 use super::call_view::render_call_view;
 use super::conversation::ConversationView;
+use super::prejoin_view::PrejoinView;
 use super::shortcuts::{
     HangUpCall, OpenLobbyList, PushToTalk, ToggleCallCamera, ToggleCallFullscreen, ToggleCallHand,
     ToggleCallShare, ZoomShareIn, ZoomShareOut, ZoomShareReset,
@@ -30,6 +31,12 @@ pub fn call_window_title(state: &AppState) -> String {
         .call
         .as_ref()
         .map(|call| call.model.title.clone())
+        .or_else(|| {
+            state
+                .prejoin
+                .as_ref()
+                .map(|pending| pending.join.title.clone())
+        })
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| FALLBACK_TITLE.to_owned())
 }
@@ -40,10 +47,12 @@ pub struct CallWindowView {
     focus: FocusHandle,
     call_chat: Option<(String, Entity<ConversationView>)>,
     people_scroll: (u64, ScrollHandle),
+    prejoin: Option<Entity<PrejoinView>>,
     fullscreen: bool,
     was_fullscreen: bool,
     _app_subscription: Subscription,
     _media_subscription: Subscription,
+    _activation_subscription: Subscription,
 }
 
 impl CallWindowView {
@@ -52,6 +61,12 @@ impl CallWindowView {
         let media_subscription = cx.subscribe(&app, |_, _, event: &AppEvent, cx| {
             if matches!(event, AppEvent::CallMedia) {
                 cx.notify();
+            }
+        });
+        let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.app
+                    .update(cx, |state, cx| state.release_push_to_talk(cx));
             }
         });
         let closing_app = app.clone();
@@ -66,14 +81,21 @@ impl CallWindowView {
             focus,
             call_chat: None,
             people_scroll: (0, ScrollHandle::new()),
+            prejoin: None,
             fullscreen: false,
             was_fullscreen: false,
             _app_subscription: app_subscription,
             _media_subscription: media_subscription,
+            _activation_subscription: activation_subscription,
         }
     }
 
-    fn sync_call_chat(&mut self, thread: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_call_chat(
+        &mut self,
+        thread: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match (thread, &self.call_chat) {
             (Some(wanted), Some((open, _))) if &wanted == open => {}
             (Some(wanted), _) => {
@@ -83,6 +105,19 @@ impl CallWindowView {
                 self.call_chat = Some((wanted, view));
             }
             (None, _) => self.call_chat = None,
+        }
+    }
+
+    fn sync_prejoin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.app.read(cx).prejoin.clone();
+        let open = self.prejoin.as_ref().map(|view| view.read(cx).pending_id());
+        match (wanted, open) {
+            (Some(pending), Some(id)) if pending.id == id => {}
+            (Some(pending), _) => {
+                let app = self.app.clone();
+                self.prejoin = Some(cx.new(|cx| PrejoinView::new(app, &pending, window, cx)));
+            }
+            (None, _) => self.prejoin = None,
         }
     }
 
@@ -118,7 +153,11 @@ impl CallWindowView {
                     .h_full()
                     .gap(px(12.))
                     .items_center()
-                    .child(img(app_icon_image(app_icon)).size(px(APP_ICON_SIZE)).flex_none())
+                    .child(
+                        img(app_icon_image(app_icon))
+                            .size(px(APP_ICON_SIZE))
+                            .flex_none(),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -144,6 +183,8 @@ fn leave_or_dismiss(app: &Entity<AppState>, cx: &mut App) {
     app.update(cx, |state, cx| {
         if state.call.is_some() {
             state.leave_call(cx);
+        } else if state.prejoin.is_some() {
+            state.cancel_prejoin(cx);
         } else {
             state.dismiss_call_end(cx);
         }
@@ -160,6 +201,7 @@ impl Render for CallWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let chat_thread = self.app.read(cx).call_chat_thread();
         self.sync_call_chat(chat_thread, window, cx);
+        self.sync_prejoin(window, cx);
         let state = self.app.read(cx);
         if let Some(call) = &state.call
             && call.id != self.people_scroll.0
@@ -181,7 +223,12 @@ impl Render for CallWindowView {
         let stage_width = window_width - 2. * ISLAND_GAP;
         let chat_panel = self.call_chat.as_ref().map(|(_, view)| view.clone().into());
         let stage = render_call_view(&self.app, state, cx.try_global(), chat_panel, &self.people_scroll.1, fullscreen, stage_width)
-            .or_else(|| render_call_end(&self.app, state));
+            .or_else(|| render_call_end(&self.app, state))
+            .or_else(|| {
+                self.prejoin
+                    .clone()
+                    .map(|prejoin| prejoin.into_any_element())
+            });
         let stage_overlay = render_stage_overlay(&self.app, state);
         elevation::set_app_modal_layers(window, open_dialogs, cx);
         self.sync_fullscreen(fullscreen, window);
@@ -198,14 +245,35 @@ impl Render for CallWindowView {
             .bg(theme::background())
             .text_color(theme::text())
             .text_size(px(14.))
-            .on_action(call_action::<ToggleCallMute>(&self.app, AppState::toggle_call_mute))
-            .on_action(call_action::<PushToTalk>(&self.app, AppState::press_push_to_talk))
+            .on_action(call_action::<ToggleCallMute>(
+                &self.app,
+                AppState::toggle_call_mute,
+            ))
+            .on_action(call_action::<PushToTalk>(
+                &self.app,
+                AppState::press_push_to_talk,
+            ))
             .on_action(call_action::<HangUpCall>(&self.app, AppState::leave_call))
-            .on_action(call_action::<ToggleCallCamera>(&self.app, AppState::toggle_call_camera))
-            .on_action(call_action::<ToggleCallShare>(&self.app, AppState::toggle_call_share))
-            .on_action(call_action::<ToggleCallHand>(&self.app, AppState::toggle_call_hand))
-            .on_action(call_action::<OpenLobbyList>(&self.app, AppState::open_call_lobby_list))
-            .on_action(call_action::<ToggleCallFullscreen>(&self.app, AppState::toggle_call_fullscreen))
+            .on_action(call_action::<ToggleCallCamera>(
+                &self.app,
+                AppState::toggle_call_camera,
+            ))
+            .on_action(call_action::<ToggleCallShare>(
+                &self.app,
+                AppState::toggle_call_share,
+            ))
+            .on_action(call_action::<ToggleCallHand>(
+                &self.app,
+                AppState::toggle_call_hand,
+            ))
+            .on_action(call_action::<OpenLobbyList>(
+                &self.app,
+                AppState::open_call_lobby_list,
+            ))
+            .on_action(call_action::<ToggleCallFullscreen>(
+                &self.app,
+                AppState::toggle_call_fullscreen,
+            ))
             .on_action(zoom_listener::<ZoomShareIn>(&self.app, ZoomStep::In))
             .on_action(zoom_listener::<ZoomShareOut>(&self.app, ZoomStep::Out))
             .on_action(zoom_listener::<ZoomShareReset>(&self.app, ZoomStep::Reset))

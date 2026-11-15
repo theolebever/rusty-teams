@@ -89,7 +89,9 @@ pub fn collect(
 ) -> Vec<PendingProposal> {
     let replies = proposals
         .values()
-        .filter(|entry| !matches!(entry.status, ProposalStatus::Stale { .. }))
+        .filter(|entry| {
+            !entry.proposal.direct && !matches!(entry.status, ProposalStatus::Stale { .. })
+        })
         .map(|entry| PendingProposal {
             id: entry.proposal.id.clone(),
             conversation_id: entry.proposal.conversation_id.clone(),
@@ -100,18 +102,21 @@ pub fn collect(
             created_at: entry.proposal.created_at,
             seen: seen.contains(&entry.proposal.id),
         });
-    let reacts = reactions.values().map(|reaction| PendingProposal {
-        id: reaction.id.clone(),
-        conversation_id: reaction.conversation_id.clone(),
-        agent: agent_label(reaction.agent.as_deref()),
-        kind: PendingKind::Reaction {
-            glyph: reaction_glyph(&reaction.emoji),
-            message_id: reaction.message_id.clone(),
-            excerpt: excerpts.get(&reaction.id).cloned(),
-        },
-        created_at: reaction.created_at,
-        seen: seen.contains(&reaction.id),
-    });
+    let reacts = reactions
+        .values()
+        .filter(|reaction| !reaction.direct)
+        .map(|reaction| PendingProposal {
+            id: reaction.id.clone(),
+            conversation_id: reaction.conversation_id.clone(),
+            agent: agent_label(reaction.agent.as_deref()),
+            kind: PendingKind::Reaction {
+                glyph: reaction_glyph(&reaction.emoji),
+                message_id: reaction.message_id.clone(),
+                excerpt: excerpts.get(&reaction.id).cloned(),
+            },
+            created_at: reaction.created_at,
+            seen: seen.contains(&reaction.id),
+        });
     let mut pending: Vec<PendingProposal> = replies.chain(reacts).collect();
     pending.sort_by(|left, right| {
         right
@@ -182,9 +187,11 @@ mod tests {
                 text: "Looks\n good  to me".into(),
                 mentions: Vec::new(),
                 images: Vec::new(),
+                free_writing_ask: None,
                 agent: Some("claude".into()),
                 session_id: None,
                 created_at: Utc.with_ymd_and_hms(2026, 10, 18, 9, minute, 0).unwrap(),
+                direct: false,
             },
             body: Arc::new(Vec::new()),
             mention_labels: Vec::new(),
@@ -202,6 +209,7 @@ mod tests {
             agent: Some("copilot".into()),
             session_id: None,
             created_at: Utc.with_ymd_and_hms(2026, 10, 18, 9, minute, 0).unwrap(),
+            direct: false,
         }
     }
 

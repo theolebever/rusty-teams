@@ -18,10 +18,10 @@ use crate::app_state::AppState;
 use crate::notify::platform::{self, NativeHandle, ScreenRect, ShareGeometry, WorkArea};
 use crate::views::call_mini_window::MiniWindowView;
 use crate::views::call_pop_out::{POP_OUT_SIZE, POP_OUT_TITLE, SharePopOutView};
+use crate::views::call_share_gallery::ShareGalleryView;
 use crate::views::call_window::{
     CALL_WINDOW_MIN_SIZE, CALL_WINDOW_SIZE, CallWindowView, call_window_title,
 };
-use crate::views::call_share_gallery::ShareGalleryView;
 use crate::views::share_bar::{ShareBarView, ShareBorderView};
 
 const TICK: Duration = Duration::from_millis(100);
@@ -35,6 +35,17 @@ enum Role {
     Mini,
     Gallery,
     Border(usize),
+}
+
+impl Role {
+    fn surface(self) -> Surface {
+        match self {
+            Role::Bar => Surface::ShareBar,
+            Role::Mini => Surface::Mini,
+            Role::Gallery => Surface::Gallery,
+            Role::Border(_) => Surface::Border,
+        }
+    }
 }
 
 struct Placed {
@@ -96,6 +107,7 @@ pub struct CallWindows {
     stage_native: Option<NativeHandle>,
     stage_opening: bool,
     stage_closed_by_user: bool,
+    stage_closed_call: Option<u64>,
     seen_viewing: Option<bool>,
     work_area: Option<WorkArea>,
     minimized: bool,
@@ -114,7 +126,6 @@ pub struct CallWindows {
     gallery_seen: Option<(i32, i32)>,
     gallery_layout: GalleryLayout,
     speaker_only: bool,
-    main_excluded: bool,
     minimized_for_share: bool,
     ticks: u32,
 }
@@ -158,6 +169,11 @@ fn overlay_options(role: Role, rect: ScreenRect, scale: f32) -> WindowOptions {
 }
 
 impl CallWindows {
+    /// Points at a main window reopened from the tray.
+    pub fn attach_main_window(&mut self, window: &Window) {
+        self.main_native = platform::native_handle(window);
+    }
+
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let saved_position = |key: &str, cx: &App| {
             app.read(cx)
@@ -176,6 +192,7 @@ impl CallWindows {
             stage_native: None,
             stage_opening: false,
             stage_closed_by_user: false,
+            stage_closed_call: None,
             seen_viewing: None,
             work_area: None,
             minimized: false,
@@ -194,7 +211,6 @@ impl CallWindows {
             gallery_seen: None,
             gallery_layout: gallery_layout(0, true, f32::MAX),
             speaker_only: false,
-            main_excluded: false,
             minimized_for_share: false,
             ticks: 0,
         };
@@ -275,25 +291,30 @@ impl CallWindows {
             platform::restore_and_raise(native);
         }
         if let Some(stage) = self.stage {
-            stage.update(cx, |_, window, _| window.activate_window()).ok();
+            stage
+                .update(cx, |_, window, _| window.activate_window())
+                .ok();
         }
     }
 
     fn stage_wanted(&self, cx: &App) -> bool {
         let state = self.app.read(cx);
-        state.call.is_some() || state.call_end.is_some()
+        state.call.is_some() || state.call_end.is_some() || state.prejoin.is_some()
     }
 
     fn sync_stage(&mut self, cx: &mut Context<Self>) {
         let wanted = self.stage_wanted(cx);
-        if self.stage_closed_by_user {
+        let current_call = self.app.read(cx).call.as_ref().map(|call| call.id);
+        let another_call = current_call.is_some() && current_call != self.stage_closed_call;
+        if self.stage_closed_by_user && !another_call {
             if !wanted {
                 self.stage_closed_by_user = false;
-            } else if self.app.read(cx).call.is_none() {
+            } else if current_call.is_none() {
                 self.app.update(cx, |state, cx| state.dismiss_call_end(cx));
             }
             return;
         }
+        self.stage_closed_by_user = false;
         match (wanted, self.stage) {
             (true, None) => self.open_stage(cx),
             (false, Some(stage)) => {
@@ -304,6 +325,7 @@ impl CallWindows {
                 if stage.update(cx, |_, _, _| ()).is_err() {
                     self.forget_stage();
                     self.stage_closed_by_user = true;
+                    self.stage_closed_call = current_call;
                 }
             }
             (false, None) => {}
@@ -315,7 +337,6 @@ impl CallWindows {
         self.stage_native = None;
         self.minimized = false;
         self.minimized_for_share = false;
-        self.main_excluded = false;
         self.seen_viewing = None;
     }
 
@@ -332,7 +353,8 @@ impl CallWindows {
             size(px(CALL_WINDOW_SIZE.0), px(CALL_WINDOW_SIZE.1)),
             cx,
         )));
-        options.window_min_size = Some(size(px(CALL_WINDOW_MIN_SIZE.0), px(CALL_WINDOW_MIN_SIZE.1)));
+        options.window_min_size =
+            Some(size(px(CALL_WINDOW_MIN_SIZE.0), px(CALL_WINDOW_MIN_SIZE.1)));
         if let Some(titlebar) = options.titlebar.as_mut() {
             titlebar.title = Some(call_window_title(self.app.read(cx)).into());
         }
@@ -367,7 +389,8 @@ impl CallWindows {
             Some(seen) if seen == viewing => {
                 if self.stage_native.is_some() && viewing == self.minimized {
                     self.seen_viewing = Some(!viewing);
-                    self.app.update(cx, |state, cx| state.show_call(!viewing, cx));
+                    self.app
+                        .update(cx, |state, cx| state.show_call(!viewing, cx));
                 }
             }
             _ => {
@@ -375,7 +398,9 @@ impl CallWindows {
                 if viewing && self.minimized {
                     self.raise_stage(cx);
                 } else if !viewing && !self.minimized {
-                    stage.update(cx, |_, window, _| window.minimize_window()).ok();
+                    stage
+                        .update(cx, |_, window, _| window.minimize_window())
+                        .ok();
                 }
             }
         }
@@ -389,7 +414,6 @@ impl CallWindows {
             && self.share.is_none()
             && self.windows.is_empty()
             && self.opening.is_empty()
-            && !self.main_excluded
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) -> Duration {
@@ -402,7 +426,6 @@ impl CallWindows {
         self.refresh_stage_window();
         self.sync_viewing(cx);
         self.sync_share(slow, cx);
-        self.sync_capture_exclusion();
         self.sync_pop_out(cx);
         self.sync_monitor(cx);
         if slow {
@@ -429,13 +452,27 @@ impl CallWindows {
     fn local_share(&self, cx: &App) -> Option<Option<ShareSource>> {
         let model = &self.app.read(cx).call.as_ref()?.model;
         let label = model.local_share.as_ref()?;
-        Some(
-            model
-                .share_sources
-                .iter()
-                .find(|source| &source.label() == label)
-                .cloned(),
-        )
+        if let Some(source) = model
+            .share_sources
+            .iter()
+            .find(|source| &source.label() == label)
+            .cloned()
+        {
+            return Some(Some(source));
+        }
+        Some(model.share_kind.map(|kind| ShareSource {
+            id: 0,
+            kind,
+            title: label.clone(),
+        }))
+    }
+
+    fn portal_picker(&self, cx: &App) -> bool {
+        self.app
+            .read(cx)
+            .call
+            .as_ref()
+            .is_some_and(|call| call.model.uses_portal_picker())
     }
 
     fn sync_share(&mut self, refresh_geometry: bool, cx: &mut Context<Self>) {
@@ -534,28 +571,15 @@ impl CallWindows {
             self.local_share_mode(),
             platform::window_rect(native),
             shared,
+            self.portal_picker(cx),
         ) {
             return;
         }
         self.minimized_for_share = true;
         if let Some(stage) = self.stage {
-            stage.update(cx, |_, window, _| window.minimize_window()).ok();
-        }
-    }
-
-    fn sync_capture_exclusion(&mut self) {
-        let Some(native) = self.stage_native else {
-            return;
-        };
-        let wanted = excluded_from_capture(Surface::Main, self.local_share_mode());
-        if wanted == self.main_excluded {
-            return;
-        }
-        self.main_excluded = wanted;
-        if wanted {
-            platform::exclude_from_capture(native);
-        } else {
-            platform::include_in_capture(native);
+            stage
+                .update(cx, |_, window, _| window.minimize_window())
+                .ok();
         }
     }
 
@@ -787,7 +811,9 @@ impl CallWindows {
                     .flatten();
                 if let Some(native) = native {
                     platform::prepare_toast_window(native);
-                    platform::exclude_from_capture(native);
+                    if excluded_from_capture(role.surface()) {
+                        platform::exclude_from_capture(native);
+                    }
                 }
                 if matches!(role, Role::Border(_)) {
                     handle

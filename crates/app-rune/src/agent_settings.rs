@@ -180,13 +180,19 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
         let id = agent.id.clone();
         pane = pane.child(item(format!("agent-row-{id}"), &agent.name, move |s: &mut UiState<A>| open_agent(s, &id)));
     }
-    let mut presets = row().wrap().gap(6.0).px(12.0).pt(4.0);
-    for (label, preset) in AgentProfile::presets() {
-        presets = presets.child(button::<A>(&format!("+ {label}"), &format!("agent-add-{}", preset.id), move |s, _| {
-            let mut id = String::new();
-            save(s, |settings| id = settings.add_agent(preset.clone()));
-            open_agent(s, &id);
-        }));
+    // Rune rows do not wrap, so the presets go in lines of three.
+    let mut presets = col().gap(6.0).px(12.0).pt(4.0);
+    for line in AgentProfile::presets().chunks(3) {
+        let mut buttons = row().gap(6.0);
+        for (label, preset) in line {
+            let preset = preset.clone();
+            buttons = buttons.child(button::<A>(&format!("+ {label}"), &format!("agent-add-{}", preset.id), move |s, _| {
+                let mut id = String::new();
+                save(s, |settings| id = settings.add_agent(preset.clone()));
+                open_agent(s, &id);
+            }));
+        }
+        presets = presets.child(buttons);
     }
     pane = pane.child(presets).child(caption("ACTIONS"));
     for (index, action) in settings.actions.iter().enumerate() {

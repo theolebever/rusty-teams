@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use chrono::{Local, Offset as _};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -21,6 +21,7 @@ use crate::channel_files::{
 };
 use crate::downloads::{DownloadState, percent_label};
 use crate::format;
+use crate::i18n::tr;
 use crate::theme;
 
 const SIDE_PADDING: f32 = 20.;
@@ -256,7 +257,7 @@ pub(crate) fn entry_badge(entry: &DriveEntry) -> Div {
 pub(crate) fn modified_text(entry: &DriveEntry) -> String {
     entry.modified_at.map_or_else(String::new, |time| {
         let now = Local::now();
-        format::list_time_label(time, now.date_naive(), now.offset().fix())
+        format::list_time_label(time, now.date_naive(), app_base::format::Zone::Local)
     })
 }
 
@@ -465,7 +466,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
                     Button::new("library-retry")
                         .ghost()
                         .compact()
-                        .label("Retry")
+                        .label(tr("common.retry"))
                         .on_click(move |_, window, cx| retry(SharedCommand::Retry, window, cx)),
                 )
                 .into_any_element()

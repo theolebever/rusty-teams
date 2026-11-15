@@ -32,6 +32,11 @@ impl ActivityCenter {
         }
     }
 
+    /// Points at a main window reopened from the tray.
+    pub fn attach_main_window(&mut self, window: &Window) {
+        self.main_window = window.window_handle();
+    }
+
     pub fn feed(&self) -> &Feed {
         self.model.feed()
     }

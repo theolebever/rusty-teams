@@ -239,6 +239,11 @@
       const text = await response.text();
       let body = text;
       try { body = text ? JSON.parse(text) : null; } catch (error) {}
+      const location = response.headers.get('Location');
+      if (location) {
+        if (body === null || body === '') body = {location};
+        else if (typeof body === 'object' && body.location == null) body.location = location;
+      }
       return {status: response.status, retryAfter: response.headers.get('Retry-After'), body};
     } catch (error) {
       return {status: 0, body: String(error)};

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use app_base::format::Zone;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::reaction_model::UNKNOWN_REACTOR;
@@ -99,8 +100,8 @@ pub enum Bucket {
 }
 
 impl Bucket {
-    pub fn of(time: DateTime<Utc>, today: NaiveDate, offset: FixedOffset) -> Bucket {
-        let days_ago = (today - time.with_timezone(&offset).date_naive()).num_days();
+    pub fn of(time: DateTime<Utc>, today: NaiveDate, offset: impl Into<Zone>) -> Bucket {
+        let days_ago = (today - offset.into().at(time).date_naive()).num_days();
         match days_ago {
             ..=0 => Bucket::Today,
             1 => Bucket::Yesterday,
@@ -224,16 +225,16 @@ impl Feed {
         &self,
         filter: Filter,
         today: NaiveDate,
-        offset: FixedOffset,
+        offset: impl Into<Zone>,
     ) -> Vec<Section<'_>> {
+        let offset = offset.into();
         let mut admitted: Vec<&Entry> = self
             .entries
             .iter()
             .filter(|entry| filter.admits(entry))
             .collect();
-        admitted.sort_by(|left, right| {
-            (right.updated_at, &right.id).cmp(&(left.updated_at, &left.id))
-        });
+        admitted
+            .sort_by(|left, right| (right.updated_at, &right.id).cmp(&(left.updated_at, &left.id)));
         let mut sections: Vec<Section<'_>> = Vec::new();
         for entry in admitted {
             let bucket = Bucket::of(entry.updated_at, today, offset);
@@ -251,6 +252,7 @@ impl Feed {
 
 #[cfg(test)]
 mod tests {
+    use chrono::FixedOffset;
     use chrono::TimeZone;
 
     use super::*;
@@ -294,7 +296,11 @@ mod tests {
             .map(|section| {
                 (
                     section.bucket,
-                    section.entries.iter().map(|entry| entry.id.as_str()).collect(),
+                    section
+                        .entries
+                        .iter()
+                        .map(|entry| entry.id.as_str())
+                        .collect(),
                 )
             })
             .collect();
@@ -309,7 +315,13 @@ mod tests {
         let mentions = feed.sections(Filter::Mentions, today, offset);
         assert_eq!(mentions[0].entries.len(), 2);
         let unread = feed.sections(Filter::Unread, today, offset);
-        assert_eq!(unread.iter().map(|section| section.entries.len()).sum::<usize>(), 2);
+        assert_eq!(
+            unread
+                .iter()
+                .map(|section| section.entries.len())
+                .sum::<usize>(),
+            2
+        );
         assert_eq!(feed.unread_count(), 2);
         assert_eq!(feed.bell_count(), 2);
     }

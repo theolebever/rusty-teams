@@ -477,7 +477,14 @@ mod tests {
         });
         assert_eq!(
             labels(&shown, ChannelMenuItem::label),
-            ["Channel notifications", "Pin", "Hide", "-", "Manage channel", "Copy link"]
+            [
+                "Channel notifications",
+                "Pin",
+                "Hide",
+                "-",
+                "Manage channel",
+                "Copy link"
+            ]
         );
         let hidden_pinned = channel_menu_entries(ChannelMenuState {
             pinned: true,
@@ -486,7 +493,14 @@ mod tests {
         });
         assert_eq!(
             labels(&hidden_pinned, ChannelMenuItem::label),
-            ["Channel notifications", "Unpin", "Show", "-", "Manage channel", "Copy link"]
+            [
+                "Channel notifications",
+                "Unpin",
+                "Show",
+                "-",
+                "Manage channel",
+                "Copy link"
+            ]
         );
     }
 

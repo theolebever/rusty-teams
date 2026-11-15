@@ -1,7 +1,7 @@
 use chrono::{Local, Offset, Utc};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -10,8 +10,8 @@ use teams_core::FileKind;
 
 use super::{ChannelPane, ConversationView};
 use crate::app_state::Selection;
-use crate::find_in_chat::FIND_IN_CHANNEL;
 use crate::channel_files::{SharedContent, SharedItem};
+use crate::find_in_chat::FIND_IN_CHANNEL;
 use crate::format;
 use crate::rows::reply_excerpt;
 use crate::theme;
@@ -61,9 +61,8 @@ pub(super) fn pinned_post_item(message_id: &str, record: Option<&MessageRecord>)
             byline: String::new(),
         };
     };
-    let offset = Local::now().offset().fix();
-    let today = Utc::now().with_timezone(&offset).date_naive();
-    let date = format::list_time_label(record.created_at, today, offset);
+    let today = Local::now().date_naive();
+    let date = format::list_time_label(record.created_at, today, app_base::format::Zone::Local);
     let author = record.sender_name.clone().unwrap_or_default();
     let byline = match (author.is_empty(), date.is_empty()) {
         (false, false) => format!("{author}, {date}"),
@@ -135,9 +134,7 @@ impl ConversationView {
     fn details_conversation_id(&self) -> Option<String> {
         match &self.current.as_ref()?.selection {
             Selection::Channel(channel_id) => Some(channel_id.clone()),
-            Selection::Chat(chat_id) if !self.draft_active && !self.pinned => {
-                Some(chat_id.clone())
-            }
+            Selection::Chat(chat_id) if !self.draft_active && !self.pinned => Some(chat_id.clone()),
             Selection::Chat(_) => None,
         }
     }

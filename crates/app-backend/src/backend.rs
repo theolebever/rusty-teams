@@ -13,6 +13,7 @@ use store::Store;
 use teams_core::{ChatsvcFolderSource, CoreEvent, SyncEngine};
 use tokio::sync::{Notify, mpsc, watch};
 
+use crate::browser_sign_in::BrowserSignInState;
 use crate::launcher::CallLauncher;
 use crate::schedule::fetch_window;
 use crate::presence_link::{self, LinkSignal};
@@ -59,6 +60,7 @@ pub enum LiveState {
 
 pub enum BackendEvent {
     Connection(ConnectionState),
+    BrowserSignIn(BrowserSignInState),
     Engine(Arc<Engine>),
     Calls(Arc<CallLauncher>),
     Calendar(Vec<CalendarEvent>),
@@ -77,6 +79,7 @@ impl BackendEvent {
     pub fn kind(&self) -> String {
         match self {
             BackendEvent::Connection(_) => "Connection".into(),
+            BackendEvent::BrowserSignIn(_) => "BrowserSignIn".into(),
             BackendEvent::Engine(_) => "Engine".into(),
             BackendEvent::Calls(_) => "Calls".into(),
             BackendEvent::Calendar(_) => "Calendar".into(),
@@ -205,7 +208,11 @@ async fn supervise(
         link,
         live_retry,
     ));
-    tokio::spawn(calendar_loop(session.clone(), events.clone()));
+    tokio::spawn(calendar_loop(
+        session.clone(),
+        store.clone(),
+        events.clone(),
+    ));
     tokio::spawn(pins_loop(session, events.clone()));
     tokio::spawn(presence_resubscribe_loop(engine.clone()));
     refresh_loop(engine, events, nudges).await;
@@ -307,9 +314,12 @@ async fn realtime_loop(
                             let receipt_engine = engine.clone();
                             let receipt_event = message.clone();
                             engine.handle_pin_event(&message);
-                            if message.conversation_id.as_deref() == Some(chatsvc::ACTIVITY_FEED_ID) {
+                            if message.conversation_id.as_deref() == Some(chatsvc::ACTIVITY_FEED_ID)
+                            {
                                 let activity_engine = engine.clone();
-                                tokio::spawn(async move { activity_engine.refresh_activity().await });
+                                tokio::spawn(
+                                    async move { activity_engine.refresh_activity().await },
+                                );
                             }
                             tokio::spawn(async move {
                                 receipt_engine.handle_receipt_event(&receipt_event).await
@@ -456,7 +466,7 @@ async fn handle_message_event(
     }
 }
 
-async fn calendar_loop(session: Session, events: EventSender) {
+async fn calendar_loop(session: Session, store: Arc<Store>, events: EventSender) {
     let calendar = Calendar::new(&session);
     let (nudge, mut nudges) = mpsc::unbounded_channel();
     let _ = events.send(BackendEvent::CalendarNudge(nudge));
@@ -482,16 +492,37 @@ async fn calendar_loop(session: Session, events: EventSender) {
         deferred_fetch = None;
         last_fetch = Some(tokio::time::Instant::now());
         let (start, end) = fetch_window(Utc::now(), Local::now().offset().fix());
-        match calendar.calendar_view(start, end).await {
-            Ok(fetched) => {
-                if events.send(BackendEvent::Calendar(fetched)).is_err() {
-                    return;
+        let mut accounts = store::load_calendar_accounts(&store);
+        let mut combined = Vec::new();
+        let mut outlook_failed = false;
+        if accounts.outlook_selected {
+            match calendar.calendar_view(start, end).await {
+                Ok(fetched) => combined.extend(fetched),
+                Err(error) => {
+                    outlook_failed = true;
+                    crate::diagnostics::record(format!(
+                        "calls: outlook calendar not loaded: {}",
+                        shorten(&error.to_string())
+                    ));
                 }
             }
+        }
+        match crate::google_calendar_sync::fetch_google_events(&mut accounts, start, end).await {
+            Ok(google_events) => {
+                let _ = store::save_calendar_accounts(&store, &accounts);
+                combined.extend(google_events);
+            }
             Err(error) => crate::diagnostics::record(format!(
-                "calls: calendar not loaded: {}",
-                shorten(&error.to_string())
+                "calls: google calendar not loaded: {}",
+                shorten(&error)
             )),
+        }
+        if combined.is_empty() && outlook_failed && !accounts.has_google() {
+            continue;
+        }
+        let merged = chatsvc::merge_calendar_events(combined);
+        if events.send(BackendEvent::Calendar(merged)).is_err() {
+            return;
         }
     }
 }

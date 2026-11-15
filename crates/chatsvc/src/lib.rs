@@ -1,28 +1,33 @@
 pub mod activity_feed;
-pub mod ams;
 pub mod activity_mentions;
+pub mod ams;
 pub mod bot_profiles;
 pub mod calendar;
 pub mod calllog;
 pub mod cards;
 pub mod channel_notifications;
+pub mod channel_visibility;
+pub mod chat_listing;
 pub mod chat_notifications;
 pub mod chat_settings;
-pub mod channel_visibility;
-pub mod conversations;
 pub mod compose_copilot;
+pub mod conversations;
 pub mod copilot;
 pub mod drafts;
 pub mod emotions;
 mod error;
 pub mod forward;
 pub mod gifs;
+pub mod google_calendar;
+pub mod graph_events;
 mod json_id;
+pub use json_id::id_text;
 pub mod language_settings;
 pub mod links;
 mod mask;
 pub mod members;
 pub mod messages;
+pub mod messaging_policy;
 pub mod pins;
 pub mod post_follow;
 pub mod presence;
@@ -31,7 +36,6 @@ pub mod read_horizon;
 pub mod realtime;
 pub mod recap;
 pub mod receipts;
-pub mod messaging_policy;
 pub mod recording_policy;
 pub mod saved;
 pub mod settings;
@@ -43,6 +47,7 @@ pub mod teams_cdn;
 pub mod thread_activity;
 pub mod transcripts;
 pub mod translate;
+pub mod user_profiles;
 pub mod window;
 
 pub use activity_feed::{
@@ -51,52 +56,61 @@ pub use activity_feed::{
 pub use activity_mentions::{MentionActivity, MentionKind, mentions_of};
 pub use bot_profiles::{BotProfile, BotProfiles, parse_bot_profiles};
 pub use calendar::{
-    Attendee, Calendar, CalendarEvent, CreatedEvent, DialIn, join_info_text, NewEvent, Reminder, Repeat, Reply,
-    ResponseType, ShowAs, meet_now_join_url, new_event_body, parse_calendar_events, parse_created_event,
+    Attendee, AttendeeResponseCounts, BusyTime, Calendar, CalendarEvent, CalendarSource,
+    CreatedEvent, DialIn, EventAttendee, NewEvent, PersonSchedule, Reminder, Repeat, Reply,
+    ResponseType, ShowAs, apply_event_details, join_info_text, meet_now_join_url, new_event_body,
+    new_event_body_with_join, parse_calendar_events, parse_created_event, strip_html,
+    truncate_preview,
 };
 pub use calllog::{CallDirection, CallLogEntry, CallOutcome};
 pub use cards::{
     CardActions, ChatApp, InvokeRequest, InvokeResponse, TaskContent, TaskContinue, TaskResponse,
 };
 pub use channel_notifications::{ChannelNotificationLevel, ChannelNotifications, ChannelSettings};
+pub use channel_visibility::{ChannelKind, ChannelMembership, ChannelTarget, ChannelVisibility};
+pub use chat_listing::{ChatListing, ConversationPage, MessagePage, aggregator_chat};
 pub use chat_notifications::{ChatNotificationMode, ChatNotificationWrite, DesktopNotifications};
 pub use chat_settings::{
     ActivityAlert, ChatAccountSettings, ChatSettingChange, ChatSettingsClient,
     ChatSettingsDocument, EnterKeyBehavior, MeetingChatNotifications, MessageDensity,
     NotificationAccountSettings, NotificationPreset, UpArrowBehavior,
 };
-pub use channel_visibility::{ChannelKind, ChannelMembership, ChannelTarget, ChannelVisibility};
 pub use conversations::{ConversationState, Conversations};
 pub use drafts::{ScheduledDraft, ScheduledDrafts};
 pub use emotions::{EmotionReaction, MessageEmotions, parse_message_emotions, user_id_from_mri};
 pub use error::{Error, Result};
 pub use forward::{ForwardResult, MAX_FORWARD_MESSAGES};
 pub use gifs::{Gif, Gifs};
+pub use google_calendar::{
+    AuthPending, GoogleCalendar, GoogleEventDraft, GoogleOAuth, TokenBundle, allocate_redirect_uri,
+    client_id_from_env, exchange_code, google_event_body, google_rsvp_query, google_rsvp_status,
+    merge_calendar_events, normalize_join_url, parse_calendar_list, parse_google_events,
+    refresh_access_token, rrule_for_repeat, wait_for_code,
+};
 pub use language_settings::{
     LanguageSettings, LanguageSettingsClient, TranslationBehavior, authoring_patch, behavior_patch,
     parse_language_settings, target_patch,
 };
-pub use links::{LinkImage, LinkInfo, MessageLinks, is_link_image_url};
+pub use links::{LinkImage, LinkInfo, MessageLinks, hosted_content_image_url, is_link_image_url};
 pub use mask::mask_conversation_id;
-pub use team_admin::{ChannelEdit, ChannelPrivacy, ExistingChannel, Mailbox, NewChannel, TeamAdmin};
 pub use members::{
     HistoryShare, INVALID_TOPIC_CHARACTER, MAX_HISTORY_DAYS, MAX_TOPIC_LENGTH, ThreadMembers,
     TopicProblem, topic_problem,
 };
 pub use messages::{ConversationRef, Messages};
-pub use post_follow::{PostFollowState, parse_post_follow_states};
 pub use pins::{
     ChannelLayout, ChannelTab, Folder, FolderKind, Folders, PinnedChannels, PinnedChats,
     PinnedMessage, Pins, TeamLayout, TeamRights,
 };
+pub use post_follow::{PostFollowState, parse_post_follow_states};
 pub use presence::{
     ActivityReporting, ForcedAvailability, ForcedKind, PresenceLookup, PresenceService,
     PresenceStatus, StatusNote, UserPresence, WorkLocation, WorkLocationKind, WorkLocationSource,
     error_status, is_endpoint_missing,
 };
 pub use reactions::{
-    CustomEmoji, custom_emoji, emotion_glyph, emotion_key, emotion_keys, insert_skin_tone, reaction_glyph_for_key,
-    reaction_key, reaction_keys,
+    CustomEmoji, custom_emoji, emotion_glyph, emotion_key, emotion_keys, insert_skin_tone,
+    reaction_glyph_for_key, reaction_key, reaction_keys,
 };
 pub use read_horizon::ReadHorizon;
 pub use realtime::{
@@ -119,10 +133,14 @@ pub use substrate_search::{
     QueryRequest, QueryResults, QueryScope, SearchIdentity, SearchSession, SubstrateSearch,
     Suggestions,
 };
+pub use team_admin::{
+    ChannelEdit, ChannelPrivacy, ExistingChannel, Mailbox, NewChannel, TeamAdmin,
+};
+pub use thread_activity::{ThreadActivity, ThreadActivityKind};
 pub use transcripts::{MeetingTranscript, TranscriptError, TranscriptTurn, Transcripts};
 pub use translate::{
     Language, MAX_TRANSLATE_BATCH, MessageLanguage, TranslateRequest, Translation,
     TranslationStatus, TranslationTrigger, Translator, language_code,
 };
-pub use thread_activity::{ThreadActivity, ThreadActivityKind};
+pub use user_profiles::{UserProfile, UserProfiles};
 pub use window::{MessageWindow, WindowDirection};

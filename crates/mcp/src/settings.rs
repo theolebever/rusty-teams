@@ -71,9 +71,11 @@ fn serialize(policy: &AgentPolicy) -> String {
         ("port", policy.port.to_string()),
         ("chats", serialize_access(&policy.chats)),
         ("channels", serialize_access(&policy.channels)),
-        ("propose", policy.propose.to_string()),
+        ("write", policy.write.to_string()),
+        ("review", policy.review.to_string()),
         ("calendar", policy.calendar.to_string()),
         ("transcripts", policy.transcripts.to_string()),
+        ("meetings", policy.meetings.to_string()),
     ]
     .iter()
     .map(|(key, value)| format!("{key}={value}"))
@@ -93,9 +95,11 @@ fn parse(text: &str) -> AgentPolicy {
             "port" => policy.port = value.parse().unwrap_or(DEFAULT_PORT),
             "chats" => policy.chats = parse_access(value),
             "channels" => policy.channels = parse_access(value),
-            "propose" => policy.propose = flag,
+            "write" | "propose" => policy.write = flag,
+            "review" => policy.review = flag,
             "calendar" => policy.calendar = flag,
             "transcripts" => policy.transcripts = flag,
+            "meetings" => policy.meetings = flag,
             _ => {}
         }
     }
@@ -118,9 +122,11 @@ mod tests {
                     .collect(),
             ),
             channels: Access::All,
-            propose: true,
+            write: true,
+            review: false,
             calendar: true,
             transcripts: true,
+            meetings: true,
         };
         assert_eq!(parse(&serialize(&policy)), policy);
     }
@@ -132,6 +138,12 @@ mod tests {
             ..AgentPolicy::default()
         };
         assert_eq!(parse(&serialize(&policy)), policy);
+    }
+
+    #[test]
+    fn older_settings_keep_writing_and_review_it() {
+        let policy = parse("enabled=true\npropose=true");
+        assert!(policy.write && policy.review);
     }
 
     #[test]
@@ -147,7 +159,7 @@ mod tests {
         assert_eq!(load(&store), AgentPolicy::default());
         let policy = AgentPolicy {
             enabled: true,
-            propose: true,
+            write: true,
             ..AgentPolicy::default()
         };
         save(&store, &policy);

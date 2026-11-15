@@ -8,25 +8,25 @@ use calling::{
     AttendeeLimits, CallCommand, CallState, CallUpdate, CameraDevice, CaptionEntry, CaptionState, ContentShare,
     DeviceChoice, DeviceLists, EndKind, EndReason, HoldState, MeetingCapability, MeetingRole,
     MeetingTarget, Progress, Reaction, Replacement, RosterEntry, ShareKind, ShareSource, SpeakingDetector, StatsSample, VideoHub,
-    VideoPicture, VideoWant,
+    SharePicker, VideoPicture, VideoWant,
 };
 use teams_core::RecordingPolicy;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::background::BackgroundPick;
-use super::health::{HealthBanner, HealthState};
 use super::bubbles::ChatBubble;
 use super::fullscreen::FullscreenState;
+use super::health::{HealthBanner, HealthState};
+use super::options_dialog::OptionsDialog;
 use super::pictures::CallPictures;
+use super::push_to_talk::PushToTalk;
+use super::report::SharedRecorder;
+use super::share_view::ShareStage;
 use super::stage_layout::{
     FILMSTRIP_MAX, RECENT_SPEAKER, SPEAKER_HOLD, VisibleRotation, first_page_size, split_overflow,
 };
 use super::transcript::{Transcript, TranscriptEntry};
 use super::view_settings::{CallLayout, ViewSettings};
-use super::options_dialog::OptionsDialog;
-use super::push_to_talk::PushToTalk;
-use super::report::SharedRecorder;
-use super::share_view::ShareStage;
 
 pub const TEST_CALL_TITLE: &str = "Test call";
 pub const ECHO_NAME: &str = "Teams echo";
@@ -297,6 +297,8 @@ pub struct CallModel {
     pub cameras: Vec<CameraDevice>,
     pub camera: DeviceChoice,
     pub local_share: Option<String>,
+    pub share_picker: SharePicker,
+    pub share_kind: Option<ShareKind>,
     pub share_sources: Vec<ShareSource>,
     pub share_thumbnails: Vec<(ShareSource, Arc<VideoPicture>)>,
     pub last_sample: Option<StatsSample>,
@@ -367,6 +369,8 @@ impl CallModel {
             cameras: Vec::new(),
             camera: DeviceChoice::SystemDefault,
             local_share: None,
+            share_picker: SharePicker::List,
+            share_kind: None,
             share_sources: Vec::new(),
             share_thumbnails: Vec::new(),
             last_sample: None,
@@ -506,8 +510,11 @@ impl CallModel {
                 }
                 self.local_share = label;
             }
+            CallUpdate::SharePicker(picker) => self.share_picker = picker,
+            CallUpdate::ShareKind(kind) => self.share_kind = kind,
             CallUpdate::ShareSources(sources) => {
-                self.share_thumbnails.retain(|(source, _)| sources.contains(source));
+                self.share_thumbnails
+                    .retain(|(source, _)| sources.contains(source));
                 self.share_sources = sources;
             }
             CallUpdate::ShareThumbnail { source, picture } => {
@@ -710,11 +717,18 @@ impl CallModel {
     }
 
     pub fn lobby_mris(&self) -> Vec<String> {
-        self.lobby_guests().into_iter().map(|tile| tile.mri.clone()).collect()
+        self.lobby_guests()
+            .into_iter()
+            .map(|tile| tile.mri.clone())
+            .collect()
     }
 
     pub fn someone_entered_the_lobby(&self, before: &[String]) -> bool {
-        self.can_admit() && self.lobby_guests().iter().any(|tile| !before.contains(&tile.mri))
+        self.can_admit()
+            && self
+                .lobby_guests()
+                .iter()
+                .any(|tile| !before.contains(&tile.mri))
     }
 
     pub fn can_admit(&self) -> bool {
@@ -993,7 +1007,9 @@ impl CallModel {
         let cells = match self.effective_layout() {
             _ if self.has_content() => return others,
             CallLayout::Speaker => FILMSTRIP_MAX,
-            CallLayout::Gallery | CallLayout::Content => return first_page_size(others, self.own_cells()),
+            CallLayout::Gallery | CallLayout::Content => {
+                return first_page_size(others, self.own_cells());
+            }
         };
         split_overflow(others, self.own_cells(), cells).shown
     }
@@ -1022,7 +1038,8 @@ impl CallModel {
             .map(|tile| tile.mri.clone())
             .collect();
         let held = self.stage_speaker.as_deref().is_some_and(|mri| {
-            members.iter().any(|member| member == mri) && self.rotation.spoke_within(mri, now, SPEAKER_HOLD)
+            members.iter().any(|member| member == mri)
+                && self.rotation.spoke_within(mri, now, SPEAKER_HOLD)
         });
         let stage_speaker = if held {
             self.stage_speaker.clone()
@@ -1030,9 +1047,14 @@ impl CallModel {
             self.rotation
                 .steady_speaker(now, &members)
                 .map(str::to_owned)
-                .or_else(|| self.stage_speaker.clone().filter(|mri| members.contains(mri)))
+                .or_else(|| {
+                    self.stage_speaker
+                        .clone()
+                        .filter(|mri| members.contains(mri))
+                })
         };
-        let changed = reordered || recent != self.recent_speakers || stage_speaker != self.stage_speaker;
+        let changed =
+            reordered || recent != self.recent_speakers || stage_speaker != self.stage_speaker;
         self.recent_speakers = recent;
         self.stage_speaker = stage_speaker;
         changed
@@ -1187,7 +1209,11 @@ impl CallModel {
     }
 
     pub fn can_share(&self) -> bool {
-        !self.share_sources.is_empty() && self.is_live()
+        self.is_live() && (self.uses_portal_picker() || !self.share_sources.is_empty())
+    }
+
+    pub fn uses_portal_picker(&self) -> bool {
+        self.share_picker == SharePicker::Portal
     }
 
     pub fn is_live(&self) -> bool {
@@ -1509,7 +1535,11 @@ mod tests {
             entry("8:orgid:a", "Ana", false, false),
             entry("28:bdd75849-e0a6-4cce-8fc1-d7c0d4da43e5", "", false, false),
         ]));
-        let names: Vec<&str> = model.strip_tiles().iter().map(|tile| tile.name.as_str()).collect();
+        let names: Vec<&str> = model
+            .strip_tiles()
+            .iter()
+            .map(|tile| tile.name.as_str())
+            .collect();
         assert_eq!(names, vec!["Ana"]);
         assert_eq!(model.present_others(), 1);
         let mut echo = CallModel::people(ECHO_NAME, &[(ECHO_MRI.into(), ECHO_NAME.into())]);
@@ -1945,6 +1975,16 @@ mod tests {
     }
 
     #[test]
+    fn portal_share_works_without_a_source_list() {
+        let mut model = connected_model();
+        assert!(model.share_sources.is_empty());
+        assert!(!model.can_share());
+        model.apply(CallUpdate::SharePicker(SharePicker::Portal));
+        assert!(model.uses_portal_picker());
+        assert!(model.can_share());
+    }
+
+    #[test]
     fn lobby_guests_are_listed_for_organizers_who_may_admit() {
         let mut model = meeting_with_me();
         model.apply(CallUpdate::State(CallState::Connected {
@@ -1983,12 +2023,22 @@ mod tests {
             since: Instant::now(),
         }));
         let empty = owner.lobby_mris();
-        owner.apply(CallUpdate::Roster(vec![entry("8:orgid:g1", "Gast Eins", false, true)]));
+        owner.apply(CallUpdate::Roster(vec![entry(
+            "8:orgid:g1",
+            "Gast Eins",
+            false,
+            true,
+        )]));
         assert!(owner.someone_entered_the_lobby(&empty));
         let waiting = owner.lobby_mris();
         assert!(!owner.someone_entered_the_lobby(&waiting));
         let mut guest = meeting_with_me();
-        guest.apply(CallUpdate::Roster(vec![entry("8:orgid:g1", "Gast Eins", false, true)]));
+        guest.apply(CallUpdate::Roster(vec![entry(
+            "8:orgid:g1",
+            "Gast Eins",
+            false,
+            true,
+        )]));
         assert!(!guest.someone_entered_the_lobby(&empty));
     }
 
@@ -2177,14 +2227,29 @@ mod tests {
         let start = Instant::now();
         model.apply(CallUpdate::State(CallState::Connected { since: start }));
         model.apply(CallUpdate::Captions(CaptionState::On));
-        model.note_caption(caption("1", "Ana Example", "One", true), start + Duration::from_secs(5));
-        model.note_caption(caption("2", "Bo Sample", "Two", true), start + Duration::from_secs(65));
-        model.note_caption(caption("3", "Ana Example", "Three", true), start + Duration::from_secs(70));
+        model.note_caption(
+            caption("1", "Ana Example", "One", true),
+            start + Duration::from_secs(5),
+        );
+        model.note_caption(
+            caption("2", "Bo Sample", "Two", true),
+            start + Duration::from_secs(65),
+        );
+        model.note_caption(
+            caption("3", "Ana Example", "Three", true),
+            start + Duration::from_secs(70),
+        );
         assert_eq!(model.caption_lines.len(), 2);
         assert_eq!(model.transcript.filtered("").len(), 3);
-        assert_eq!(model.transcript.filtered("")[1].offset, Duration::from_secs(65));
+        assert_eq!(
+            model.transcript.filtered("")[1].offset,
+            Duration::from_secs(65)
+        );
         model.apply(CallUpdate::Captions(CaptionState::Off));
-        model.note_caption(caption("4", "Bo Sample", "Ignored", true), start + Duration::from_secs(80));
+        model.note_caption(
+            caption("4", "Bo Sample", "Ignored", true),
+            start + Duration::from_secs(80),
+        );
         assert!(model.caption_lines.is_empty());
         assert_eq!(model.transcript.filtered("").len(), 3);
     }
@@ -2196,7 +2261,10 @@ mod tests {
         model.apply(CallUpdate::Captions(CaptionState::Starting));
         assert_eq!(model.take_ready_caption_language(), None);
         model.apply(CallUpdate::Captions(CaptionState::On));
-        assert_eq!(model.take_ready_caption_language().as_deref(), Some("de-DE"));
+        assert_eq!(
+            model.take_ready_caption_language().as_deref(),
+            Some("de-DE")
+        );
         assert_eq!(model.take_ready_caption_language(), None);
         assert_eq!(model.caption_language.as_deref(), Some("de-DE"));
     }

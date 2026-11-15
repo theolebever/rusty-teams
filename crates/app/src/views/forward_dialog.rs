@@ -1,5 +1,5 @@
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -13,6 +13,7 @@ use super::switcher::{Candidate, candidate_avatar, clamp_highlight};
 use super::widgets::{icon, symbol};
 use crate::app_state::{AppState, Selection};
 use crate::fuzzy;
+use crate::i18n::tr;
 use crate::message_actions::{ForwardItem, ForwardSource};
 use crate::notice::short_error;
 use crate::runtime;
@@ -462,7 +463,8 @@ fn preview_quote(item: &ForwardItem, lines: usize) -> Div {
         )
         .child(
             div()
-                .line_clamp(lines).text_ellipsis()
+                .line_clamp(lines)
+                .text_ellipsis()
                 .text_size(px(12.5))
                 .text_color(theme::text_muted())
                 .child(text),
@@ -526,7 +528,7 @@ impl Render for ForwardDialog {
                             .child(
                                 Button::new("forward-cancel")
                                     .ghost()
-                                    .label("Cancel")
+                                    .label(tr("common.cancel"))
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.emit(ForwardDialogEvent::Close)
                                     })),

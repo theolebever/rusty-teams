@@ -1,5 +1,5 @@
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -15,6 +15,7 @@ use super::widgets::icon;
 use crate::app_state::AppState;
 use crate::call::TransferCandidate;
 use crate::fuzzy;
+use crate::i18n::tr;
 use crate::theme::{self, ElevatedSurface as _};
 
 const MAX_RESULTS: usize = 6;
@@ -228,16 +229,31 @@ impl Render for TransferPicker {
             .child(
                 Button::new("transfer-cancel")
                     .ghost()
-                    .label("Cancel")
+                    .label(tr("common.cancel"))
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
             )
             .children(match self.mode {
                 PickerMode::Transfer => vec![
-                    self.action("transfer-consult", "Consult first", false, AppState::start_consult),
-                    self.action("transfer-now", "Transfer now", true, AppState::transfer_call_blind),
+                    self.action(
+                        "transfer-consult",
+                        "Consult first",
+                        false,
+                        AppState::start_consult,
+                    ),
+                    self.action(
+                        "transfer-now",
+                        "Transfer now",
+                        true,
+                        AppState::transfer_call_blind,
+                    ),
                 ],
                 PickerMode::Invite => {
-                    vec![self.action("transfer-invite", "Invite", true, AppState::invite_call_person)]
+                    vec![self.action(
+                        "transfer-invite",
+                        "Invite",
+                        true,
+                        AppState::invite_call_person,
+                    )]
                 }
             });
         div()

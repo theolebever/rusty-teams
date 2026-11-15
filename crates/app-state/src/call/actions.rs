@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
+use app_base::ui_locale::localize_notice;
 use calling::meeting::LiveMeeting;
 use calling::{
     AcceptMode, CallCommand, CallHandle, CallSpec, CallState, CallUpdate, Callee, CameraEffects,
-    DeviceChoice, EndReason, EngineEvent, MicSettings, MuteCommand, Reaction, RingSignal, ShareSource, VideoKey,
+    DeviceChoice, EndReason, EngineEvent, MicSettings, MuteCommand, Reaction, RingSignal,
+    ShareKind, ShareSource, VideoKey,
 };
 
 use super::background::{
@@ -46,6 +48,7 @@ const DEMO_LIVE_MINUTES: i64 = 60;
 const ORGID_PREFIX: &str = "8:orgid:";
 pub const SHARE_SOUND_META_KEY: &str = "call_share_sound";
 const CAMERA_META_KEY: &str = "call_camera";
+const VIDEO_QUALITY_META_KEY: &str = "call_video_quality";
 const INPUT_META_KEY: &str = "call_input";
 pub fn apply_sound_output(choice: &DeviceChoice) {
     let device_key = match choice {
@@ -91,6 +94,22 @@ pub fn load_camera_effects(store: &store::Store) -> CameraEffects {
         .map_or_else(CameraEffects::default, |value| {
             CameraEffects::from_meta(&value)
         })
+}
+
+pub fn load_video_quality(store: &store::Store) -> calling::VideoQuality {
+    store
+        .meta(VIDEO_QUALITY_META_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        .map_or_else(
+            calling::VideoQuality::default,
+            calling::VideoQuality::from_meta,
+        )
+}
+
+pub fn save_video_quality(store: &store::Store, quality: calling::VideoQuality) {
+    let _ = store.set_meta(VIDEO_QUALITY_META_KEY, quality.to_meta());
 }
 
 fn device_meta(choice: &DeviceChoice) -> &str {
@@ -255,6 +274,7 @@ impl AppState {
         self.call_count += 1;
         let call_id = self.call_count;
         self.call_end = None;
+        self.prejoin = None;
         let CallHandle {
             commands,
             updates,
@@ -267,6 +287,14 @@ impl AppState {
             conversation_id,
             video,
         ));
+        if let Some(call) = self.call.as_ref() {
+            crate::diagnostics::record(format!(
+                "calls: start kind={:?} incoming={} peer_chars={}",
+                call.model.kind,
+                call.model.incoming,
+                call.model.peer_name.chars().count()
+            ));
+        }
         if self.call_share_sound {
             self.send_call_command(CallCommand::SetShareSound(true));
         }
@@ -279,6 +307,7 @@ impl AppState {
         if self.call_mic != MicSettings::default() {
             self.send_call_command(CallCommand::SetMicSettings(self.call_mic));
         }
+        self.send_call_command(CallCommand::SetVideoQuality(self.call_video_quality));
         if let Some(call) = self.call.as_mut() {
             call.model.background = self.call_background.clone();
             call.model.camera = self.call_camera.clone();
@@ -460,7 +489,8 @@ impl AppState {
             CallUpdate::Roster(entries) => entries,
             other => return other,
         };
-        let user_id = |entry: &calling::RosterEntry| entry.mri.strip_prefix(ORGID_PREFIX).map(str::to_owned);
+        let user_id =
+            |entry: &calling::RosterEntry| entry.mri.strip_prefix(ORGID_PREFIX).map(str::to_owned);
         let missing: Vec<String> = entries
             .iter()
             .filter(|entry| entry.display_name.is_empty())
@@ -468,7 +498,10 @@ impl AppState {
             .collect();
         if !missing.is_empty() {
             let names = crate::people::resolve_names(self, &missing);
-            for entry in entries.iter_mut().filter(|entry| entry.display_name.is_empty()) {
+            for entry in entries
+                .iter_mut()
+                .filter(|entry| entry.display_name.is_empty())
+            {
                 if let Some(name) = user_id(entry).and_then(|id| names.get(&id)) {
                     entry.display_name = name.clone();
                 }
@@ -512,7 +545,7 @@ impl AppState {
                 return;
             }
             CallUpdate::Notice(text) => {
-                self.raise_notice(text, None, cx);
+                self.raise_notice(localize_notice(&text), None, cx);
                 return;
             }
             CallUpdate::WhiteboardUrl(url) => {
@@ -564,6 +597,7 @@ impl AppState {
             }));
         }
         let sharer_before = call.model.screen_sharer.clone();
+        let local_share_before = call.model.local_share.is_some();
         let lobby_before = call.model.lobby_mris();
         call.model.apply(update);
         if call.model.someone_entered_the_lobby(&lobby_before)
@@ -575,6 +609,14 @@ impl AppState {
             cx.emit(AppEvent::CallTone(
                 chatsvc::sounds::CallTone::MeetingReminder,
             ));
+        }
+        if !local_share_before && call.model.local_share.is_some() && call.chat_thread().is_some() {
+            call.chat_open = true;
+            call.transcript_open = false;
+            call.people_open = false;
+        }
+        if call.model.local_share.is_none() {
+            call.pictures.forget(&VideoKey::LocalScreen);
         }
         if call.model.screen_sharer != sharer_before {
             call.pictures.forget(&VideoKey::Screen);
@@ -598,6 +640,11 @@ impl AppState {
             return;
         };
         let elapsed = call.model.elapsed(Instant::now());
+        crate::diagnostics::record(format!(
+            "calls: end kind={:?} reason={reason:?} elapsed_ms={}",
+            call.model.kind,
+            elapsed.map(|value| value.as_millis()).unwrap_or(0)
+        ));
         let consult = call.consult.take();
         let notice = match &consult {
             Some(consult) if consult.transfer == ConsultTransfer::Done => {
@@ -677,6 +724,17 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn set_call_video_quality(
+        &mut self,
+        quality: calling::VideoQuality,
+        cx: &mut dyn Host,
+    ) {
+        self.call_video_quality = quality;
+        save_video_quality(&self.store, quality);
+        self.send_call_command(CallCommand::SetVideoQuality(quality));
+        cx.notify();
+    }
+
     pub fn press_push_to_talk(&mut self, _cx: &mut dyn Host) {
         let Some(call) = self.call.as_mut() else {
             return;
@@ -713,6 +771,10 @@ impl AppState {
 
     pub fn start_call_share(&mut self, source: ShareSource, _cx: &mut dyn Host) {
         self.send_call_command(CallCommand::StartShare(source));
+    }
+
+    pub fn start_portal_share(&mut self, kind: ShareKind, _cx: &mut dyn Host) {
+        self.send_call_command(CallCommand::StartPortalShare(kind));
     }
 
     pub fn stop_call_share(&mut self, _cx: &mut dyn Host) {
@@ -1252,6 +1314,9 @@ impl AppState {
         if self.call.is_some() {
             self.leave_call(cx);
         }
+        if let Some(held) = &self.held_call {
+            let _ = held.commands.send(CallCommand::Hangup);
+        }
         self.signal_ring(ring_id, RingSignal::Accept, cx);
         let conversation_id = entry.ring.thread_id.clone();
         let title = conversation_id
@@ -1420,21 +1485,24 @@ mod tests {
     use calling::{
         BackgroundChoice, CallCommand, CallControl, CallState, CallUpdate, CameraEffects,
         DeviceChoice, EndKind, EndReason, EngineEvent, HoldState, Reaction, RecordingKind,
-        StopScope, call_channel,
+        StopScope, VideoQuality, call_channel,
     };
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
     use store::{ChatRecord, MemberRecord, Store};
 
-    use super::{ActiveCall, CallModel, load_camera, load_camera_effects, load_input, load_output};
+    use super::{
+        ActiveCall, CallModel, load_camera, load_camera_effects, load_input, load_output,
+        load_video_quality,
+    };
     use crate::app_state::{AppEvent, AppState, Mode, Selection};
     use crate::call::TransferCandidate;
     use crate::call::background::BackgroundPick;
-    use crate::call::{CaptionPosition, CaptionSize, RecordAction, ViewSettings};
     use crate::call::demo::demo_ring;
-    use chatsvc::sounds::CallTone;
     use crate::call::features::room_closed_move;
     use crate::call::model::BreakoutState;
+    use crate::call::{CaptionPosition, CaptionSize, RecordAction, ViewSettings};
     use crate::data::Person;
+    use chatsvc::sounds::CallTone;
 
     fn app_with_call(cx: &mut TestAppContext) -> Entity<AppState> {
         cx.update(gpui_kit::init);
@@ -1537,7 +1605,15 @@ mod tests {
         let app = app_with_call(cx);
         let key = calling::VideoKey::Person("8:orgid:peer".into());
         let shown = |app: &Entity<AppState>, cx: &mut TestAppContext| {
-            cx.update(|cx| app.read(cx).call.as_ref().unwrap().pictures.live(&key, Instant::now()).is_some())
+            cx.update(|cx| {
+                app.read(cx)
+                    .call
+                    .as_ref()
+                    .unwrap()
+                    .pictures
+                    .live(&key, Instant::now())
+                    .is_some()
+            })
         };
         cx.update(|cx| {
             app.update(cx, |state, cx| {
@@ -1583,11 +1659,16 @@ mod tests {
                 state.select_call_output(DeviceChoice::Device("headset".into()), cx);
             })
         });
-        assert_eq!(load_input(&store), DeviceChoice::Device("headset-mic".into()));
+        assert_eq!(
+            load_input(&store),
+            DeviceChoice::Device("headset-mic".into())
+        );
         assert_eq!(load_output(&store), DeviceChoice::Device("headset".into()));
         assert_eq!(
             control.try_recv_command(),
-            Some(CallCommand::SelectInput(DeviceChoice::Device("headset-mic".into())))
+            Some(CallCommand::SelectInput(DeviceChoice::Device(
+                "headset-mic".into()
+            )))
         );
         cx.update(|cx| {
             app.update(cx, |state, cx| {
@@ -1625,12 +1706,17 @@ mod tests {
         while let Some(command) = control.try_recv_command() {
             commands.push(command);
         }
-        assert!(commands.contains(&CallCommand::SelectInput(DeviceChoice::Device(
-            "unplugged-mic".into()
-        ))));
-        assert!(commands.contains(&CallCommand::SelectOutput(DeviceChoice::Device(
-            "headset".into()
-        ))));
+        assert!(
+            commands.contains(&CallCommand::SelectInput(DeviceChoice::Device(
+                "unplugged-mic".into()
+            )))
+        );
+        assert!(
+            commands.contains(&CallCommand::SelectOutput(DeviceChoice::Device(
+                "headset".into()
+            )))
+        );
+        assert!(commands.contains(&CallCommand::SetVideoQuality(VideoQuality::Auto)));
         assert_eq!(
             load_input(&store),
             DeviceChoice::Device("unplugged-mic".into())
@@ -1681,6 +1767,28 @@ mod tests {
         assert_eq!(load_camera_effects(&store), effects);
         let reopened = cx.update(|cx| cx.new(|_| AppState::new(store.clone(), Mode::default())));
         assert_eq!(cx.update(|cx| reopened.read(cx).call_effects), effects);
+    }
+
+    #[gpui_kit::test]
+    fn the_video_quality_is_remembered_and_sent_to_the_call(cx: &mut TestAppContext) {
+        let (app, mut control) = app_with_commands(cx, live_meeting(false), None);
+        let store = cx.update(|cx| app.read(cx).store.clone());
+        assert_eq!(load_video_quality(&store), VideoQuality::Auto);
+        cx.update(|cx| {
+            app.update(cx, |state, cx| {
+                state.set_call_video_quality(VideoQuality::P1080, cx)
+            })
+        });
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::SetVideoQuality(VideoQuality::P1080))
+        );
+        assert_eq!(load_video_quality(&store), VideoQuality::P1080);
+        let reopened = cx.update(|cx| cx.new(|_| AppState::new(store.clone(), Mode::default())));
+        assert_eq!(
+            cx.update(|cx| reopened.read(cx).call_video_quality),
+            VideoQuality::P1080
+        );
     }
 
     #[gpui_kit::test]
@@ -1996,16 +2104,39 @@ mod tests {
         cx.update(|cx| {
             organizer.update(cx, |state, cx| {
                 state.run_call_record_action(RecordAction::Start(RecordingKind::AudioOnly), cx);
-                state.run_call_record_action(RecordAction::Start(RecordingKind::TranscriptOnly), cx);
+                state
+                    .run_call_record_action(RecordAction::Start(RecordingKind::TranscriptOnly), cx);
                 state.run_call_record_action(RecordAction::Stop(StopScope::RecordingOnly), cx);
                 state.run_call_record_action(RecordAction::Stop(StopScope::TranscriptionOnly), cx);
             })
         });
         let title = "Standup".to_owned();
-        assert_eq!(control.try_recv_command(), Some(CallCommand::StartRecording { kind: RecordingKind::AudioOnly, title: title.clone() }));
-        assert_eq!(control.try_recv_command(), Some(CallCommand::StartRecording { kind: RecordingKind::TranscriptOnly, title }));
-        assert_eq!(control.try_recv_command(), Some(CallCommand::StopRecording { scope: StopScope::RecordingOnly }));
-        assert_eq!(control.try_recv_command(), Some(CallCommand::StopRecording { scope: StopScope::TranscriptionOnly }));
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::StartRecording {
+                kind: RecordingKind::AudioOnly,
+                title: title.clone()
+            })
+        );
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::StartRecording {
+                kind: RecordingKind::TranscriptOnly,
+                title
+            })
+        );
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::StopRecording {
+                scope: StopScope::RecordingOnly
+            })
+        );
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::StopRecording {
+                scope: StopScope::TranscriptionOnly
+            })
+        );
         assert_eq!(control.try_recv_command(), None);
     }
 
@@ -2014,7 +2145,11 @@ mod tests {
         let (app, mut control) = app_with_commands(cx, live_meeting(false), None);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
-                state.apply_call_update(7, CallUpdate::MeetingChat("19:meeting_x@thread.v2".into()), cx);
+                state.apply_call_update(
+                    7,
+                    CallUpdate::MeetingChat("19:meeting_x@thread.v2".into()),
+                    cx,
+                );
                 state.toggle_call_chat(cx);
                 state.open_call_transcript(cx);
             })
@@ -2024,7 +2159,10 @@ mod tests {
             (call.chat_open, call.transcript_open)
         });
         assert!(!chat_open && transcript_open);
-        assert_eq!(control.try_recv_command(), Some(CallCommand::SetCaptions(true)));
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::SetCaptions(true))
+        );
         cx.update(|cx| {
             app.update(cx, |state, cx| {
                 state.apply_call_update(7, CallUpdate::Captions(calling::CaptionState::On), cx);
@@ -2041,15 +2179,24 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_spoken_language_picked_while_captions_are_off_is_sent_once_they_are_on(cx: &mut TestAppContext) {
+    fn a_spoken_language_picked_while_captions_are_off_is_sent_once_they_are_on(
+        cx: &mut TestAppContext,
+    ) {
         let (app, mut control) = app_with_commands(cx, live_meeting(false), None);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
                 state.choose_call_caption_language("de-DE", cx);
-                state.apply_call_update(7, CallUpdate::Captions(calling::CaptionState::Starting), cx);
+                state.apply_call_update(
+                    7,
+                    CallUpdate::Captions(calling::CaptionState::Starting),
+                    cx,
+                );
             })
         });
-        assert_eq!(control.try_recv_command(), Some(CallCommand::SetCaptions(true)));
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::SetCaptions(true))
+        );
         assert_eq!(control.try_recv_command(), None);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
@@ -2057,8 +2204,14 @@ mod tests {
                 state.choose_call_caption_language("fr-FR", cx);
             })
         });
-        assert_eq!(control.try_recv_command(), Some(CallCommand::SetCaptionLanguage("de-DE".into())));
-        assert_eq!(control.try_recv_command(), Some(CallCommand::SetCaptionLanguage("fr-FR".into())));
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::SetCaptionLanguage("de-DE".into()))
+        );
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::SetCaptionLanguage("fr-FR".into()))
+        );
         assert_eq!(control.try_recv_command(), None);
     }
 
@@ -2073,10 +2226,19 @@ mod tests {
         });
         let (view, stored) = cx.update(|cx| {
             let state = app.read(cx);
-            (state.call.as_ref().unwrap().model.view, ViewSettings::load(&state.store))
+            (
+                state.call.as_ref().unwrap().model.view,
+                ViewSettings::load(&state.store),
+            )
         });
-        assert_eq!((view.caption_size, view.caption_position), (CaptionSize::Large, CaptionPosition::Top));
-        assert_eq!((stored.caption_size, stored.caption_position), (CaptionSize::Large, CaptionPosition::Top));
+        assert_eq!(
+            (view.caption_size, view.caption_position),
+            (CaptionSize::Large, CaptionPosition::Top)
+        );
+        assert_eq!(
+            (stored.caption_size, stored.caption_position),
+            (CaptionSize::Large, CaptionPosition::Top)
+        );
     }
 
     fn live_one_to_one() -> CallModel {
@@ -2117,9 +2279,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_blind_transfer_names_the_target(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_blind_transfer_names_the_target(cx: &mut TestAppContext) {
         let (app, mut control) = app_with_commands(cx, live_one_to_one(), None);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
@@ -2450,7 +2610,13 @@ mod tests {
             })
             .detach();
             app.update(cx, |state, cx| {
-                state.apply_call_update(7, CallUpdate::State(CallState::Ended { reason: EndReason::Dropped }), cx);
+                state.apply_call_update(
+                    7,
+                    CallUpdate::State(CallState::Ended {
+                        reason: EndReason::Dropped,
+                    }),
+                    cx,
+                );
                 assert!(state.call.is_none());
                 assert!(state.notice.is_none());
                 let screen = state.call_end.as_ref().expect("end screen");
@@ -2468,7 +2634,13 @@ mod tests {
         let app = app_with_call(cx);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
-                state.apply_call_update(7, CallUpdate::State(CallState::Ended { reason: EndReason::Remote(EndKind::Removed) }), cx);
+                state.apply_call_update(
+                    7,
+                    CallUpdate::State(CallState::Ended {
+                        reason: EndReason::Remote(EndKind::Removed),
+                    }),
+                    cx,
+                );
                 assert!(state.call_end.is_none());
                 assert!(state.notice.is_some());
             })

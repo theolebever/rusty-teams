@@ -1,4 +1,4 @@
-use agents::{AgentAction, AgentProfile, Environment, OutputFormat};
+use agents::{AgentAction, AgentBackend, AgentProfile, Environment, OutputFormat};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
@@ -11,13 +11,15 @@ use gpui_kit::*;
 
 use super::environment_label;
 use super::runs::AgentRuns;
-use super::settings_controls::{Choice, MenuEntry, PAGE_PADDING, link_dropdown, section_header};
+use super::settings_controls::{
+    Choice, MenuEntry, PAGE_PADDING, dropdown, link_dropdown, section_header,
+};
 use super::settings_forms::resume_toggle;
+use crate::i18n::{tr, tr_args};
 use crate::runtime;
 use crate::theme;
 use crate::views::widgets::icon;
 
-const NOTE: &str = "Agents get the message, its sender and up to 20 earlier messages. Nothing is sent to Teams without you.";
 const DEFAULT_DISTRO: &str = "Ubuntu";
 const PROMPT_MIN_ROWS: usize = 4;
 const PROMPT_MAX_ROWS: usize = 8;
@@ -44,6 +46,9 @@ pub(super) struct AgentForm {
     pub command: Entity<InputState>,
     pub open_session: Entity<InputState>,
     pub mcp_flag: Entity<InputState>,
+    pub base_url: Entity<InputState>,
+    pub model: Entity<InputState>,
+    pub api_key: Entity<InputState>,
 }
 
 pub(super) struct ActionForm {
@@ -60,6 +65,10 @@ pub struct AgentsSettings {
     pub(super) agent_form: Option<AgentForm>,
     pub(super) action_form: Option<ActionForm>,
     pub(super) probe: Probe,
+    pub(super) models: Vec<String>,
+    models_request: u64,
+    pub(super) found: Vec<agents::CliHit>,
+    scanned: bool,
     form_subscriptions: Vec<Subscription>,
     _runs_subscription: Subscription,
 }
@@ -73,6 +82,10 @@ impl AgentsSettings {
             agent_form: None,
             action_form: None,
             probe: Probe::Idle,
+            models: Vec::new(),
+            models_request: 0,
+            found: Vec::new(),
+            scanned: false,
             form_subscriptions: Vec::new(),
             _runs_subscription: subscription,
         }
@@ -84,6 +97,8 @@ impl AgentsSettings {
         self.action_form = None;
         self.form_subscriptions.clear();
         self.probe = Probe::Idle;
+        self.models.clear();
+        self.models_request += 1;
         cx.notify();
     }
 
@@ -126,6 +141,13 @@ impl AgentsSettings {
             } => distro.clone(),
             _ => String::new(),
         };
+        let (base_url, model) = match &profile.backend {
+            AgentBackend::OpenAi {
+                base_url, model, ..
+            } => (base_url.clone(), model.clone()),
+            AgentBackend::Anthropic { model, .. } => (String::new(), model.clone()),
+            AgentBackend::Command => (String::new(), String::new()),
+        };
         self.agent_form = Some(AgentForm {
             id: profile.id.clone(),
             name: self.line_input(&profile.name, window, cx, Self::commit_agent),
@@ -138,9 +160,33 @@ impl AgentsSettings {
                 Self::commit_agent,
             ),
             mcp_flag: self.line_input(&profile.mcp_config_flag, window, cx, Self::commit_agent),
+            base_url: self.line_input(&base_url, window, cx, Self::commit_agent),
+            model: self.line_input(&model, window, cx, Self::commit_agent),
+            api_key: self.line_input("", window, cx, Self::commit_agent),
         });
+        let inputs = self
+            .agent_form
+            .as_ref()
+            .map(|form| (form.base_url.clone(), form.api_key.clone()));
+        if let Some((base_url, api_key)) = inputs {
+            self.watch_model_refresh(&base_url, cx);
+            self.watch_model_refresh(&api_key, cx);
+        }
         self.page = Page::Agent;
+        if profile.is_chat() {
+            self.refresh_models(cx);
+        }
         cx.notify();
+    }
+
+    fn watch_model_refresh(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
+        self.form_subscriptions
+            .push(cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    this.commit_agent(cx);
+                    this.refresh_models(cx);
+                }
+            }));
     }
 
     fn open_action(&mut self, action_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -188,6 +234,9 @@ impl AgentsSettings {
         let command = form.command.read(cx).value().to_string();
         let open_session = form.open_session.read(cx).value().to_string();
         let mcp_flag = form.mcp_flag.read(cx).value().trim().to_owned();
+        let base_url = form.base_url.read(cx).value().trim().to_owned();
+        let model = form.model.read(cx).value().trim().to_owned();
+        let typed_key = form.api_key.read(cx).value().trim().to_owned();
         self.runs.update(cx, |runs, cx| {
             runs.update_settings(
                 |settings| {
@@ -196,20 +245,96 @@ impl AgentsSettings {
                         return;
                     };
                     agent.name = name;
-                    agent.command = command;
-                    agent.open_session_command = open_session;
-                    agent.mcp_config_flag = mcp_flag;
-                    if let Environment::Wsl {
-                        distro: Some(current),
-                    } = &mut agent.environment
-                    {
-                        *current = distro;
+                    if agent.is_chat() {
+                        match &mut agent.backend {
+                            AgentBackend::OpenAi {
+                                base_url: url,
+                                model: current,
+                                api_key,
+                            } => {
+                                *url = base_url;
+                                *current = model;
+                                if !typed_key.is_empty() {
+                                    *api_key = typed_key;
+                                }
+                            }
+                            AgentBackend::Anthropic {
+                                model: current,
+                                api_key,
+                            } => {
+                                *current = model;
+                                if !typed_key.is_empty() {
+                                    *api_key = typed_key;
+                                }
+                            }
+                            AgentBackend::Command => {}
+                        }
+                    } else {
+                        agent.command = command;
+                        agent.open_session_command = open_session;
+                        agent.mcp_config_flag = mcp_flag;
+                        if let Environment::Wsl {
+                            distro: Some(current),
+                        } = &mut agent.environment
+                        {
+                            *current = distro;
+                        }
                     }
                 },
                 cx,
             )
         });
-        self.probe = Probe::Idle;
+    }
+
+    pub(super) fn set_model(&mut self, model: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &self.agent_form else {
+            return;
+        };
+        form.model
+            .update(cx, |input, cx| input.set_value(model, window, cx));
+        self.commit_agent(cx);
+    }
+
+    pub(super) fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.current_agent(cx) else {
+            return;
+        };
+        if !profile.is_chat() {
+            return;
+        }
+        self.models_request += 1;
+        let ticket = self.models_request;
+        self.probe = Probe::Running;
+        cx.notify();
+        let receiver = runtime::spawn(async move { agents::list_models(&profile).await });
+        cx.spawn(async move |this, cx| {
+            let result = receiver
+                .await
+                .unwrap_or_else(|_| Err("cancelled".to_owned()));
+            this.update(cx, |this, cx| {
+                if this.models_request != ticket {
+                    return;
+                }
+                match result {
+                    Ok(names) => {
+                        let count = names.len();
+                        this.models = names;
+                        this.probe = Probe::Found(if count == 1 {
+                            "1 model".to_owned()
+                        } else {
+                            format!("{count} models")
+                        });
+                    }
+                    Err(error) => {
+                        this.models.clear();
+                        this.probe = Probe::Missing(error);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn commit_action(&mut self, cx: &mut Context<Self>) {
@@ -294,6 +419,18 @@ impl AgentsSettings {
         self.update_action(cx, move |action| action.agent_id = agent_id);
     }
 
+    pub(super) fn set_write_with(&mut self, agent_id: String, cx: &mut Context<Self>) {
+        self.runs.update(cx, |runs, cx| {
+            runs.update_settings(|settings| settings.write_with = agent_id, cx)
+        });
+    }
+
+    pub(super) fn rescan(&mut self, cx: &mut Context<Self>) {
+        self.found = agents::scan_clis();
+        self.scanned = true;
+        cx.notify();
+    }
+
     pub(super) fn set_resume_interrupted_runs(&mut self, resume: bool, cx: &mut Context<Self>) {
         self.runs.update(cx, |runs, cx| {
             runs.update_settings(|settings| settings.resume_interrupted_runs = resume, cx)
@@ -368,6 +505,10 @@ impl AgentsSettings {
         let Some(profile) = self.current_agent(cx) else {
             return;
         };
+        if profile.is_chat() {
+            self.refresh_models(cx);
+            return;
+        }
         if profile.command.trim().is_empty() {
             self.probe = Probe::Missing("The command is empty".to_owned());
             cx.notify();
@@ -406,16 +547,43 @@ impl AgentsSettings {
 
     fn add_agent(&mut self, preset: AgentProfile, window: &mut Window, cx: &mut Context<Self>) {
         let mut id = String::new();
+        let chat = preset.is_chat();
+        let mut args = std::collections::HashMap::new();
+        args.insert("name".to_owned(), preset.name.clone());
+        let answer_label = tr_args("agents.settings.answer_with", &args);
         self.runs.update(cx, |runs, cx| {
-            runs.update_settings(|settings| id = settings.add_agent(preset), cx)
+            runs.update_settings(
+                |settings| {
+                    id = settings.add_agent(preset);
+                    if chat {
+                        let mut action = AgentAction::answer_this(&id);
+                        action.extra_args.clear();
+                        action.label = answer_label;
+                        action.id = agents::unique_id(&format!("answer-{id}"), |candidate| {
+                            settings.actions.iter().any(|action| action.id == candidate)
+                        });
+                        settings.actions.push(action);
+                    }
+                },
+                cx,
+            )
         });
         self.open_agent(&id, window, cx);
     }
 
     fn add_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut id = String::new();
+        let label = tr("agents.settings.new_action");
         self.runs.update(cx, |runs, cx| {
-            runs.update_settings(|settings| id = settings.add_action(), cx)
+            runs.update_settings(
+                |settings| {
+                    id = settings.add_action();
+                    if let Some(action) = settings.actions.last_mut() {
+                        action.label = label;
+                    }
+                },
+                cx,
+            )
         });
         self.open_action(&id, window, cx);
     }
@@ -429,6 +597,57 @@ impl AgentsSettings {
                 cx,
             )
         });
+    }
+}
+
+fn write_with_label(settings: &agents::AgentSettings) -> String {
+    if settings.write_with.is_empty() {
+        return "Microsoft Copilot".to_owned();
+    }
+    settings
+        .agents
+        .iter()
+        .find(|agent| agent.id == settings.write_with && agent.is_chat())
+        .map(|agent| agent.name.clone())
+        .unwrap_or_else(|| "Microsoft Copilot".to_owned())
+}
+
+fn write_with_entries(
+    settings: &agents::AgentSettings,
+    this: &Entity<AgentsSettings>,
+) -> Vec<MenuEntry> {
+    let mut entries = vec![write_with_entry(
+        this,
+        "Microsoft Copilot",
+        "",
+        settings.write_with.is_empty(),
+    )];
+    for agent in settings.agents.iter().filter(|agent| agent.is_chat()) {
+        entries.push(write_with_entry(
+            this,
+            &agent.name,
+            &agent.id,
+            settings.write_with == agent.id,
+        ));
+    }
+    entries
+}
+
+fn write_with_entry(
+    this: &Entity<AgentsSettings>,
+    label: &str,
+    agent_id: &str,
+    selected: bool,
+) -> MenuEntry {
+    let (this, agent_id) = (this.clone(), agent_id.to_owned());
+    let choose: Choice = std::rc::Rc::new(move |_, cx| {
+        let agent_id = agent_id.clone();
+        this.update(cx, |this, cx| this.set_write_with(agent_id, cx))
+    });
+    MenuEntry {
+        label: label.to_owned(),
+        selected,
+        choose,
     }
 }
 
@@ -498,7 +717,17 @@ fn small_button(id: (&'static str, usize), name: IconName, enabled: bool) -> Sta
 
 impl AgentsSettings {
     fn list_page(&mut self, cx: &mut Context<Self>) -> Div {
+        if !self.scanned {
+            self.found = agents::scan_clis();
+            self.scanned = true;
+        }
         let settings = self.runs.read(cx).settings().clone();
+        let found: Vec<agents::CliHit> = self
+            .found
+            .iter()
+            .filter(|hit| !agents::already_installed(&settings.agents, &hit.profile))
+            .cloned()
+            .collect();
         let this = cx.entity();
         let preset_entries: Vec<MenuEntry> = AgentProfile::presets()
             .into_iter()
@@ -541,8 +770,12 @@ impl AgentsSettings {
                         .into_any_element(),
                 ),
                 agent.name.clone(),
-                environment_label(&agent.environment),
-                Some(agent.command.clone()),
+                if agent.is_chat() {
+                    agent.backend_label()
+                } else {
+                    environment_label(&agent.environment)
+                },
+                agent.is_command().then(|| agent.command.clone()),
             )
             .on_click(move |_, window, cx| {
                 open.update(cx, |this, cx| this.open_agent(&id, window, cx))
@@ -555,7 +788,8 @@ impl AgentsSettings {
                 .agents
                 .iter()
                 .find(|agent| agent.id == action.agent_id)
-                .map_or("Unknown agent", |agent| agent.name.as_str());
+                .map(|agent| agent.name.clone())
+                .unwrap_or_else(|| tr("agents.settings.unknown_agent"));
             list_row(
                 ("action-row", index),
                 None,
@@ -590,18 +824,86 @@ impl AgentsSettings {
                     ),
             )
         });
+        let write_entries = write_with_entries(&settings, &this);
+        let write_label = write_with_label(&settings);
+        let rescan = this.clone();
+        let found_rows = found.iter().enumerate().map(|(index, hit)| {
+            let (this, profile) = (this.clone(), hit.profile.clone());
+            list_row(
+                ("found-cli", index),
+                None,
+                hit.profile.name.clone(),
+                hit.binary.display().to_string(),
+                Some(hit.profile.command.clone()),
+            )
+            .child(
+                Button::new(("add-found", index))
+                    .link()
+                    .label(tr("common.add"))
+                    .on_click(move |_, window, cx| {
+                        let profile = profile.clone();
+                        this.update(cx, |this, cx| this.add_agent(profile, window, cx))
+                    }),
+            )
+        });
+        let on_computer = tr("agents.settings.on_this_computer");
+        let agents_header = tr("agents.settings.agents_header");
+        let actions_header = tr("agents.settings.actions_header");
         v_flex()
             .w_full()
             .child(section_header(
-                "AGENTS",
+                on_computer.clone(),
+                Some(
+                    Button::new("rescan-clis")
+                        .link()
+                        .label(tr("agents.settings.scan_again"))
+                        .on_click(move |_, _, cx| rescan.update(cx, |this, cx| this.rescan(cx)))
+                        .into_any_element(),
+                ),
+            ))
+            .child(v_flex().w_full().px(px(8.)).children(found_rows).when(
+                found.is_empty(),
+                |rows| {
+                    rows.child(
+                        div()
+                            .px(px(12.))
+                            .py(px(8.))
+                            .text_size(px(12.))
+                            .text_color(theme::text_muted())
+                            .child(tr("agents.settings.no_cli_found")),
+                    )
+                },
+            ))
+            .child(section_header(
+                agents_header.clone(),
                 Some(link_dropdown("add-agent", "+ Add agent", preset_entries).into_any_element()),
             ))
             .child(v_flex().w_full().px(px(8.)).children(agent_rows))
             .child(section_header(
-                "ACTIONS - IN THIS ORDER IN THE MENU",
+                actions_header,
                 Some(add_action.into_any_element()),
             ))
             .child(v_flex().w_full().px(px(8.)).children(action_rows))
+            .child(
+                v_flex()
+                    .w_full()
+                    .px(px(PAGE_PADDING))
+                    .pt(px(16.))
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr("agents.settings.write_with")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme::text_muted())
+                            .child(tr("agents.settings.rewrite_hint")),
+                    )
+                    .child(dropdown("write-with", write_label, write_entries)),
+            )
             .child(resume_toggle(settings.resume_interrupted_runs, this))
             .child(
                 div()
@@ -612,7 +914,7 @@ impl AgentsSettings {
                     .text_size(px(12.))
                     .line_height(relative(1.5))
                     .text_color(theme::text_faint())
-                    .child(NOTE),
+                    .child(tr("agents.settings.note")),
             )
     }
 }

@@ -1,13 +1,14 @@
 use gpui_kit::component::input::Enter;
 use gpui_kit::*;
 
+use crate::i18n::tr;
+
 use super::actions::{
     COMPOSER_KEY_CONTEXT as COMPOSER_CONTEXT, EditLastMessage, EditLink, InsertTableLine, NewChat,
-    OpenSwitcher, PastePlainText, RemoveTableLine, ReplyToHovered, ScheduleSend, ToggleBold,
-    ToggleCallMute, ToggleCode, ToggleFormatBar, ToggleItalic, ToggleStrike, ToggleSubscript,
-    ToggleSuperscript,
-    ToggleUnderline, SetParagraph, SetHeading1, SetHeading2, SetHeading3, ToggleCodeBlock,
-    ToggleQuote,
+    OpenSwitcher, PastePlainText, RemoveTableLine, ReplyToHovered, ScheduleSend, SetHeading1,
+    SetHeading2, SetHeading3, SetParagraph, ToggleBold, ToggleCallMute, ToggleCode,
+    ToggleCodeBlock, ToggleFormatBar, ToggleItalic, ToggleQuote, ToggleStrike, ToggleSubscript,
+    ToggleSuperscript, ToggleUnderline,
 };
 
 const TEXT_FIELD_CONTEXT: &str = "Input";
@@ -95,12 +96,12 @@ impl Group {
         Group::Calls,
     ];
 
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> String {
         match self {
-            Group::General => "General",
-            Group::Navigation => "Navigation",
-            Group::Composer => "Messages and composer",
-            Group::Calls => "Calls",
+            Group::General => tr("shortcuts.group.general"),
+            Group::Navigation => tr("shortcuts.group.navigation"),
+            Group::Composer => tr("shortcuts.group.composer"),
+            Group::Calls => tr("shortcuts.group.calls"),
         }
     }
 }

@@ -528,7 +528,11 @@ impl<R: Remote> SyncEngine<R> {
             self.meeting_activities(conversation_id, covered_from)
                 .await
                 .into_iter()
-                .filter(|record| state.oldest_loaded.is_none_or(|oldest| record.created_at < oldest)),
+                .filter(|record| {
+                    state
+                        .oldest_loaded
+                        .is_none_or(|oldest| record.created_at < oldest)
+                }),
         );
         self.ingest(conversation_id, records.clone())?;
         self.store.set_sync_state(
@@ -601,6 +605,7 @@ impl<R: Remote> SyncEngine<R> {
     pub(crate) fn update_chat_preview(&self, records: &[MessageRecord]) -> Result<()> {
         let (calls, lines): (Vec<&MessageRecord>, Vec<&MessageRecord>) = records
             .iter()
+            .filter(|record| crate::preview::moves_the_chat(record))
             .partition(|record| crate::preview::keeps_previous_line(record));
         let mut changed = false;
         if let Some(newest) = lines.into_iter().max_by_key(|record| record.created_at) {
@@ -656,6 +661,7 @@ fn oldest_created(page: &RemotePage) -> Option<DateTime<Utc>> {
     page.items
         .iter()
         .filter_map(|message| message.created_date_time)
+        .chain(page.oldest_at)
         .min()
 }
 

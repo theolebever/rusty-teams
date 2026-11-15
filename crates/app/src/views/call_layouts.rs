@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -18,16 +18,14 @@ use super::call_view::{own_tile, person_tile};
 use super::widgets::icon;
 use crate::app_state::AppState;
 use crate::call::{
-    ActiveCall, CallLayout, CallModel, GRID_PADDING, STRIP_GAP, SpeakerSplit,
-    StripSplit, TILE_GAP, Tile, TileSize, focus_stage_size, gallery_grid, gallery_page,
-    measured_stage, shown_bubbles, speaker_split, strip_split,
+    ActiveCall, CallLayout, CallModel, GRID_PADDING, STRIP_GAP, SpeakerSplit, StripSplit, TILE_GAP,
+    Tile, TileSize, focus_stage_size, gallery_grid, gallery_page, measured_stage, shown_bubbles,
+    speaker_split, strip_split,
 };
 use crate::theme;
 
 const MEASURE_TOLERANCE: f32 = 0.5;
 const OVERLAY_INSET: f32 = 16.;
-const DIVIDER_LINE: f32 = 4.;
-const DIVIDER_LENGTH: f32 = 48.;
 const CHIP_TOP: f32 = 12.;
 const TILE_RADIUS: f32 = 12.;
 const HIDDEN_LIST_WIDTH: f32 = 260.;
@@ -363,7 +361,11 @@ fn pager_button(
     enabled: bool,
 ) -> AnyElement {
     let app = app.clone();
-    let color = if enabled { theme::text() } else { theme::text_faint() };
+    let color = if enabled {
+        theme::text()
+    } else {
+        theme::text_faint()
+    };
     div()
         .id(id)
         .size(px(PAGER_BUTTON))
@@ -393,7 +395,14 @@ fn gallery_pager(app: &Entity<AppState>, page: usize, pages: usize) -> AnyElemen
         .items_center()
         .rounded_full()
         .bg(theme::row_hover())
-        .child(pager_button(app, "call-gallery-previous", IconName::ChevronLeft, "Previous page", false, page > 0))
+        .child(pager_button(
+            app,
+            "call-gallery-previous",
+            IconName::ChevronLeft,
+            "Previous page",
+            false,
+            page > 0,
+        ))
         .child(
             div()
                 .min_w(px(40.))
@@ -402,7 +411,14 @@ fn gallery_pager(app: &Entity<AppState>, page: usize, pages: usize) -> AnyElemen
                 .text_color(theme::text_soft())
                 .child(format!("{} / {}", page + 1, pages)),
         )
-        .child(pager_button(app, "call-gallery-next", IconName::ChevronRight, "Next page", true, page + 1 < pages))
+        .child(pager_button(
+            app,
+            "call-gallery-next",
+            IconName::ChevronRight,
+            "Next page",
+            true,
+            page + 1 < pages,
+        ))
         .into_any_element()
 }
 
@@ -442,7 +458,9 @@ fn gallery_body(
         .justify_center()
         .gap(px(TILE_GAP))
         .children(rows_of(tiles, grid.columns))
-        .when(paged, |body| body.child(gallery_pager(app, page.page, page.pages)))
+        .when(paged, |body| {
+            body.child(gallery_pager(app, page.page, page.pages))
+        })
         .into_any_element()
 }
 
@@ -453,10 +471,20 @@ fn speaker_body(
     now: Instant,
     stage: (f32, f32),
 ) -> AnyElement {
-    let SpeakerSplit { focus, others, own_cells, plan } = speaker_split(model, stage);
+    let SpeakerSplit {
+        focus,
+        others,
+        own_cells,
+        plan,
+    } = speaker_split(model, stage);
     let size = TileSize::sixteen_by_nine(plan.tile_width.floor());
     let has_filmstrip = plan.overflow.shown + own_cells + usize::from(plan.overflow.hidden > 0) > 0;
-    let focus_size = focus_stage_size(stage, GRID_PADDING, TILE_GAP, has_filmstrip.then_some(size.height));
+    let focus_size = focus_stage_size(
+        stage,
+        GRID_PADDING,
+        TILE_GAP,
+        has_filmstrip.then_some(size.height),
+    );
     let main = focus
         .as_ref()
         .and_then(|focus| render_focus_stage(app, state, focus, focus_size, now));
@@ -514,7 +542,7 @@ fn people_strip(
     now: Instant,
     stage: (f32, f32),
 ) -> Stateful<Div> {
-    let StripSplit { width, others, plan } = strip_split(model, state.call_strip_width, stage);
+    let StripSplit { others, plan } = strip_split(model, stage);
     let size = TileSize::sixteen_by_nine(plan.tile_width);
     let shown = &others[..plan.overflow.shown];
     let mut cells: Vec<AnyElement> = shown
@@ -526,40 +554,21 @@ fn people_strip(
         cells.insert(own_index, own_tile(app, state, model, size, now));
     }
     if plan.overflow.hidden > 0 {
-        cells.push(overflow_tile(app, state, size, &others[plan.overflow.shown..]));
+        cells.push(overflow_tile(
+            app,
+            state,
+            size,
+            &others[plan.overflow.shown..],
+        ));
     }
-    v_flex()
+    h_flex()
         .id("call-strip")
         .debug_selector(|| "shell/islands/main/call-stage/share-strip".into())
         .flex_none()
-        .w(px(width))
-        .items_center()
+        .w_full()
+        .justify_center()
         .gap(px(STRIP_GAP))
         .children(cells)
-}
-
-fn strip_divider(app: &Entity<AppState>, dragging: bool) -> Stateful<Div> {
-    let app = app.clone();
-    h_flex()
-        .id("call-strip-divider")
-        .debug_selector(|| "shell/islands/main/call-stage/share-divider".into())
-        .flex_none()
-        .w(px(TILE_GAP))
-        .h_full()
-        .items_center()
-        .justify_center()
-        .cursor_col_resize()
-        .child(
-            div()
-                .w(px(DIVIDER_LINE))
-                .h(px(DIVIDER_LENGTH))
-                .rounded_full()
-                .bg(if dragging { theme::accent() } else { theme::border() }),
-        )
-        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-            let pointer_x = f32::from(event.position.x);
-            app.update(cx, |state, cx| state.begin_strip_drag(pointer_x, cx));
-        })
 }
 
 fn share_body(
@@ -571,30 +580,16 @@ fn share_body(
     layout: CallLayout,
     stage: (f32, f32),
 ) -> AnyElement {
-    let move_app = app.clone();
-    let up_app = app.clone();
-    let up_out_app = app.clone();
-    let dragging = state.call.as_ref().is_some_and(|call| call.share_stage.strip_drag.is_some());
-    h_flex()
+    v_flex()
         .id("call-share-body")
         .absolute()
         .inset_0()
         .p(px(GRID_PADDING))
-        .items_center()
-        .on_mouse_move(move |event, _, cx| {
-            let pointer_x = f32::from(event.position.x);
-            move_app.update(cx, |state, cx| state.drag_strip_to(pointer_x, cx));
+        .gap(px(STRIP_GAP))
+        .when(layout != CallLayout::Content, |column| {
+            column.child(people_strip(app, state, model, now, stage))
         })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-            up_app.update(cx, |state, cx| state.end_strip_drag(cx));
-        })
-        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-            up_out_app.update(cx, |state, cx| state.end_strip_drag(cx));
-        })
-        .child(share)
-        .when(layout != CallLayout::Content, |row| {
-            row.child(strip_divider(app, dragging)).child(people_strip(app, state, model, now, stage))
-        })
+        .child(h_flex().flex_1().min_h_0().w_full().child(share))
         .into_any_element()
 }
 

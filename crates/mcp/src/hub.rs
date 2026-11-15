@@ -1,22 +1,36 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use store::{
-    AgentProposalMention, AgentProposalRecord, AgentReactionRecord, AttachmentImage, Store,
+    AgentMeetingRecord, AgentProposalMention, AgentProposalRecord, AgentReactionRecord,
+    AttachmentImage, Store,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, Semaphore};
 
 use crate::policy::AgentPolicy;
-use crate::source::ReactionInfo;
+use crate::source::{MeetingDraft, ReactionInfo};
 
 const EVENT_CAPACITY: usize = 1000;
 const CAPTION_CAPACITY: usize = 2000;
 const PENDING_STATE: &str = "pending";
 const PROPOSAL_PERMITS: usize = 4;
+const MAX_PENDING_MEETINGS: usize = 5;
+pub const MIN_WAKEUP_DELAY: Duration = Duration::from_secs(60);
+pub const MAX_WAKEUP_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
+const NOT_AN_APP_SESSION: &str = "schedule_wakeup only works in a session rusty-teams started (Answer, Build this or a send to a session); in your own session use your client's scheduling";
+
+/// A run started by rusty-teams that asks to be resumed later with `prompt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wakeup {
+    pub session_id: String,
+    pub due_at: DateTime<Utc>,
+    pub prompt: String,
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposalMention {
@@ -32,6 +46,18 @@ pub struct ProposalImage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreeWritingAsk {
+    pub minutes: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreeWriting {
+    pub until: DateTime<Utc>,
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     pub id: String,
     pub conversation_id: String,
@@ -39,9 +65,11 @@ pub struct Proposal {
     pub text: String,
     pub mentions: Vec<ProposalMention>,
     pub images: Vec<ProposalImage>,
+    pub free_writing_ask: Option<FreeWritingAsk>,
     pub agent: Option<String>,
     pub session_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub direct: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,8 +79,10 @@ pub struct NewProposal {
     pub reply_to_message_id: Option<String>,
     pub mentions: Vec<ProposalMention>,
     pub images: Vec<ProposalImage>,
+    pub free_writing_ask: Option<FreeWritingAsk>,
     pub agent: Option<String>,
     pub session_id: Option<String>,
+    pub direct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +94,7 @@ pub struct ReactionProposal {
     pub agent: Option<String>,
     pub session_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub direct: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +104,24 @@ pub struct NewReactionProposal {
     pub emoji: String,
     pub agent: Option<String>,
     pub session_id: Option<String>,
+    pub direct: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingProposal {
+    pub id: String,
+    pub draft: MeetingDraft,
+    pub agent: Option<String>,
+    pub session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingOutcome {
+    Created,
+    Discarded,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -157,11 +206,29 @@ pub enum EventKind {
         message_id: String,
         reactions: Vec<ReactionInfo>,
     },
+    FreeWritingChanged {
+        conversation_id: String,
+        until: Option<DateTime<Utc>>,
+    },
+    MeetingResolved {
+        proposal_id: String,
+        outcome: MeetingOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        join_url: Option<String>,
+    },
 }
 
 impl EventKind {
+    fn visible(&self, policy: &AgentPolicy) -> bool {
+        match self {
+            EventKind::MeetingResolved { .. } => policy.can_organize_meetings(),
+            other => policy.can_read_any_kind(other.conversation_id()),
+        }
+    }
+
     pub fn conversation_id(&self) -> &str {
         match self {
+            EventKind::MeetingResolved { .. } => "",
             EventKind::NewMessage {
                 conversation_id, ..
             }
@@ -174,6 +241,9 @@ impl EventKind {
                 conversation_id, ..
             }
             | EventKind::ReactionChanged {
+                conversation_id, ..
+            }
+            | EventKind::FreeWritingChanged {
                 conversation_id, ..
             } => conversation_id,
         }
@@ -199,6 +269,8 @@ pub enum UiEvent {
         conversation_id: String,
         message_id: String,
     },
+    MeetingProposalsChanged,
+    WakeupScheduled(Wakeup),
 }
 
 #[derive(Default)]
@@ -209,6 +281,9 @@ struct HubState {
     events: VecDeque<Event>,
     last_seq: u64,
     captions: HashMap<String, VecDeque<CaptionLine>>,
+    free_writing: HashMap<String, FreeWriting>,
+    pending_meetings: Vec<MeetingProposal>,
+    app_sessions: HashSet<String>,
 }
 
 pub struct AgentHub {
@@ -237,12 +312,89 @@ impl AgentHub {
         self.proposal_permits.clone()
     }
 
+    pub fn set_app_sessions(&self, session_ids: HashSet<String>) {
+        self.lock().app_sessions = session_ids;
+    }
+
+    pub fn schedule_wakeup(
+        &self,
+        session_id: &str,
+        delay: Duration,
+        prompt: &str,
+        reason: &str,
+    ) -> Result<Wakeup, String> {
+        if !self.lock().app_sessions.contains(session_id) {
+            return Err(NOT_AN_APP_SESSION.to_owned());
+        }
+        let delay = delay.clamp(MIN_WAKEUP_DELAY, MAX_WAKEUP_DELAY);
+        let wakeup = Wakeup {
+            session_id: session_id.to_owned(),
+            due_at: Utc::now() + chrono::Duration::from_std(delay).unwrap_or_default(),
+            prompt: prompt.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let _ = self.ui.send(UiEvent::WakeupScheduled(wakeup.clone()));
+        Ok(wakeup)
+    }
+
     pub fn set_policy(&self, policy: AgentPolicy) {
         self.lock().policy = policy;
     }
 
     pub fn policy(&self) -> AgentPolicy {
         self.lock().policy.clone()
+    }
+
+    pub fn free_writing(&self, conversation_id: &str) -> Option<FreeWriting> {
+        self.lock()
+            .free_writing
+            .get(conversation_id)
+            .filter(|grant| grant.until > Utc::now())
+            .cloned()
+    }
+
+    pub fn grant_free_writing(
+        &self,
+        conversation_id: &str,
+        until: DateTime<Utc>,
+        agent: Option<String>,
+    ) {
+        let mut state = self.lock();
+        state
+            .free_writing
+            .insert(conversation_id.to_owned(), FreeWriting { until, agent });
+        push_event(
+            &mut state,
+            EventKind::FreeWritingChanged {
+                conversation_id: conversation_id.to_owned(),
+                until: Some(until),
+            },
+        );
+        drop(state);
+        self.wake.notify_waiters();
+    }
+
+    pub fn stop_free_writing(&self, conversation_id: &str) {
+        let mut state = self.lock();
+        if state.free_writing.remove(conversation_id).is_none() {
+            return;
+        }
+        push_event(
+            &mut state,
+            EventKind::FreeWritingChanged {
+                conversation_id: conversation_id.to_owned(),
+                until: None,
+            },
+        );
+        drop(state);
+        self.wake.notify_waiters();
+    }
+
+    pub fn needs_review(&self, conversation_id: &str, agent: Option<&str>) -> bool {
+        let granted = self
+            .free_writing(conversation_id)
+            .is_some_and(|grant| grant.agent.is_none() || grant.agent.as_deref() == agent);
+        self.policy().review && !granted
     }
 
     pub fn pending_proposal(&self, conversation_id: &str) -> Option<Proposal> {
@@ -274,7 +426,12 @@ impl AgentHub {
         self.store.sweep_agent_proposal_images()?;
         let records = self.store.pending_agent_proposals()?;
         let reactions = self.store.pending_agent_reactions()?;
+        let meetings = self.store.agent_meetings()?;
         let mut state = self.lock();
+        state.pending_meetings = meetings.into_iter().map(meeting_from_record).collect();
+        if !state.pending_meetings.is_empty() {
+            let _ = self.ui.send(UiEvent::MeetingProposalsChanged);
+        }
         for record in records {
             let proposal = proposal_from_record(record);
             let _ = self.ui.send(UiEvent::ProposalChanged(proposal.clone()));
@@ -302,9 +459,11 @@ impl AgentHub {
             text: new.text,
             mentions: new.mentions,
             images: new.images,
+            free_writing_ask: new.free_writing_ask,
             agent: new.agent,
             session_id: new.session_id,
             created_at: now_millis(),
+            direct: new.direct,
         };
         self.store.insert_agent_proposal(&AgentProposalRecord {
             id: proposal.id.clone(),
@@ -381,6 +540,7 @@ impl AgentHub {
             agent: new.agent,
             session_id: new.session_id,
             created_at: now_millis(),
+            direct: new.direct,
         };
         self.store.insert_agent_reaction(&AgentReactionRecord {
             id: reaction.id.clone(),
@@ -518,7 +678,12 @@ impl AgentHub {
 
     pub async fn wait_events(&self, since: Option<u64>, timeout: Duration) -> (Vec<Event>, u64) {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut cursor = since.unwrap_or_else(|| self.lock().last_seq);
+        let last_seq = self.lock().last_seq;
+        let mut cursor = match since {
+            Some(cursor) if cursor <= last_seq => cursor,
+            Some(_) => 0,
+            None => last_seq,
+        };
         loop {
             let notified = self.wake.notified();
             tokio::pin!(notified);
@@ -534,13 +699,79 @@ impl AgentHub {
         }
     }
 
+    pub fn propose_meeting(
+        &self,
+        draft: MeetingDraft,
+        agent: Option<String>,
+        session_id: Option<String>,
+    ) -> Result<MeetingProposal, String> {
+        let mut state = self.lock();
+        if state.pending_meetings.len() >= MAX_PENDING_MEETINGS {
+            return Err(format!(
+                "{MAX_PENDING_MEETINGS} meetings already wait for the user's review; wait for meeting_resolved"
+            ));
+        }
+        let proposal = MeetingProposal {
+            id: uuid::Uuid::new_v4().to_string(),
+            draft,
+            agent,
+            session_id,
+            created_at: Utc::now(),
+        };
+        self.store
+            .insert_agent_meeting(&meeting_record(&proposal))
+            .map_err(|error| error.to_string())?;
+        state.pending_meetings.push(proposal.clone());
+        drop(state);
+        let _ = self.ui.send(UiEvent::MeetingProposalsChanged);
+        Ok(proposal)
+    }
+
+    pub fn pending_meetings(&self) -> Vec<MeetingProposal> {
+        self.lock().pending_meetings.clone()
+    }
+
+    pub fn take_meeting(&self, proposal_id: &str) -> Option<MeetingProposal> {
+        let mut state = self.lock();
+        let index = state
+            .pending_meetings
+            .iter()
+            .position(|proposal| proposal.id == proposal_id)?;
+        Some(state.pending_meetings.remove(index))
+    }
+
+    pub fn resolve_meeting(
+        &self,
+        proposal_id: &str,
+        outcome: MeetingOutcome,
+        join_url: Option<String>,
+    ) {
+        {
+            let mut state = self.lock();
+            state
+                .pending_meetings
+                .retain(|proposal| proposal.id != proposal_id);
+            let _ = self.store.delete_agent_meeting(proposal_id);
+            push_event(
+                &mut state,
+                EventKind::MeetingResolved {
+                    proposal_id: proposal_id.to_owned(),
+                    outcome,
+                    join_url,
+                },
+            );
+        }
+        self.wake.notify_waiters();
+        let _ = self.ui.send(UiEvent::MeetingProposalsChanged);
+    }
+
     fn events_after(&self, cursor: u64) -> (Vec<Event>, u64) {
         let state = self.lock();
         let events = state
             .events
             .iter()
             .filter(|event| event.seq > cursor)
-            .filter(|event| state.policy.can_read_any_kind(event.kind.conversation_id()))
+            .filter(|event| event.kind.visible(&state.policy))
             .cloned()
             .collect();
         (events, state.last_seq.max(cursor))
@@ -640,6 +871,37 @@ fn reaction_from_record(record: AgentReactionRecord) -> ReactionProposal {
         agent: record.agent,
         session_id: record.session_id,
         created_at: record.created_at,
+        direct: false,
+    }
+}
+
+fn meeting_record(proposal: &MeetingProposal) -> AgentMeetingRecord {
+    AgentMeetingRecord {
+        id: proposal.id.clone(),
+        subject: proposal.draft.subject.clone(),
+        start: proposal.draft.start,
+        end: proposal.draft.end,
+        attendees: proposal.draft.attendees.clone(),
+        description: proposal.draft.description.clone(),
+        agent: proposal.agent.clone(),
+        session_id: proposal.session_id.clone(),
+        created_at: proposal.created_at,
+    }
+}
+
+fn meeting_from_record(record: AgentMeetingRecord) -> MeetingProposal {
+    MeetingProposal {
+        id: record.id,
+        draft: MeetingDraft {
+            subject: record.subject,
+            start: record.start,
+            end: record.end,
+            attendees: record.attendees,
+            description: record.description,
+        },
+        agent: record.agent,
+        session_id: record.session_id,
+        created_at: record.created_at,
     }
 }
 
@@ -666,9 +928,11 @@ fn proposal_from_record(record: AgentProposalRecord) -> Proposal {
                 bytes: Arc::new(image.bytes),
             })
             .collect(),
+        free_writing_ask: None,
         agent: record.agent,
         session_id: record.session_id,
         created_at: record.created_at,
+        direct: false,
     }
 }
 
@@ -686,7 +950,7 @@ mod tests {
             enabled: true,
             chats: Access::All,
             channels: Access::All,
-            propose: true,
+            write: true,
             ..AgentPolicy::default()
         }
     }
@@ -718,6 +982,86 @@ mod tests {
             ..NewReactionProposal::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn at_most_five_meetings_wait_for_review() {
+        let (hub, _receiver, _store) = hub_with(open_policy());
+        let draft = crate::source::MeetingDraft {
+            subject: "Sync".to_owned(),
+            start: Utc::now(),
+            end: Utc::now(),
+            attendees: vec!["a@example.com".to_owned()],
+            description: String::new(),
+        };
+        let first = hub.propose_meeting(draft.clone(), None, None).unwrap();
+        for _ in 0..4 {
+            hub.propose_meeting(draft.clone(), None, None).unwrap();
+        }
+        assert!(hub.propose_meeting(draft.clone(), None, None).is_err());
+        hub.resolve_meeting(&first.id, MeetingOutcome::Discarded, None);
+        assert!(hub.propose_meeting(draft, None, None).is_ok());
+    }
+
+    #[test]
+    fn a_meeting_waiting_for_review_survives_a_restart() {
+        let (hub, _receiver, store) = hub_with(open_policy());
+        let draft = crate::source::MeetingDraft {
+            subject: "Sync".to_owned(),
+            start: Utc::now(),
+            end: Utc::now(),
+            attendees: vec!["a@example.com".to_owned()],
+            description: "Agenda".to_owned(),
+        };
+        let kept = hub
+            .propose_meeting(draft.clone(), Some("claude".to_owned()), None)
+            .unwrap();
+        let resolved = hub.propose_meeting(draft, None, None).unwrap();
+        hub.resolve_meeting(&resolved.id, MeetingOutcome::Created, None);
+        let (sender, _restarted_receiver) = unbounded_channel();
+        let restarted = AgentHub::new(store, open_policy(), sender);
+        restarted.restore_pending().unwrap();
+        let restored = restarted.pending_meetings();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            (
+                restored[0].id.as_str(),
+                restored[0].draft.description.as_str(),
+                restored[0].agent.as_deref()
+            ),
+            (kept.id.as_str(), "Agenda", Some("claude"))
+        );
+    }
+
+    #[test]
+    fn a_free_writing_window_skips_review_until_it_ends_or_stops() {
+        let (hub, _receiver, _store) = hub_with(open_policy());
+        let claude = Some("claude");
+        assert!(hub.needs_review("c1", claude));
+        hub.grant_free_writing(
+            "c1",
+            Utc::now() + chrono::Duration::minutes(15),
+            Some("claude".to_owned()),
+        );
+        assert!(!hub.needs_review("c1", claude));
+        assert!(hub.needs_review("c1", Some("codex")));
+        assert!(hub.needs_review("c1", None));
+        assert!(hub.needs_review("c2", claude));
+        hub.stop_free_writing("c1");
+        assert!(hub.needs_review("c1", claude));
+        hub.grant_free_writing("c1", Utc::now() - chrono::Duration::seconds(1), None);
+        assert!(hub.needs_review("c1", claude));
+        let kinds: Vec<Option<DateTime<Utc>>> = hub
+            .events_after(0)
+            .0
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::FreeWritingChanged { until, .. } => Some(until),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds[1], None);
     }
 
     #[test]
@@ -815,6 +1159,15 @@ mod tests {
         let (events, next) = hub.wait_events(Some(next), SHORT).await;
         assert_eq!(events.len(), 1);
         assert_eq!(next, 2);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_from_before_a_restart_starts_over() {
+        let (hub, _ui, _store) = hub_with(open_policy());
+        hub.user_typing("c1");
+        let (events, next) = hub.wait_events(Some(500), SHORT).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(next, 1);
     }
 
     #[tokio::test]
@@ -1009,5 +1362,21 @@ mod tests {
             .unwrap();
         assert_eq!(store.agent_proposal_image_count(&kept.id).unwrap(), 1);
         assert_eq!(store.agent_proposal_image_count("old").unwrap(), 0);
+    }
+
+    #[test]
+    fn only_sessions_the_app_started_can_schedule_a_wakeup() {
+        let (hub, mut events, _store) = hub_with(open_policy());
+        assert!(
+            hub.schedule_wakeup("desktop", Duration::from_secs(600), "check", "PR")
+                .is_err()
+        );
+        hub.set_app_sessions(HashSet::from(["app-run".to_owned()]));
+        let before = Utc::now();
+        let wakeup = hub
+            .schedule_wakeup("app-run", Duration::from_secs(5), "check CI", "PR 7")
+            .unwrap();
+        assert!(wakeup.due_at >= before + chrono::Duration::seconds(60));
+        assert_eq!(events.try_recv().unwrap(), UiEvent::WakeupScheduled(wakeup));
     }
 }

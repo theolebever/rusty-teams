@@ -20,6 +20,10 @@ use crate::app_state::AppState;
 use crate::notice::truncated;
 use crate::runtime;
 
+mod wakeups;
+
+pub use wakeups::PendingWakeup;
+
 const STEP_LIMIT: usize = 50;
 const VISIBLE_STEPS: usize = 6;
 const VISIBLE_LOG_LINES: usize = 20;
@@ -283,6 +287,7 @@ pub struct AgentRuns {
     ticking: bool,
     progress_saved_at: Option<Instant>,
     progress_unsaved: bool,
+    wakeups: Vec<PendingWakeup>,
 }
 
 impl EventEmitter<AgentRunsEvent> for AgentRuns {}
@@ -292,6 +297,7 @@ impl AgentRuns {
         let store = app.read(cx).store.clone();
         let settings = run_store::load_settings(&store);
         let mut runs = run_store::load_runs(&store);
+        let wakeups = wakeups::load(&store);
         let interrupted = runs.iter().any(AgentRun::is_running);
         let infos: Vec<RestoreInfo> = runs
             .iter()
@@ -344,9 +350,12 @@ impl AgentRuns {
             ticking: false,
             progress_saved_at: None,
             progress_unsaved: false,
+            wakeups,
         };
+        mcp_bridge::set_app_sessions(agent_runs.app_session_ids(), cx);
         agent_runs.ensure_ticking(cx);
         agent_runs.start_resumes(cx);
+        agent_runs.arm_wakeups(cx);
         agent_runs
     }
 
@@ -548,6 +557,7 @@ impl AgentRuns {
 
     fn persist(&mut self, cx: &App) {
         run_store::save_runs(&self.app.read(cx).store, &self.runs);
+        mcp_bridge::set_app_sessions(self.app_session_ids(), cx);
         self.progress_saved_at = Some(Instant::now());
         self.progress_unsaved = false;
     }
@@ -838,14 +848,22 @@ impl AgentRuns {
             return;
         };
         let prompt = run.pending_prompt.clone().unwrap_or_default();
-        let planned = self.launch_plan(&run, &prompt, cx);
-        if let Some(run) = self.run_mut(run_id) {
-            run.pending_prompt = None;
-            if run.current_step == QUEUED_STEP {
-                run.started_at = Utc::now();
-                run.push_step("Starting".to_owned());
-            }
+        if let Some(profile) = self
+            .settings
+            .agents
+            .iter()
+            .find(|agent| agent.id == run.agent_id)
+            .cloned()
+            .filter(|profile| profile.is_chat())
+        {
+            self.mark_launching(run_id);
+            let endpoint = mcp_bridge::endpoint(cx);
+            self.spawn_chat(run_id, profile, prompt, endpoint, cx);
+            self.persist(cx);
+            return;
         }
+        let planned = self.launch_plan(&run, &prompt, cx);
+        self.mark_launching(run_id);
         match planned {
             Ok((plan, format)) => self.spawn(run_id, plan, format, cx),
             Err(message) => self.finish(
@@ -896,6 +914,54 @@ impl AgentRuns {
         )
         .map(|plan| (plan, profile.output))
         .map_err(|error| error.to_string())
+    }
+
+    fn mark_launching(&mut self, run_id: u64) {
+        if let Some(run) = self.run_mut(run_id) {
+            run.pending_prompt = None;
+            if run.current_step == QUEUED_STEP {
+                run.started_at = Utc::now();
+                run.push_step("Starting".to_owned());
+            }
+        }
+    }
+
+    fn spawn_chat(
+        &mut self,
+        run_id: u64,
+        profile: AgentProfile,
+        prompt: String,
+        endpoint: Option<McpEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let (updates_sender, mut updates) = mpsc::unbounded_channel();
+        let (stop_sender, stop_receiver) = oneshot::channel();
+        self.stops.insert(run_id, stop_sender);
+        if let Some(run) = self.run_mut(run_id) {
+            run.launch_session_id = Some(run.session_id.clone());
+            run.launched = true;
+        }
+        let outcome = runtime::spawn(super::chat_run::run_chat(
+            profile,
+            prompt,
+            endpoint,
+            updates_sender,
+            stop_receiver,
+        ));
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = updates.recv().await {
+                if this
+                    .update(cx, |runs, cx| runs.apply_update(run_id, update, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let outcome = outcome.await.ok();
+            this.update(cx, |runs, cx| runs.finish(run_id, outcome, cx))
+                .ok();
+        })
+        .detach();
     }
 
     fn spawn(
@@ -958,6 +1024,7 @@ impl AgentRuns {
             RunEvent::SessionId(session_id) if session_id != run.session_id => {
                 let previous = std::mem::replace(&mut run.session_id, session_id.clone());
                 self.move_lane(&previous, &session_id);
+                self.save_wakeups(cx);
                 self.persist(cx);
             }
             _ => return,
@@ -974,12 +1041,20 @@ impl AgentRuns {
                 }
             }
         }
+        for wakeup in &mut self.wakeups {
+            if wakeup.session_id == from {
+                wakeup.session_id = to.to_owned();
+            }
+        }
     }
 
     fn finish(&mut self, run_id: u64, outcome: Option<RunOutcome>, cx: &mut Context<Self>) {
         self.stops.remove(&run_id);
         self.stopping.remove(&run_id);
         let was_resuming = self.resuming.remove(&run_id);
+        let wakeup_step = self
+            .get(run_id)
+            .and_then(|run| self.wakeup_step(&run.session_id));
         let Some(run) = self.run_mut(run_id).filter(|run| run.is_running()) else {
             return;
         };
@@ -988,10 +1063,10 @@ impl AgentRuns {
         match outcome.map(|outcome| outcome.status) {
             Some(RunStatus::Completed { final_text }) => {
                 let line = truncated(first_line(&final_text), DONE_STEP_CHARS);
-                run.current_step = if line.is_empty() {
-                    "Done".to_owned()
-                } else {
-                    format!("Done - {line}")
+                run.current_step = match wakeup_step {
+                    Some(step) => step,
+                    None if line.is_empty() => "Done".to_owned(),
+                    None => format!("Done - {line}"),
                 };
                 run.final_text = final_text;
                 run.state = RunState::Done;
@@ -1094,6 +1169,9 @@ impl AgentRuns {
         if self.stopping.contains(&run_id) {
             return;
         }
+        if let Some(session_id) = self.get(run_id).map(|run| run.session_id.clone()) {
+            self.cancel_wakeup(&session_id, cx);
+        }
         if let Some(stop) = self.stops.remove(&run_id) {
             self.stopping.insert(run_id);
             let _ = stop.send(());
@@ -1194,6 +1272,8 @@ impl AgentRuns {
             return;
         };
         run.dismissed = true;
+        let session_id = run.session_id.clone();
+        self.cancel_wakeup(&session_id, cx);
         self.persist(cx);
         cx.notify();
     }
@@ -1211,7 +1291,7 @@ pub(super) mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use agents::{AgentAction, AgentProfile, AgentSettings, Environment, OutputFormat};
+    use agents::{AgentAction, AgentProfile, AgentSettings};
     use chrono::TimeZone;
     use store::{MessageRecord, Store};
 
@@ -1237,11 +1317,8 @@ pub(super) mod tests {
         let profile = AgentProfile {
             id: "fake".to_owned(),
             name: "Fake".to_owned(),
-            environment: Environment::Host,
             command: command.to_owned(),
-            output: OutputFormat::ClaudeStreamJson,
-            open_session_command: String::new(),
-            mcp_config_flag: String::new(),
+            ..AgentProfile::default()
         };
         let action = AgentAction {
             id: "ask".to_owned(),
@@ -1402,7 +1479,7 @@ pub(super) mod tests {
                 let queued = runs.read(cx).get(second).unwrap();
                 assert_eq!(queued.current_step, "Queued");
                 let prompt = queued.pending_prompt.clone().unwrap();
-                assert!(prompt.contains("propose_message") && prompt.contains("m1"));
+                assert!(prompt.contains("write_message") && prompt.contains("m1"));
                 assert!(prompt.ends_with("\n\ntwo"));
                 assert_eq!(queued.extra, "two");
                 assert_eq!(queued.session_id, session_id);
@@ -1674,7 +1751,7 @@ pub(super) mod tests {
             });
             let received = reader.join().unwrap();
             assert!(received.contains("live-session"));
-            assert!(received.contains("propose_message"));
+            assert!(received.contains("write_message"));
             assert!(received.contains("19:chat"));
             assert!(received.starts_with(r#"{"type":"auth","token":"tok"}"#));
         }
@@ -1973,6 +2050,77 @@ pub(super) mod tests {
                         .iter()
                         .any(|(_, text)| text == "Resumed after restart")
                 );
+            });
+        }
+
+        fn wakeup_in(session_id: &str, seconds: i64) -> mcp::Wakeup {
+            mcp::Wakeup {
+                session_id: session_id.to_owned(),
+                due_at: chrono::Utc::now() + chrono::Duration::seconds(seconds),
+                prompt: "check CI".to_owned(),
+                reason: "PR 31".to_owned(),
+            }
+        }
+
+        #[gpui_kit::test]
+        fn a_due_wakeup_resumes_the_session_and_survives_a_restart(cx: &mut TestAppContext) {
+            let (app, runs) = setup(cx, "sh -c 'true' --session-id {session_id}");
+            let first = cx.update(|cx| {
+                runs.update(cx, |runs, cx| {
+                    runs.start_with("ask", "19:chat", "m1", "", StartOptions::default(), cx)
+                })
+                .unwrap()
+            });
+            wait_until_finished(cx, &runs, first);
+            let session_id = cx.update(|cx| runs.read(cx).get(first).unwrap().session_id.clone());
+            cx.update(|cx| {
+                runs.update(cx, |runs, cx| {
+                    runs.schedule_wakeup(wakeup_in(&session_id, 3600), cx)
+                });
+                let run = runs.read(cx).get(first).unwrap().clone();
+                assert!(run.current_step.starts_with("Wakes up at "));
+                assert!(runs.read(cx).app_session_ids().contains(&session_id));
+            });
+            cx.update(|cx| {
+                runs.update(cx, |runs, cx| {
+                    runs.wakeups[0].due_at = chrono::Utc::now();
+                    runs.save_wakeups(cx);
+                })
+            });
+            let reloaded = cx.update(|cx| cx.new(|cx| AgentRuns::new(app.clone(), cx)));
+            wait_until_finished(cx, &reloaded, first + 1);
+            cx.update(|cx| {
+                let woken = reloaded.read(cx).get(first + 1).unwrap().clone();
+                assert_eq!(woken.session_id, session_id);
+                assert_eq!(
+                    woken
+                        .sent_to
+                        .as_ref()
+                        .map(|target| target.session_id.as_str()),
+                    Some(session_id.as_str())
+                );
+                assert_eq!(woken.steps[0].1, "Woke up - PR 31");
+                assert!(reloaded.read(cx).wakeup_of(&session_id).is_none());
+            });
+        }
+
+        #[gpui_kit::test]
+        fn dismissing_the_run_cancels_its_wakeup(cx: &mut TestAppContext) {
+            let (_app, runs) = setup(cx, "sh -c 'true'");
+            let run_id = cx.update(|cx| {
+                runs.update(cx, |runs, cx| {
+                    runs.start_with("ask", "19:chat", "m1", "", StartOptions::default(), cx)
+                })
+                .unwrap()
+            });
+            wait_until_finished(cx, &runs, run_id);
+            cx.update(|cx| {
+                runs.update(cx, |runs, cx| {
+                    let session_id = runs.get(run_id).unwrap().session_id.clone();
+                    runs.schedule_wakeup(wakeup_in(&session_id, 3600), cx);
+                    runs.dismiss(run_id, cx);
+                    assert!(runs.wakeup_of(&session_id).is_none());
+                })
             });
         }
 

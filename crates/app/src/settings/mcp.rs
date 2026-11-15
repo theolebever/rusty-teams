@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, h_flex,
     input::{Input, InputEvent, InputState},
@@ -269,6 +269,7 @@ impl McpView {
             && port != current
         {
             agent_api::update_policy(cx, |policy| policy.port = port);
+            self.refresh_installs(cx);
         }
         self.refresh_wsl(cx);
         cx.notify();
@@ -529,7 +530,7 @@ impl McpView {
             (false, _) => ("Off - agents cannot reach Rusty Teams", theme::text_muted()),
             (true, true) => ("Could not start", theme::red_soft()),
             (true, false) => (
-                "Agents on this computer can read and propose",
+                "Agents on this computer can read and write",
                 theme::text_muted(),
             ),
         };
@@ -547,9 +548,10 @@ impl McpView {
         .or(reinstall_note);
         let url = agent_api::endpoint_url(policy.port);
         let regenerate = small_button("mcp-token-new", "New")
-            .on_click(cx.listener(|_, _, _, cx| {
+            .on_click(cx.listener(|this, _, _, cx| {
                 if let Some(api) = agent_api::handle(cx) {
                     api.update(cx, |api, cx| api.regenerate_token(cx));
+                    this.refresh_installs(cx);
                 }
             }))
             .into_any_element();
@@ -873,14 +875,30 @@ impl McpView {
             Hsla,
             bool,
             fn(&mut AgentPolicy),
-        ); 3] = [
+        ); 5] = [
             (
-                "mcp-propose",
-                "Propose messages and reactions",
-                "Card above the composer, note under a message. You decide",
+                "mcp-write",
+                "Write messages and reactions",
+                "Agents can answer in the chats and channels above",
                 theme::text_muted(),
-                policy.propose,
-                |policy| policy.propose = !policy.propose,
+                policy.write,
+                |policy| policy.write = !policy.write,
+            ),
+            (
+                "mcp-review",
+                "Review before sending",
+                if policy.review {
+                    "Card above the composer, note under a message. You decide"
+                } else {
+                    "Off: agents send and react right away, as you"
+                },
+                if policy.review {
+                    theme::text_muted()
+                } else {
+                    theme::amber()
+                },
+                policy.review,
+                |policy| policy.review = !policy.review,
             ),
             (
                 "mcp-calendar",
@@ -889,6 +907,22 @@ impl McpView {
                 theme::text_muted(),
                 policy.calendar,
                 |policy| policy.calendar = !policy.calendar,
+            ),
+            (
+                "mcp-meetings",
+                "Organize meetings",
+                if policy.review {
+                    "Free/busy of people, meeting card in Calendar. You create it"
+                } else {
+                    "Without review: agents create meetings and invite people right away"
+                },
+                if policy.review {
+                    theme::text_muted()
+                } else {
+                    theme::amber()
+                },
+                policy.meetings,
+                |policy| policy.meetings = !policy.meetings,
             ),
             (
                 "mcp-transcripts",
@@ -908,7 +942,11 @@ impl McpView {
                     .on_click(cx.listener(move |_, _, _, cx| agent_api::update_policy(cx, flip)))
             }))
             .child(note_box(
-                "Agents only see what is allowed here. They never send - you do.",
+                if policy.review {
+                    "Agents only see what is allowed here. They never send - you do."
+                } else {
+                    "Agents only see what is allowed here. Without review they send as you."
+                },
                 4.,
             ))
     }

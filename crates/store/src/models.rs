@@ -39,6 +39,7 @@ pub struct ChatRecord {
     pub last_message_deleted: bool,
     pub last_event_system: bool,
     pub keeps_stored_preview: bool,
+    pub without_last_message: bool,
 }
 
 impl ChatRecord {
@@ -445,6 +446,19 @@ pub struct AgentProposalRecord {
     pub created_at: DateTime<Utc>,
     pub state: String,
     pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMeetingRecord {
+    pub id: String,
+    pub subject: String,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub attendees: Vec<String>,
+    pub description: String,
+    pub agent: Option<String>,
+    pub session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

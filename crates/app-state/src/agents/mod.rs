@@ -1,3 +1,4 @@
+mod chat_run;
 pub mod demo;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixtures;
@@ -11,13 +12,14 @@ pub mod store;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use agents::{AgentAction, AgentProfile, Environment};
 pub use app_base::agents::{lanes, settings_problems};
-use agents::{AgentAction, Environment};
 use directories::ProjectDirs;
 use gpui_kit::*;
 
 pub use runs::{
-    AgentRun, AgentRuns, AgentRunsEvent, AgentRunsHandle, RunState, StartOptions, StartRequest, needs_dialog,
+    AgentRun, AgentRuns, AgentRunsEvent, AgentRunsHandle, RunState, StartOptions, StartRequest,
+    needs_dialog,
 };
 
 use crate::app_state::{AppHandle, AppState};
@@ -39,6 +41,15 @@ fn mcp_config_directory() -> Option<PathBuf> {
 pub fn runs_handle(cx: &App) -> Option<Entity<AgentRuns>> {
     cx.try_global::<AgentRunsHandle>()
         .map(|handle| handle.0.clone())
+}
+
+/// Chat profile for «Write with», or `None` when Microsoft Copilot is selected.
+pub fn local_writer(cx: &App) -> Option<AgentProfile> {
+    runs_handle(cx)?
+        .read(cx)
+        .settings()
+        .write_with_profile()
+        .cloned()
 }
 
 pub fn agents_enabled(cx: &App) -> bool {
@@ -91,7 +102,7 @@ pub fn start_run_when_mcp_ready(
         cx.update(|cx| {
             if mcp_bridge::endpoint(cx).is_none() {
                 raise_notice(
-                    "MCP server is not running - the agent cannot propose a reply".to_owned(),
+                    "MCP server is not running - the agent cannot reply".to_owned(),
                     cx,
                 );
             }
@@ -201,7 +212,13 @@ fn open_run_session(run: &AgentRun, cx: &mut App) {
 
 pub fn environment_label(environment: &Environment) -> String {
     match environment {
-        Environment::Host => "Windows".to_owned(),
+        Environment::Host => {
+            if cfg!(windows) {
+                "Windows".to_owned()
+            } else {
+                "This computer".to_owned()
+            }
+        }
         Environment::Wsl { distro: None } => "WSL".to_owned(),
         Environment::Wsl {
             distro: Some(distro),

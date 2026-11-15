@@ -31,12 +31,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO,
     FlashWindowEx, GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE, GetWindow, GetWindowLongPtrW,
     GetWindowRect, HICON, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG, ICON_SMALL, ICONINFO, IsIconic,
-    IsWindowVisible, LWA_ALPHA, SM_CXSMICON, SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WM_SETICON, WS_CAPTION,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_THICKFRAME,
+    IsWindowVisible, LWA_ALPHA, SM_CXSMICON, SPI_GETCLIENTAREAANIMATION, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WM_SETICON,
+    WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_THICKFRAME,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -270,12 +271,6 @@ pub fn show_window_inactive(handle: NativeHandle) {
 pub fn exclude_from_capture(handle: NativeHandle) {
     unsafe {
         let _ = SetWindowDisplayAffinity(hwnd(handle), WDA_EXCLUDEFROMCAPTURE);
-    }
-}
-
-pub fn include_in_capture(handle: NativeHandle) {
-    unsafe {
-        let _ = SetWindowDisplayAffinity(hwnd(handle), WDA_NONE);
     }
 }
 
@@ -576,7 +571,9 @@ pub fn set_window_icon(window: &impl HasWindowHandle, png: &[u8]) {
 static SOUND_OUTPUT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn set_sound_output(device_key: Option<String>) {
-    *SOUND_OUTPUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = device_key;
+    *SOUND_OUTPUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = device_key;
 }
 
 fn open_sound_sink() -> Option<rodio::MixerDeviceSink> {
@@ -661,26 +658,44 @@ const ID_QUIT: &str = "quit";
 
 pub struct Tray {
     icon: TrayIcon,
+    open: MenuItem,
     sound: CheckMenuItem,
     do_not_disturb: CheckMenuItem,
+    settings: MenuItem,
+    quit: MenuItem,
     plain: Icon,
     with_dot: Icon,
+}
+
+fn tray_menu_label(key: &str) -> String {
+    crate::ui_locale::tr(key)
 }
 
 impl Tray {
     pub fn new(sound_on: bool, do_not_disturb: bool, icon_png: &[u8]) -> Option<Self> {
         let (plain, with_dot) = tray_icons(icon_png)?;
-        let open = MenuItem::with_id(ID_OPEN, "Open", true, None);
-        let sound = CheckMenuItem::with_id(ID_SOUND, "Mute sound", true, !sound_on, None);
+        let open = MenuItem::with_id(ID_OPEN, tray_menu_label("tray.open"), true, None);
+        let sound = CheckMenuItem::with_id(
+            ID_SOUND,
+            tray_menu_label("tray.mute_sound"),
+            true,
+            !sound_on,
+            None,
+        );
         let dnd = CheckMenuItem::with_id(
             ID_DO_NOT_DISTURB,
-            "Do not disturb",
+            tray_menu_label("tray.do_not_disturb"),
             true,
             do_not_disturb,
             None,
         );
-        let settings = MenuItem::with_id(ID_SETTINGS, "Notifications", true, None);
-        let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
+        let settings = MenuItem::with_id(
+            ID_SETTINGS,
+            tray_menu_label("tray.notifications"),
+            true,
+            None,
+        );
+        let quit = MenuItem::with_id(ID_QUIT, tray_menu_label("tray.quit"), true, None);
         let menu = Menu::new();
         menu.append_items(&[
             &open,
@@ -701,11 +716,26 @@ impl Tray {
             .ok()?;
         Some(Tray {
             icon,
+            open,
             sound,
             do_not_disturb: dnd,
+            settings,
+            quit,
             plain,
             with_dot,
         })
+    }
+
+    pub fn relocalize(&self) {
+        let _ = self.open.set_text(tray_menu_label("tray.open"));
+        let _ = self.sound.set_text(tray_menu_label("tray.mute_sound"));
+        let _ = self
+            .do_not_disturb
+            .set_text(tray_menu_label("tray.do_not_disturb"));
+        let _ = self
+            .settings
+            .set_text(tray_menu_label("tray.notifications"));
+        let _ = self.quit.set_text(tray_menu_label("tray.quit"));
     }
 
     pub fn poll(&self) -> Vec<TrayCommand> {
@@ -745,6 +775,7 @@ impl Tray {
     }
 
     pub fn sync(&self, sound_on: bool, do_not_disturb: bool, mention: bool) {
+        self.relocalize();
         self.sound.set_checked(!sound_on);
         self.do_not_disturb.set_checked(do_not_disturb);
         let icon = if mention { &self.with_dot } else { &self.plain };

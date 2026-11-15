@@ -174,7 +174,8 @@ impl DevicesView {
             if self.app.read(cx).mode.demo {
                 self.preview.publish_demo_frame(0);
             } else {
-                self.preview.start(&self.camera);
+                let quality = self.app.read(cx).call_video_quality;
+                self.preview.start(&self.camera, quality);
             }
         }
     }

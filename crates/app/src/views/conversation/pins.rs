@@ -11,6 +11,7 @@ use gpui_kit::component::dialog::DialogFooter;
 
 use crate::app_state::{AppState, Selection, selection_title};
 use crate::channel_menu::post_pin_dialog;
+use crate::i18n::tr;
 use crate::post_follow::post_followed;
 use crate::rows::{Row, reply_excerpt};
 use crate::runtime;
@@ -46,7 +47,7 @@ fn confirm_post_pin(
         let (state, channel_id, message_id) =
             (state.clone(), channel_id.clone(), message_id.clone());
         let cancel = Button::new("post-pin-cancel")
-            .label("Cancel")
+            .label(tr("common.cancel"))
             .on_click(|_, window, cx| window.close_dialog(cx));
         let confirm = Button::new("post-pin-confirm")
             .label(dialog.confirm)
@@ -308,8 +309,10 @@ impl ConversationView {
     }
 
     pub(super) fn request_post_follow(&mut self, message_id: &str, cx: &mut Context<Self>) {
-        if let Some(Selection::Channel(channel_id)) =
-            self.current.as_ref().map(|current| current.selection.clone())
+        if let Some(Selection::Channel(channel_id)) = self
+            .current
+            .as_ref()
+            .map(|current| current.selection.clone())
             && self.post_follow(message_id, cx).is_some()
         {
             self.app.update(cx, |state, cx| {

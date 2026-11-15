@@ -5,46 +5,45 @@ use std::sync::Arc;
 use gpui_kit::component::{elevation, h_flex, v_flex};
 use gpui_kit::*;
 
-use super::activity_panel::{ActivityPanel, ActivityPanelEvent};
 use super::actions::{NewChat, OpenSwitcher, ReplyToHovered, ToggleCallMute};
+use super::activity_panel::{ActivityPanel, ActivityPanelEvent};
+use super::calendar_event_dialog::{EventPeek, EventPeekEvent};
 use super::calendar_view::CalendarView;
+use super::call_pop_out::zoom_listener;
+use super::calls_page::CallsPage;
+use super::chat_pop_out;
+use super::connection_banner::render_connection_banner;
 use super::conversation::ConversationView;
 use super::dialog_overlay::render_task_dialog;
 use super::forward_dialog::{ForwardDialog, ForwardDialogEvent};
 use super::image_viewer::{ImageViewer, ImageViewerEvent};
-use super::prejoin_view::PrejoinView;
+use super::manage_team_page::ManageTeamPage;
+use super::notice_toast::NoticeToasts;
 use super::profile_card::{ProfileCard, ProfileCardEvent};
-use gpui_kit::prelude::FluentBuilder as _;
-use super::rail::RailView;
-use crate::chat_filter::ChatFilterPill;
-use super::calls_page::CallsPage;
 use super::quick_view_pane::{QuickViewEvent, QuickViewPane};
+use super::rail::RailView;
 use super::shortcuts::{
-    ClearChatFilters, DeclineCall, FilterMeetingChats, FilterMutedChats,
-    FilterNonMeetingChats, FilterUnreadChats, FindInChat, HangUpCall, JoinMeetingFromToast, JumpToLastReadOrNewest, NextConversation, OpenActivity,
-    OpenAgents, OpenCallsTab, OpenSettings, OpenChannelsTab, OpenChatFilter, OpenChatsTab, PopOutSelectedChat, OpenLobbyList, OpenSaved, OpenCalendar, PreviousConversation, PushToTalk,
-    Scope, ShowShortcuts, StartAudioCall, StartVideoCall, ToggleCallCamera,
-    ToggleCallHand, ToggleCallShare, ZoomIn, ZoomOut, ZoomReset, ZoomShareIn, ZoomShareOut,
-    ZoomShareReset,
+    ClearChatFilters, DeclineCall, FilterMeetingChats, FilterMutedChats, FilterNonMeetingChats,
+    FilterUnreadChats, FindInChat, HangUpCall, JoinMeetingFromToast, JumpToLastReadOrNewest,
+    NextConversation, OpenActivity, OpenAgents, OpenCalendar, OpenCallsTab, OpenChannelsTab,
+    OpenChatFilter, OpenChatsTab, OpenLobbyList, OpenSaved, OpenSettings, PopOutSelectedChat,
+    PreviousConversation, PushToTalk, Scope, ShowShortcuts, StartAudioCall, StartVideoCall,
+    ToggleCallCamera, ToggleCallHand, ToggleCallShare, ZoomIn, ZoomOut, ZoomReset, ZoomShareIn,
+    ZoomShareOut, ZoomShareReset,
 };
-use super::window_zoom::{WindowZoom, change_zoom};
-use super::call_pop_out::zoom_listener;
-use super::chat_pop_out;
 use super::shortcuts_dialog::{ShortcutsDialog, ShortcutsDialogEvent};
 use super::sidebar::{SidebarEvent, SidebarTab, SidebarView};
-use app_ui_kit::render::hooks::RenderHooks;
-use app_ui_kit::layout::{ISLAND_GAP, SIDEBAR_WIDTH};
-use super::connection_banner::render_connection_banner;
 use super::splash::{self, Phase, Splash, StartupFacts};
-use super::notice_toast::NoticeToasts;
 use super::status_menu::{own_status_button, settings_more_button};
 use super::status_message_dialog::{StatusMessageDialog, StatusMessageDialogEvent};
 use super::switcher::{Switcher, SwitcherEvent, candidates_from};
 use super::title_bar::{mode_label, render_title_bar, update_button};
+use super::window_zoom::{WindowZoom, change_zoom};
 use crate::activity_center::ActivityCenter;
 use crate::agents::{AgentRunsEvent, StartDialog, StartDialogEvent, StartRequest};
 use crate::app_state::{AppEvent, AppState, QuickView, Selection, selection_for};
 use crate::call::{CallWindows, ZoomStep};
+use crate::chat_filter::ChatFilterPill;
 use crate::notice::NoticeAction;
 use crate::notify::NotificationCenter;
 use crate::settings::{SettingsDialog, SettingsDialogEvent};
@@ -53,6 +52,9 @@ use crate::sidebar_model::Step;
 use crate::theme;
 use crate::updater::{self, IdleInputs, UpdateStatus};
 use crate::user_activity::{self, UserInput};
+use app_ui_kit::layout::{ISLAND_GAP, SIDEBAR_WIDTH};
+use app_ui_kit::render::hooks::RenderHooks;
+use gpui_kit::prelude::FluentBuilder as _;
 
 pub fn bind_keys(cx: &mut App) {
     super::composer::bind_keys(cx);
@@ -99,7 +101,10 @@ pub fn install_globals(state: &Entity<AppState>, user_input: Arc<UserInput>, cx:
 fn open_link(url: &str, cx: &mut App) {
     if let Some(handle) = cx.try_global::<crate::app_state::AppHandle>() {
         let text = opening_link_text(url);
-        handle.0.clone().update(cx, |state, cx| state.raise_notice(text, None, cx));
+        handle
+            .0
+            .clone()
+            .update(cx, |state, cx| state.raise_notice(text, None, cx));
     }
     cx.open_url(url);
 }
@@ -161,22 +166,33 @@ fn watch_releases(running_tag: &'static str, cx: &mut App) {
 
 const DEMO_UPDATE_VARIABLE: &str = "TEAMS_DEMO_UPDATE";
 
+/// Entities created with the first main window that a reopened one takes over.
+#[derive(Clone)]
+struct KeptParts {
+    activity: Entity<ActivityCenter>,
+    notifications: Entity<NotificationCenter>,
+    call_windows: Entity<CallWindows>,
+}
+
+impl Global for KeptParts {}
+
 pub struct AppShell {
     state: Entity<AppState>,
     rail: Entity<RailView>,
     sidebar: Entity<SidebarView>,
     calendar: Entity<CalendarView>,
     quick_pane: Entity<QuickViewPane>,
+    manage_team_page: Entity<ManageTeamPage>,
     calls_page: Entity<CallsPage>,
     shown_quick_view: Option<QuickView>,
     conversation: Entity<ConversationView>,
-    prejoin: Option<Entity<PrejoinView>>,
     switcher: Option<Entity<Switcher>>,
     notifications: Entity<NotificationCenter>,
     _call_windows: Entity<CallWindows>,
     forward_dialog: Option<Entity<ForwardDialog>>,
     image_viewer: Option<Entity<ImageViewer>>,
     status_dialog: Option<Entity<StatusMessageDialog>>,
+    calendar_event_peek: Option<Entity<EventPeek>>,
     shortcuts_dialog: Option<Entity<ShortcutsDialog>>,
     agent_dialog: Option<Entity<StartDialog>>,
     settings_dialog: Option<Entity<SettingsDialog>>,
@@ -228,19 +244,6 @@ impl AppShell {
         });
     }
 
-    fn sync_prejoin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = self.state.read(cx).prejoin.clone();
-        let open = self.prejoin.as_ref().map(|view| view.read(cx).pending_id());
-        match (wanted, open) {
-            (Some(pending), Some(id)) if pending.id == id => {}
-            (Some(pending), _) => {
-                let app = self.state.clone();
-                self.prejoin = Some(cx.new(|cx| PrejoinView::new(app, &pending, window, cx)));
-            }
-            (None, _) => self.prejoin = None,
-        }
-    }
-
     pub fn new(
         state: Entity<AppState>,
         open_target: Option<OpenTarget>,
@@ -248,9 +251,19 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let activity = cx.new(|cx| ActivityCenter::new(state.clone(), window, cx));
+        let kept = cx.try_global::<KeptParts>().cloned();
+        let reopened = kept.is_some();
+        let activity = match &kept {
+            Some(kept) => {
+                kept.activity
+                    .update(cx, |activity, _| activity.attach_main_window(window));
+                kept.activity.clone()
+            }
+            None => cx.new(|cx| ActivityCenter::new(state.clone(), window, cx)),
+        };
         let activity_panel = cx.new(|cx| ActivityPanel::new(state.clone(), activity.clone(), cx));
         let quick_pane = cx.new(|cx| QuickViewPane::new(state.clone(), activity.clone(), cx));
+        let manage_team_page = cx.new(|cx| ManageTeamPage::new(state.clone(), window, cx));
         let calls_page = cx.new(|cx| CallsPage::new(state.clone(), window, cx));
         let agents_panel = crate::agents::runs_handle(cx)
             .map(|runs| cx.new(|cx| crate::agents::AgentsPanel::new(runs, cx)));
@@ -293,7 +306,11 @@ impl AppShell {
                 } = event;
                 this.state
                     .update(cx, |state, cx| state.close_quick_view(cx));
-                this.open_message(conversation_id, message_id.as_deref().unwrap_or_default(), cx);
+                this.open_message(
+                    conversation_id,
+                    message_id.as_deref().unwrap_or_default(),
+                    cx,
+                );
             }),
         ];
         let agent_subscription = crate::agents::runs_handle(cx).map(|runs| {
@@ -311,9 +328,12 @@ impl AppShell {
                 },
             )
         });
-        let sidebar = cx.new(|cx| SidebarView::new(state.clone(), activity_panel, agents_panel, cx));
-        let sidebar_subscription = cx.subscribe_in(&sidebar, window, |this, _, event: &SidebarEvent, window, cx| {
-            match event {
+        let sidebar =
+            cx.new(|cx| SidebarView::new(state.clone(), activity_panel, agents_panel, cx));
+        let sidebar_subscription = cx.subscribe_in(
+            &sidebar,
+            window,
+            |this, _, event: &SidebarEvent, window, cx| match event {
                 SidebarEvent::RestoreFocus => this.restore_focus(window, cx),
                 SidebarEvent::TabChanged => {
                     if this.sidebar.read(cx).tab() == SidebarTab::Calendar {
@@ -321,11 +341,11 @@ impl AppShell {
                     }
                     cx.notify();
                 }
-                SidebarEvent::NewChannelPost => this
-                    .conversation
-                    .update(cx, |conversation, cx| conversation.start_channel_post(window, cx)),
-            }
-        });
+                SidebarEvent::NewChannelPost => this.conversation.update(cx, |conversation, cx| {
+                    conversation.start_channel_post(window, cx)
+                }),
+            },
+        );
         let calendar = cx.new(|cx| CalendarView::new(state.clone(), cx));
         let rail = cx.new(|cx| RailView::new(state.clone(), activity.clone(), sidebar.clone(), cx));
         let conversation = cx.new(|cx| ConversationView::new(state.clone(), window, cx));
@@ -349,6 +369,9 @@ impl AppShell {
                 if matches!(event, AppEvent::StatusMessage) {
                     this.open_status_dialog(window, cx);
                 }
+                if matches!(event, AppEvent::CalendarEventPeek) {
+                    this.open_calendar_event_peek(window, cx);
+                }
                 if let AppEvent::Settings(section) = event {
                     this.open_settings(*section, window, cx);
                 }
@@ -359,9 +382,29 @@ impl AppShell {
             });
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        let notifications =
-            cx.new(|cx| NotificationCenter::new(state.clone(), activity.clone(), window, cx));
-        let call_windows = cx.new(|cx| CallWindows::new(state.clone(), window, cx));
+        // The tray, notifications and calls outlive a main window closed into the tray.
+        let (notifications, call_windows) = match kept {
+            Some(kept) => {
+                kept.notifications.update(cx, |notifications, _| {
+                    notifications.attach_main_window(window)
+                });
+                kept.call_windows.update(cx, |call_windows, _| {
+                    call_windows.attach_main_window(window)
+                });
+                (kept.notifications, kept.call_windows)
+            }
+            None => {
+                let notifications = cx
+                    .new(|cx| NotificationCenter::new(state.clone(), activity.clone(), window, cx));
+                let call_windows = cx.new(|cx| CallWindows::new(state.clone(), window, cx));
+                cx.set_global(KeptParts {
+                    activity: activity.clone(),
+                    notifications: notifications.clone(),
+                    call_windows: call_windows.clone(),
+                });
+                (notifications, call_windows)
+            }
+        };
         let user_input = cx.global::<UserInputHandle>().0.clone();
         let escape_observation = cx.observe_keystrokes(|this, event, _, cx| {
             this.user_input.touch();
@@ -383,23 +426,26 @@ impl AppShell {
             }
         });
         let closing = notifications.clone();
-        window.on_window_should_close(cx, move |_, cx| !closing.read(cx).intercept_close(cx));
+        window.on_window_should_close(cx, move |_, cx| {
+            !closing.update(cx, |notifications, cx| notifications.intercept_close(cx))
+        });
         let mut shell = AppShell {
             state,
             rail,
             sidebar,
             calendar,
             quick_pane,
+            manage_team_page,
             calls_page,
             shown_quick_view: None,
             conversation,
-            prejoin: None,
             switcher: None,
             notifications,
             _call_windows: call_windows,
             forward_dialog: None,
             image_viewer: None,
             status_dialog: None,
+            calendar_event_peek: None,
             shortcuts_dialog: None,
             agent_dialog: None,
             settings_dialog: None,
@@ -432,14 +478,17 @@ impl AppShell {
             reply_to_last,
             launched_by_autostart,
         } = startup;
-        if shell
-            .notifications
-            .read(cx)
-            .startup()
-            .starts_hidden(launched_by_autostart)
+        if !reopened
+            && shell
+                .notifications
+                .read(cx)
+                .startup()
+                .starts_hidden(launched_by_autostart)
         {
             cx.defer_in(window, |this, window, cx| {
-                this.notifications.read(cx).start_in_background(window)
+                this.notifications.update(cx, |notifications, cx| {
+                    notifications.start_in_background(window, cx)
+                })
             });
         }
         if let Some(query) = switcher_query {
@@ -457,7 +506,7 @@ impl AppShell {
                 });
             });
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(updater::POLL_INTERVAL).await;
@@ -470,6 +519,7 @@ impl AppShell {
             }
         })
         .detach();
+        // Linux asks before downloading (`linux_update`); Windows downloads quietly.
         #[cfg(windows)]
         if let Some(running_tag) = app_base::version::release_tag() {
             watch_releases(running_tag, cx);
@@ -477,7 +527,7 @@ impl AppShell {
         shell
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     fn poll_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             self.update,
@@ -503,7 +553,8 @@ impl AppShell {
             composer_empty: conversation.composer_is_empty(cx),
             send_in_flight: conversation.send_in_flight(),
         });
-        if idle {
+        // On Linux only the user restarts: the update dialog or the title bar button.
+        if idle && cfg!(not(target_os = "linux")) {
             self.restart_into_update(cx);
         }
         cx.notify();
@@ -650,6 +701,26 @@ impl AppShell {
         )
         .detach();
         self.status_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    fn open_calendar_event_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(event) = self
+            .state
+            .update(cx, |state, _| state.take_calendar_event_peek_request())
+        else {
+            return;
+        };
+        self.switcher = None;
+        let app = self.state.clone();
+        let peek = cx.new(|cx| EventPeek::new(app, event, window, cx));
+        cx.subscribe_in(&peek, window, |this, _, _: &EventPeekEvent, window, cx| {
+            this.calendar_event_peek = None;
+            this.restore_focus(window, cx);
+            cx.notify();
+        })
+        .detach();
+        self.calendar_event_peek = Some(peek);
         cx.notify();
     }
 
@@ -872,12 +943,20 @@ impl AppShell {
             let phase = splash::phase(&StartupFacts {
                 elapsed: self.splash.elapsed(),
                 connection: &state.connection,
+                browser_sign_in: &state.browser_sign_in,
                 has_chats: !state.sidebar.chats.is_empty() || !state.sidebar.teams.is_empty(),
                 synced: state.last_sync.is_some(),
                 demo: state.mode.demo,
                 opening,
             });
-            if phase != Phase::Ready && cx.reduce_motion() && !self.splash.recheck_scheduled {
+            // Poll only when the progress bar is not already driving repaints
+            // (idle/stopped bar or reduced motion); otherwise the sweep animation
+            // wakes the splash often enough for BrowserSignIn status updates.
+            let needs_poll = match &phase {
+                Phase::Loading { running, .. } => !*running || cx.reduce_motion(),
+                Phase::Ready => false,
+            };
+            if needs_poll && !self.splash.recheck_scheduled {
                 self.splash.recheck_scheduled = true;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(splash::STILL_RECHECK).await;
@@ -910,6 +989,7 @@ impl AppShell {
         calendar_open: bool,
         quick_view_open: bool,
         calls_open: bool,
+        manage_team_open: bool,
     ) -> Div {
         h_flex()
             .debug_selector(|| "shell/islands".into())
@@ -919,42 +999,41 @@ impl AppShell {
             .when(show_sidebar, |islands| islands.gap(px(ISLAND_GAP)))
             .pr(px(ISLAND_GAP))
             .pb(px(ISLAND_GAP))
-            .child(
-                h_flex()
-                    .h_full()
-                    .flex_none()
-                    .child(self.rail.clone())
-                    .when(show_sidebar, |group| {
-                        group.child(
-                            self.sidebar.clone().cached(
-                                StyleRefinement::default()
-                                    .w(px(SIDEBAR_WIDTH))
-                                    .h_full()
-                                    .flex_none(),
-                            ),
-                        )
-                    }),
-            )
-            .child(match self.prejoin.clone() {
-                Some(prejoin) => prejoin
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
-                None if calls_open => self
+            .child(h_flex().h_full().flex_none().child(self.rail.clone()).when(
+                show_sidebar,
+                |group| {
+                    group.child(
+                        self.sidebar.clone().cached(
+                            StyleRefinement::default()
+                                .w(px(SIDEBAR_WIDTH))
+                                .h_full()
+                                .flex_none(),
+                        ),
+                    )
+                },
+            ))
+            .child(match () {
+                _ if calls_open => self
                     .calls_page
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
                     .into_any_element(),
-                None if quick_view_open => self
+                _ if manage_team_open => self
+                    .manage_team_page
+                    .clone()
+                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                    .into_any_element(),
+                _ if quick_view_open => self
                     .quick_pane
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
                     .into_any_element(),
-                None if calendar_open => self
+                _ if calendar_open => self
                     .calendar
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
                     .into_any_element(),
-                None => self
+                _ => self
                     .conversation
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
@@ -1000,14 +1079,14 @@ impl Render for AppShell {
                 });
             });
         }
-        self.sync_prejoin(window, cx);
         let notice = self.state.read(cx).notice.clone();
         self.toasts.sync(&self.state, notice.as_ref(), window, cx);
         let update_failure = match &self.update {
             UpdateStatus::Failed(message) => Some(message.clone()),
             _ => None,
         };
-        self.toasts.update_failed(update_failure.as_deref(), window, cx);
+        self.toasts
+            .update_failed(update_failure.as_deref(), window, cx);
         let calendar_tab = self.sidebar.read(cx).tab() == SidebarTab::Calendar;
         let chats_tab = self.sidebar.read(cx).tab() == SidebarTab::Chats;
         let calls_tab = self.sidebar.read(cx).tab() == SidebarTab::Calls;
@@ -1015,16 +1094,20 @@ impl Render for AppShell {
         let state = self.state.read(cx);
         let calendar_open = calendar_tab;
         let quick_view_open = chats_tab && state.quick_view.is_some();
+        let manage_team_open = !calendar_tab && !calls_tab && state.manage_team.is_some();
         let calls_open = calls_tab;
         let show_sidebar = !calendar_open && !calls_open;
-        let banner = state.connection_banner_text().filter(|_| !self.splash.is_up()).map(|banner| {
-            render_connection_banner(
-                banner,
-                cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |state, _| state.retry_live())
-                }),
-            )
-        });
+        let banner = state
+            .connection_banner_text()
+            .filter(|_| !self.splash.is_up())
+            .map(|banner| {
+                render_connection_banner(
+                    banner,
+                    cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |state, _| state.retry_live())
+                    }),
+                )
+            });
         let title_bar = render_title_bar(
             crate::active_appearance::current(cx).app_icon,
             mode_label(state.mode),
@@ -1085,8 +1168,9 @@ impl Render for AppShell {
             }))
             .on_action(cx.listener(|this, _: &OpenSaved, window, cx| {
                 this.close_image_viewer(window, cx);
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.open_quick_view(QuickView::Saved, cx));
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.open_quick_view(QuickView::Saved, cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &OpenCalendar, window, cx| {
                 this.close_image_viewer(window, cx);
@@ -1122,20 +1206,24 @@ impl Render for AppShell {
                     .update(cx, |sidebar, cx| sidebar.toggle_filter_box(window, cx));
             }))
             .on_action(cx.listener(|this, _: &FilterUnreadChats, _, cx| {
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.toggle_pill(ChatFilterPill::Unread, cx));
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.toggle_pill(ChatFilterPill::Unread, cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &FilterNonMeetingChats, _, cx| {
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.toggle_pill(ChatFilterPill::Chats, cx));
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.toggle_pill(ChatFilterPill::Chats, cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &FilterMeetingChats, _, cx| {
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.toggle_pill(ChatFilterPill::Meetings, cx));
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.toggle_pill(ChatFilterPill::Meetings, cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &FilterMutedChats, _, cx| {
-                this.sidebar
-                    .update(cx, |sidebar, cx| sidebar.toggle_pill(ChatFilterPill::Muted, cx));
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.toggle_pill(ChatFilterPill::Muted, cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &ClearChatFilters, window, cx| {
                 this.sidebar
@@ -1195,19 +1283,31 @@ impl Render for AppShell {
             .on_action(cx.listener(|this, _: &StartVideoCall, _, cx| {
                 this.start_call_in_open_chat(true, cx);
             }))
-            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| change_zoom(&this.state, WindowZoom::In, cx)))
-            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| change_zoom(&this.state, WindowZoom::Out, cx)))
-            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| change_zoom(&this.state, WindowZoom::Reset, cx)))
+            .on_action(
+                cx.listener(|this, _: &ZoomIn, _, cx| change_zoom(&this.state, WindowZoom::In, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ZoomOut, _, cx| {
+                    change_zoom(&this.state, WindowZoom::Out, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ZoomReset, _, cx| {
+                change_zoom(&this.state, WindowZoom::Reset, cx)
+            }))
             .on_action(zoom_listener::<ZoomShareIn>(&self.state, ZoomStep::In))
             .on_action(zoom_listener::<ZoomShareOut>(&self.state, ZoomStep::Out))
-            .on_action(zoom_listener::<ZoomShareReset>(&self.state, ZoomStep::Reset))
+            .on_action(zoom_listener::<ZoomShareReset>(
+                &self.state,
+                ZoomStep::Reset,
+            ))
             .on_action(cx.listener(|this, _: &JumpToLastReadOrNewest, _, cx| {
                 if this.image_viewer.is_some() {
                     cx.propagate();
                     return;
                 }
-                this.conversation
-                    .update(cx, |conversation, cx| conversation.jump_to_last_read_or_newest(cx));
+                this.conversation.update(cx, |conversation, cx| {
+                    conversation.jump_to_last_read_or_newest(cx)
+                });
             }))
             .on_action(cx.listener(|this, _: &ReplyToHovered, window, cx| {
                 this.close_image_viewer(window, cx);
@@ -1229,7 +1329,17 @@ impl Render for AppShell {
                     .size_full()
                     .child(title_bar)
                     .children(banner)
-                    .child(rising_in(self.islands(show_sidebar, calendar_open, quick_view_open, calls_open), &self.splash, cx)),
+                    .child(rising_in(
+                        self.islands(
+                            show_sidebar,
+                            calendar_open,
+                            quick_view_open,
+                            calls_open,
+                            manage_team_open,
+                        ),
+                        &self.splash,
+                        cx,
+                    )),
             )
             .children(splash)
             .children(self.image_viewer.clone())
@@ -1237,6 +1347,7 @@ impl Render for AppShell {
             .children(render_task_dialog(self.state.read(cx), cx))
             .children(self.forward_dialog.clone())
             .children(self.status_dialog.clone())
+            .children(self.calendar_event_peek.clone())
             .children(self.shortcuts_dialog.clone())
             .children(self.agent_dialog.clone())
             .children(self.settings_dialog.clone())
@@ -1251,9 +1362,15 @@ fn rising_in(islands: Div, splash: &Splash, cx: &App) -> AnyElement {
     }
     islands
         .relative()
-        .with_animation("startup-content-rise", Animation::new(splash::CONTENT_RISE).with_easing(ease_out_quint()), |islands, delta| {
-            islands.top(px(splash::CONTENT_RISE_OFFSET * (1. - delta))).opacity(delta)
-        })
+        .with_animation(
+            "startup-content-rise",
+            Animation::new(splash::CONTENT_RISE).with_easing(ease_out_quint()),
+            |islands, delta| {
+                islands
+                    .top(px(splash::CONTENT_RISE_OFFSET * (1. - delta)))
+                    .opacity(delta)
+            },
+        )
         .into_any_element()
 }
 
@@ -1263,7 +1380,10 @@ mod opening_link_tests {
 
     #[test]
     fn the_notice_names_the_host() {
-        assert_eq!(opening_link_text("https://example.com/a?b#c"), "Opening example.com...");
+        assert_eq!(
+            opening_link_text("https://example.com/a?b#c"),
+            "Opening example.com..."
+        );
         assert_eq!(opening_link_text("mailto:"), "Opening mailto:...");
         assert_eq!(opening_link_text(""), "Opening link...");
     }

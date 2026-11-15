@@ -1,4 +1,6 @@
 mod action;
+mod catalog;
+mod chat;
 mod context;
 mod desktop_sessions;
 mod inbox;
@@ -11,6 +13,11 @@ mod settings;
 mod template;
 
 pub use action::AgentAction;
+pub use catalog::{CliHit, already_installed, resolve_program, scan_clis};
+pub use chat::{
+    ChatMessage, ChatReply, ToolCall, ToolSpec, complete_text, list_models, next_turn,
+    probe_backend,
+};
 pub use context::{MessageContext, ThreadMessage, build_prompt, build_session_prompt};
 pub use desktop_sessions::{DesktopSession, desktop_sessions};
 pub use inbox::{DeliveryError, deliver, inbox_frame};
@@ -21,7 +28,7 @@ pub use invocation::{
 };
 pub use parse::{OutputParser, RunEvent, parse_line};
 pub use profile::{
-    AgentProfile, Environment, OutputFormat, environment_choices, output_choices,
+    AgentBackend, AgentProfile, Environment, OutputFormat, environment_choices, output_choices,
     same_environment_kind,
 };
 pub use runner::{

@@ -21,6 +21,10 @@ pub mod fuzzy;
 pub mod image_clipboard;
 pub mod image_view_math;
 pub mod inline_image;
+#[cfg(target_os = "linux")]
+pub mod linux_desktop;
+#[cfg(target_os = "linux")]
+pub mod linux_fonts;
 pub mod native_dumps;
 pub mod notify;
 pub mod read_state;
@@ -35,9 +39,19 @@ pub mod task_dialog;
 #[cfg(feature = "gpui")]
 pub mod theme;
 pub mod translation;
+pub mod ui_locale {
+    pub use app_backend::ui_locale::*;
+
+    pub fn apply_locale(locale: &str) {
+        app_backend::ui_locale::apply_locale(locale);
+        #[cfg(feature = "gpui")]
+        gpui_kit::component::set_locale(locale);
+    }
+}
 pub mod updater;
 pub mod user_activity;
-pub use app_backend::{appearance, autostart, crash_log, diagnostics, format, presence_link, runtime, version};
+pub use app_backend::{appearance, autostart, crash_log, diagnostics, format, presence_link, runtime, support, version};
 #[cfg(feature = "gpui")]
 pub mod zoom;
 pub const APP_NAME: &str = "Rusty Teams";
+

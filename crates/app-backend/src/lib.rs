@@ -1,14 +1,20 @@
 pub mod autostart;
 pub mod backend;
+pub mod browser_sign_in;
 pub mod appearance;
 pub mod crash_log;
 pub mod diagnostics;
 pub mod format;
+pub mod google_calendar_sync;
 pub mod launcher;
 pub mod notify;
 pub mod presence_link;
 pub mod runtime;
 pub mod schedule;
 pub mod schemes;
+pub mod support;
+pub mod ui_locale;
 pub mod user_activity;
 pub mod version;
+
+rust_i18n::i18n!("locales", fallback = "en");

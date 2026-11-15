@@ -178,6 +178,7 @@ mod tests {
             show_as: Default::default(),
             dial_in: None,
             response: chatsvc::ResponseType::Accepted,
+            ..Default::default()
         }
     }
 

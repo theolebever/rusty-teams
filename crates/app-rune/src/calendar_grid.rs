@@ -7,7 +7,7 @@ use rune::*;
 use crate::ui::text;
 
 #[allow(dead_code)]
-mod model {
+pub(crate) mod model {
     mod app_base {
         pub mod format {
             pub fn calendar_range_label(
@@ -54,6 +54,7 @@ fn events(rows: &[CalendarRow]) -> Vec<chatsvc::CalendarEvent> {
             show_as: Default::default(),
             dial_in: None,
             response: e.response,
+            ..Default::default()
         })
         .collect()
 }

@@ -11,6 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::*;
 
 use super::{ConversationView, ViewMode};
+use crate::i18n::tr;
 use crate::notice::short_error;
 use crate::rows::Row;
 use crate::runtime;
@@ -31,7 +32,9 @@ pub(super) fn subject_input(
     window: &mut Window,
     cx: &mut Context<ConversationView>,
 ) -> Entity<InputState> {
-    cx.new(|cx| InputState::new(window, cx).placeholder(crate::views::composer::SUBJECT_PLACEHOLDER))
+    cx.new(|cx| {
+        InputState::new(window, cx).placeholder(crate::views::composer::SUBJECT_PLACEHOLDER)
+    })
 }
 
 impl ConversationView {
@@ -161,7 +164,11 @@ impl ConversationView {
         let view = cx.entity().downgrade();
         window.on_next_frame(move |_, cx| {
             view.update(cx, |this, cx| {
-                let index = this.rows.borrow().iter().position(|row| row.key() == root_id);
+                let index = this
+                    .rows
+                    .borrow()
+                    .iter()
+                    .position(|row| row.key() == root_id);
                 if let Some(index) = index {
                     this.scroller
                         .update(cx, |scroller, cx| scroller.reveal_item_bottom(index, cx));
@@ -196,18 +203,38 @@ impl ConversationView {
         let composer = self.reply_composer(window, cx);
         let previous = self.reply_root.replace(root_id.clone());
         let changed = previous.as_deref() != Some(root_id.as_str());
+        if changed && let Some(previous) = &previous {
+            self.keep_reply_draft(previous, cx);
+        }
+        let kept = self.reply_drafts.remove(&root_id).filter(|_| changed);
         composer.update(cx, |composer, cx| {
-            if changed {
-                composer.set_text("", window, cx);
+            match &kept {
+                Some(outgoing) => composer.restore(outgoing, window, cx),
+                None if changed => composer.set_text("", window, cx),
+                None => {}
             }
-            composer.set_reply(quote, cx);
+            if quote.is_some() || kept.is_none() {
+                composer.set_reply(quote, cx);
+            }
             composer.focus(window, cx);
         });
         self.remeasure_posts(&[Some(root_id), previous], cx);
     }
 
+    fn keep_reply_draft(&mut self, root_id: &str, cx: &mut Context<Self>) {
+        let unsent = self
+            .reply_composer
+            .as_ref()
+            .and_then(|composer| composer.read(cx).unsent(cx));
+        match unsent {
+            Some(outgoing) => self.reply_drafts.insert(root_id.to_owned(), outgoing),
+            None => self.reply_drafts.remove(root_id),
+        };
+    }
+
     pub(super) fn close_reply_editor(&mut self, cx: &mut Context<Self>) {
         if let Some(root_id) = self.reply_root.take() {
+            self.keep_reply_draft(&root_id, cx);
             self.remeasure_posts(&[Some(root_id)], cx);
         }
     }
@@ -287,7 +314,8 @@ impl ConversationView {
             let view = cx.entity().downgrade();
             let announce_view = view.clone();
             let open: PostAction = Box::new(move |window, cx| {
-                view.update(cx, |this, cx| this.open_new_post(window, cx)).ok();
+                view.update(cx, |this, cx| this.open_new_post(window, cx))
+                    .ok();
             });
             let announce: PostAction = Box::new(move |window, cx| {
                 announce_view
@@ -299,14 +327,9 @@ impl ConversationView {
                     .w_full()
                     .flex_none()
                     .children(proposal_card)
-                    .child(
-                        div()
-                            .w_full()
-                            .flex_none()
-                            .px(px(20.))
-                            .py(px(12.))
-                            .child(post_in_channel_card(&self.app.read(cx).directory, open, announce)),
-                    )
+                    .child(div().w_full().flex_none().px(px(20.)).py(px(12.)).child(
+                        post_in_channel_card(&self.app.read(cx).directory, open, announce),
+                    ))
                     .into_any_element(),
             );
         }
@@ -321,10 +344,10 @@ impl ConversationView {
                     Button::new("cancel-new-post")
                         .ghost()
                         .compact()
-                        .label("Cancel")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.cancel_new_post(window, cx)
-                        })),
+                        .label(tr("common.cancel"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_new_post(window, cx)),
+                        ),
                 )
         });
         Some(

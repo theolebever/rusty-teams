@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::time::Duration;
 
-use chrono::{Local, Offset};
+use chrono::Local;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use store::SearchHit;
@@ -86,7 +86,7 @@ pub fn message_results(
     hits: Vec<SearchHit>,
     conversations: &HashMap<String, (String, Selection)>,
     today: chrono::NaiveDate,
-    offset: chrono::FixedOffset,
+    offset: app_base::format::Zone,
 ) -> Vec<MessageResult> {
     hits.into_iter()
         .filter_map(|hit| {
@@ -272,7 +272,7 @@ impl Switcher {
                 hits,
                 &self.conversations,
                 now.date_naive(),
-                now.offset().fix(),
+                app_base::format::Zone::Local,
             )
         } else {
             Vec::new()
@@ -300,9 +300,10 @@ impl Switcher {
             if !still_current {
                 return;
             }
-            let receiver = runtime::spawn(async move {
-                engine.server_suggestions(&search_session, &query).await
-            });
+            let receiver =
+                runtime::spawn(
+                    async move { engine.server_suggestions(&search_session, &query).await },
+                );
             let suggestions = match receiver.await {
                 Ok(Ok(suggestions)) => suggestions,
                 _ => return,
@@ -319,6 +320,11 @@ impl Switcher {
         if generation != self.generation {
             return;
         }
+        let held_message = self
+            .highlighted
+            .checked_sub(self.results.len() + self.people.len())
+            .and_then(|index| self.messages.get(index))
+            .map(|message| message.message_id.clone());
         let shown_titles: HashSet<String> = self
             .results
             .iter()
@@ -342,10 +348,18 @@ impl Switcher {
             &suggestions.messages,
             &self.conversations,
             now.date_naive(),
-            now.offset().fix(),
+            app_base::format::Zone::Local,
         );
         self.messages = merge_messages(&self.local_messages, server, MAX_MESSAGE_RESULTS);
-        self.highlighted = self.highlighted.min(self.result_count().saturating_sub(1));
+        let held_position = held_message.and_then(|message_id| {
+            self.messages
+                .iter()
+                .position(|message| message.message_id == message_id)
+        });
+        self.highlighted = match held_position {
+            Some(position) => self.results.len() + self.people.len() + position,
+            None => self.highlighted.min(self.result_count().saturating_sub(1)),
+        };
         cx.notify();
     }
 
@@ -380,8 +394,7 @@ impl Switcher {
             cx.emit(SwitcherEvent::PickPerson {
                 user_id: person.user_id.clone(),
             });
-        } else if let Some(message) = message_index.and_then(|index| self.messages.get(index))
-        {
+        } else if let Some(message) = message_index.and_then(|index| self.messages.get(index)) {
             cx.emit(SwitcherEvent::PickMessage {
                 selection: message.selection.clone(),
                 message_id: message.message_id.clone(),
@@ -677,10 +690,9 @@ impl Render for Switcher {
                             .items_center()
                             .child(icon(IconName::Search, 14., theme::text_muted()))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&self.input).appearance(false).bordered(false)),
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.input).appearance(false).bordered(false),
+                                ),
                             ),
                     )
                     .child(

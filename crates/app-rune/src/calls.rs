@@ -125,7 +125,10 @@ impl Preview {
         let sender = self.sender.clone();
         match calling::camera::start_camera(
             choice,
+            calling::VideoQuality::Auto,
             settings.clone(),
+            calling::camera::CameraCaptureStats::new(),
+            |_label| {},
             move |buffer| {
                 if let Some(mut picture) = calling::video_frame::picture_from_i420(buffer, 640) {
                     if settings.effects().mirror {

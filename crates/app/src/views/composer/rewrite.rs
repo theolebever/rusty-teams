@@ -10,24 +10,24 @@ use teams_core::{ComposeAction, ComposeAdjustment, Draft, OBJECT_MARK, TABLE_MAR
 
 use super::{COMPOSER_BUTTON_SIZE, COMPOSER_ICON_SIZE, Composer};
 use crate::runtime;
-use app_ui_kit::spinner::spinner;
 use crate::theme::{self, ElevatedSurface as _};
 use crate::views::widgets::symbol;
+use app_ui_kit::spinner::spinner;
 
 pub const REWRITE_BUTTON_TAG: &str = "composer/actions/copilot";
 pub const REWRITE_PANEL_TAG: &str = "composer/copilot";
 const BUTTON_LABEL: &str = "Write with Copilot";
+const REWRITE_SYSTEM: &str = "You rewrite a Teams chat draft. Reply with only the new message text. Keep the meaning. Do not add a preamble. Write in the same language as the draft.";
+const SWITCH_HINT: &str = "Choose another model under Settings > Agents, Write with.";
 const CLOSE_LABEL: &str = "Close";
 const ADJUST_LABEL: &str = "Adjust";
 const CUSTOM_LABEL: &str = "Customised";
 const CUSTOM_PLACEHOLDER: &str = "Describe how to adjust it, e.g. make it sound friendlier";
 const REPLACE_LABEL: &str = "Replace";
 const DISCLAIMER: &str = "AI-generated content may be incorrect";
-const WORKING: &str = "Copilot is writing ...";
-const FAILED: &str = "Copilot could not rewrite this:";
-const EMPTY_DRAFT: &str = "Type a message first, then let Copilot rewrite it.";
-const TEXT_ONLY: &str = "Copilot rewrites text only. Move images and tables out of the message first.";
+const COPILOT_NAME: &str = "Copilot";
 const BUTTON_ICON: &str = "auto_fix_high";
+const LOCAL_BUTTON_ICON: &str = "smart_toy";
 const PANEL_WIDTH: f32 = 600.;
 const PANEL_PADDING: f32 = 16.;
 const PANEL_RADIUS: f32 = 10.;
@@ -78,11 +78,17 @@ impl Composer {
     fn rewrite_available(&self, cx: &App) -> bool {
         let state = self.app.read(cx);
         self.editing.is_none()
-            && (state.mode.demo || state.engine.is_some())
+            && (state.mode.demo || local_writer(cx).is_some() || state.engine.is_some())
             && self
                 .conversation_id
                 .as_deref()
-                .is_some_and(|conversation_id| state.sidebar.chats.iter().any(|chat| chat.id == conversation_id))
+                .is_some_and(|conversation_id| {
+                    state
+                        .sidebar
+                        .chats
+                        .iter()
+                        .any(|chat| chat.id == conversation_id)
+                })
     }
 
     pub(super) fn render_rewrite_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -94,6 +100,12 @@ impl Composer {
             return None;
         }
         let open = self.rewrite.open;
+        let writer = local_writer(cx);
+        let local = writer.is_some();
+        let tooltip = writer
+            .as_ref()
+            .map(|profile| format!("Rewrite with {}", profile.name))
+            .unwrap_or_else(|| BUTTON_LABEL.to_owned());
         Some(
             div()
                 .id("composer-copilot")
@@ -107,11 +119,19 @@ impl Composer {
                 .cursor_pointer()
                 .when(open, |button| button.bg(theme::popup_hover()))
                 .hover(|button| button.bg(theme::popup_hover()))
-                .popup_trigger_tooltip_text(open, BUTTON_LABEL)
+                .popup_trigger_tooltip_text(open, tooltip)
                 .child(symbol(
-                    BUTTON_ICON,
+                    if local {
+                        LOCAL_BUTTON_ICON
+                    } else {
+                        BUTTON_ICON
+                    },
                     COMPOSER_ICON_SIZE,
-                    if open { theme::accent_text() } else { theme::text_muted() },
+                    if open {
+                        theme::accent_text()
+                    } else {
+                        theme::text_muted()
+                    },
                 ))
                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                     window.prevent_default();
@@ -145,17 +165,19 @@ impl Composer {
         let Some(chat_id) = self.conversation_id.clone() else {
             return;
         };
+        let writer = writer_display_name(cx);
+        let failed = failed_rewrite(&writer);
         let refusal = if draft.is_blank() {
-            Some(EMPTY_DRAFT)
+            Some(empty_draft_message(&writer))
         } else if draft.text().contains([OBJECT_MARK, TABLE_MARK]) {
-            Some(TEXT_ONLY)
+            Some(text_only_message(&writer))
         } else {
             None
         };
         if let Some(refusal) = refusal {
             self.rewrite.result = Some(RewriteResult {
                 action,
-                answer: RewriteAnswer::Failed(refusal.to_owned()),
+                answer: RewriteAnswer::Failed(refusal),
             });
             cx.notify();
             return;
@@ -166,10 +188,34 @@ impl Composer {
         });
         cx.notify();
         let user_html = draft.to_html();
-        let receiver = (!demo)
-            .then_some(engine)
-            .flatten()
-            .map(|engine| runtime::spawn(async move { engine.rewrite_draft(&chat_id, &user_html, action).await }));
+        let plain = draft.plain_text();
+        if !demo && let Some(profile) = local_writer(cx) {
+            let instruction = rewrite_instruction(&action, &plain);
+            let receiver = runtime::spawn(async move {
+                agents::complete_text(&profile, REWRITE_SYSTEM, &instruction).await
+            });
+            cx.spawn(async move |this, cx| {
+                let answer = match receiver.await {
+                    Ok(Ok(text)) => RewriteAnswer::Ready(Draft::from_markdown(&text)),
+                    Ok(Err(error)) => RewriteAnswer::Failed(format!("{failed} {error}")),
+                    Err(error) => RewriteAnswer::Failed(format!("{failed} {error}")),
+                };
+                this.update(cx, |this, cx| {
+                    if this.rewrite.generation == generation
+                        && let Some(result) = this.rewrite.result.as_mut()
+                    {
+                        result.answer = answer;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        let receiver = (!demo).then_some(engine).flatten().map(|engine| {
+            runtime::spawn(async move { engine.rewrite_draft(&chat_id, &user_html, action).await })
+        });
         let demo_answer = demo_rewrite(&draft.plain_text());
         cx.spawn(async move |this, cx| {
             let answer = match receiver {
@@ -178,9 +224,13 @@ impl Composer {
                     RewriteAnswer::Ready(Draft::from_markdown(&demo_answer))
                 }
                 Some(receiver) => match receiver.await {
-                    Ok(Ok(html)) => RewriteAnswer::Ready(Draft::from_spans(&html_to_spans(&html)).trimmed()),
-                    Ok(Err(error)) => RewriteAnswer::Failed(format!("{FAILED} {error}")),
-                    Err(error) => RewriteAnswer::Failed(format!("{FAILED} {error}")),
+                    Ok(Ok(html)) => {
+                        RewriteAnswer::Ready(Draft::from_spans(&html_to_spans(&html)).trimmed())
+                    }
+                    Ok(Err(error)) => {
+                        RewriteAnswer::Failed(format!("{failed} {error} {SWITCH_HINT}"))
+                    }
+                    Err(error) => RewriteAnswer::Failed(format!("{failed} {error} {SWITCH_HINT}")),
                 },
             };
             this.update(cx, |this, cx| {
@@ -197,12 +247,19 @@ impl Composer {
     }
 
     fn replace_with_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(RewriteAnswer::Ready(draft)) = self.rewrite.result.as_ref().map(|result| &result.answer) else {
+        let Some(RewriteAnswer::Ready(draft)) =
+            self.rewrite.result.as_ref().map(|result| &result.answer)
+        else {
             return;
         };
         let draft = draft.clone();
         self.close_rewrite();
-        self.load_draft(draft.clone(), InputContent::new(draft.text().to_owned()), window, cx);
+        self.load_draft(
+            draft.clone(),
+            InputContent::new(draft.text().to_owned()),
+            window,
+            cx,
+        );
         self.mention_inputs.clear();
         self.schedule_draft_save(cx);
         self.focus(window, cx);
@@ -214,16 +271,20 @@ impl Composer {
         self.rewrite.custom_open = true;
         if self.rewrite.custom_input.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(CUSTOM_PLACEHOLDER));
-            let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    let prompt = input.read(cx).value().trim().to_owned();
-                    if !prompt.is_empty() {
-                        input.update(cx, |input, cx| input.set_value("", window, cx));
-                        this.rewrite.custom_open = false;
-                        this.request_rewrite(ComposeAction::Custom(prompt), cx);
+            let subscription = cx.subscribe_in(
+                &input,
+                window,
+                |this, input, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        let prompt = input.read(cx).value().trim().to_owned();
+                        if !prompt.is_empty() {
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                            this.rewrite.custom_open = false;
+                            this.request_rewrite(ComposeAction::Custom(prompt), cx);
+                        }
                     }
-                }
-            });
+                },
+            );
             self.rewrite.custom_input = Some(input);
             self.rewrite._custom_events = Some(subscription);
         }
@@ -307,7 +368,12 @@ impl Composer {
         )
     }
 
-    fn chip(id: &'static str, icon: &'static str, label: &'static str, busy: bool) -> Stateful<Div> {
+    fn chip(
+        id: &'static str,
+        icon: &'static str,
+        label: &'static str,
+        busy: bool,
+    ) -> Stateful<Div> {
         h_flex()
             .id(id)
             .h(px(CHIP_HEIGHT))
@@ -322,20 +388,33 @@ impl Composer {
             .child(symbol(icon, CHIP_ICON, theme::text_soft()))
             .child(label)
             .when(busy, |chip| chip.opacity(0.5))
-            .when(!busy, |chip| chip.cursor_pointer().hover(|chip| chip.bg(theme::popup_hover())))
+            .when(!busy, |chip| {
+                chip.cursor_pointer()
+                    .hover(|chip| chip.bg(theme::popup_hover()))
+            })
     }
 
     fn choice_chip(&self, choice: Choice, busy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let (id, icon, action) = match choice {
-            Choice::Rewrite => ("composer-copilot-rewrite", BUTTON_ICON, ComposeAction::Rewrite),
-            Choice::Proofread => ("composer-copilot-proofread", "spellcheck", ComposeAction::Proofread),
+            Choice::Rewrite => (
+                "composer-copilot-rewrite",
+                BUTTON_ICON,
+                ComposeAction::Rewrite,
+            ),
+            Choice::Proofread => (
+                "composer-copilot-proofread",
+                "spellcheck",
+                ComposeAction::Proofread,
+            ),
         };
         let label = match choice {
             Choice::Rewrite => "Rewrite",
             Choice::Proofread => "Proofread",
         };
         Self::chip(id, icon, label, busy).when(!busy, |chip| {
-            chip.on_click(cx.listener(move |this, _, _, cx| this.request_rewrite(action.clone(), cx)))
+            chip.on_click(
+                cx.listener(move |this, _, _, cx| this.request_rewrite(action.clone(), cx)),
+            )
         })
     }
 
@@ -372,9 +451,9 @@ impl Composer {
         let custom = item("composer-copilot-custom", CUSTOM_LABEL)
             .on_click(cx.listener(|this, _, window, cx| this.open_custom(window, cx)));
         let adjustments = ComposeAdjustment::ALL.into_iter().map(|adjustment| {
-            item(adjustment.label(), adjustment.label()).on_click(cx.listener(move |this, _, _, cx| {
-                this.request_rewrite(ComposeAction::Adjust(adjustment), cx)
-            }))
+            item(adjustment.label(), adjustment.label()).on_click(cx.listener(
+                move |this, _, _, cx| this.request_rewrite(ComposeAction::Adjust(adjustment), cx),
+            ))
         });
         Some(
             v_flex()
@@ -419,13 +498,26 @@ impl Composer {
                     .gap(px(8.))
                     .items_center()
                     .child(spinner(16.))
-                    .child(div().text_size(px(14.)).text_color(theme::text_soft()).child(WORKING)),
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(theme::text_soft())
+                            .child(working_message(&writer_display_name(cx))),
+                    ),
             ),
-            RewriteAnswer::Failed(reason) => {
-                card.child(div().text_size(px(14.)).text_color(theme::text_soft()).child(reason.clone()))
-            }
+            RewriteAnswer::Failed(reason) => card.child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(theme::text_soft())
+                    .child(reason.clone()),
+            ),
             RewriteAnswer::Ready(draft) => card
-                .child(div().text_size(px(14.)).text_color(theme::text()).child(draft.plain_text()))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(theme::text())
+                        .child(draft.plain_text()),
+                )
                 .child(
                     h_flex()
                         .w_full()
@@ -446,12 +538,62 @@ impl Composer {
                                 .cursor_pointer()
                                 .hover(|button| button.opacity(0.85))
                                 .child(REPLACE_LABEL)
-                                .on_click(cx.listener(|this, _, window, cx| this.replace_with_rewrite(window, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.replace_with_rewrite(window, cx)
+                                })),
                         )
-                        .child(div().text_size(px(11.)).text_color(theme::text_muted()).child(DISCLAIMER)),
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme::text_muted())
+                                .child(DISCLAIMER),
+                        ),
                 ),
         })
     }
+}
+
+fn local_writer(cx: &App) -> Option<agents::AgentProfile> {
+    crate::agents::local_writer(cx)
+}
+
+fn writer_display_name(cx: &App) -> String {
+    local_writer(cx)
+        .map(|profile| profile.name)
+        .unwrap_or_else(|| COPILOT_NAME.to_owned())
+}
+
+fn working_message(name: &str) -> String {
+    format!("{name} is writing ...")
+}
+
+fn failed_rewrite(name: &str) -> String {
+    format!("{name} could not rewrite this:")
+}
+
+fn empty_draft_message(name: &str) -> String {
+    format!("Type a message first, then let {name} rewrite it.")
+}
+
+fn text_only_message(name: &str) -> String {
+    format!("{name} rewrites text only. Move images and tables out of the message first.")
+}
+
+fn rewrite_instruction(action: &ComposeAction, draft: &str) -> String {
+    let ask = match action {
+        ComposeAction::Rewrite => "Rewrite it so it is clearer.",
+        ComposeAction::Proofread => "Proofread it. Fix spelling and grammar.",
+        ComposeAction::Adjust(adjustment) => match adjustment {
+            ComposeAdjustment::Concise => "Make it shorter.",
+            ComposeAdjustment::Longer => "Make it a bit longer.",
+            ComposeAdjustment::Casual => "Make it more casual.",
+            ComposeAdjustment::Professional => "Make it more professional.",
+            ComposeAdjustment::Confident => "Make it more confident.",
+            ComposeAdjustment::Enthusiastic => "Make it more enthusiastic.",
+        },
+        ComposeAction::Custom(prompt) => prompt.as_str(),
+    };
+    format!("{ask}\n\n{draft}")
 }
 
 fn demo_rewrite(text: &str) -> String {

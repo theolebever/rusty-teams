@@ -21,15 +21,17 @@ fn main() {
     let begin = Instant::now();
     while begin.elapsed() < CAPTURE_TIME {
         std::thread::sleep(FRAME_PERIOD);
-        let (frame, had_data) = queue.next_frame();
-        if had_data {
+        if let Some(frame) = queue.next_frame() {
             frames += 1;
             if frame.iter().any(|&sample| sample != 0) {
                 loud_frames += 1;
             }
         }
     }
-    println!("process exclude mode available: {}", started.kind == LoopbackKind::ProcessExclude);
+    println!(
+        "process exclude mode available: {}",
+        started.kind == LoopbackKind::ProcessExclude
+    );
     println!("mode: {:?}", started.kind);
     if let Some(warning) = &started.warning {
         println!("warning: {warning}");

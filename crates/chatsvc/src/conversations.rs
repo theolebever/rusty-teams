@@ -82,7 +82,11 @@ impl<T: MessageTransport> Conversations<T> {
             };
             let answer = self.transport.send(Request::get(&url)).await?;
             ensure_success(&answer)?;
-            states.extend(states_in_page(&answer.body)?);
+            let page = states_in_page(&answer.body)?;
+            if page.is_empty() {
+                break;
+            }
+            states.extend(page);
             next_url = backward_link(&answer.body).filter(|link| *link != url);
         }
         Ok(states)
@@ -155,7 +159,11 @@ impl<T: MessageTransport> Conversations<T> {
     }
 
     /// Teams' chat "Hide" (`setChatVisibility`): hidden until a newer message; `None` shows it again.
-    pub async fn set_hidden_at(&self, conversation_id: &str, hidden_at_ms: Option<i64>) -> Result<()> {
+    pub async fn set_hidden_at(
+        &self,
+        conversation_id: &str,
+        hidden_at_ms: Option<i64>,
+    ) -> Result<()> {
         self.put_property(conversation_id, HIDDEN_TIME_PROPERTY, json!(hidden_at_ms))
             .await?;
         let history_hidden = hidden_at_ms.map(|millis| millis.to_string());
@@ -631,7 +639,10 @@ mod tests {
     async fn hide_puts_the_hidden_time_as_number_and_the_history_time_as_text() {
         let transport = canned(vec![(200, Value::Null); 4]);
         let conversations = Conversations::with_transport(&transport, "emea");
-        conversations.set_hidden_at("48:notes", Some(42)).await.unwrap();
+        conversations
+            .set_hidden_at("48:notes", Some(42))
+            .await
+            .unwrap();
         conversations.set_hidden_at("48:notes", None).await.unwrap();
         let requests = transport.requests.lock().unwrap();
         let writes: Vec<(String, Option<Value>)> = requests

@@ -14,6 +14,7 @@ use teams_core::{
 
 use crate::Host;
 use crate::backend::{BackendEvent, ConnectionState, Engine, LiveState};
+use crate::browser_sign_in::BrowserSignInState;
 use crate::call::{ActiveCall, CallLauncher, MissedCall, Rings};
 use crate::card_state::{CardState, TaskDialogState};
 use crate::data::{self, Directory};
@@ -39,19 +40,19 @@ pub enum QuickView {
 }
 
 impl QuickView {
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> String {
         match self {
-            QuickView::Mentions => "Mentions",
-            QuickView::Drafts => "Drafts",
-            QuickView::Saved => "Saved",
+            QuickView::Mentions => app_base::ui_locale::tr("sidebar.quick_view.mentions"),
+            QuickView::Drafts => app_base::ui_locale::tr("sidebar.quick_view.drafts"),
+            QuickView::Saved => app_base::ui_locale::tr("sidebar.quick_view.saved"),
         }
     }
 
-    pub fn empty_text(self) -> &'static str {
+    pub fn empty_text(self) -> String {
         match self {
-            QuickView::Mentions => "No mentions yet. When someone @mentions you, it shows up here.",
-            QuickView::Drafts => "No drafts. Messages you start and do not send show up here.",
-            QuickView::Saved => "No saved messages. Use Save message in the ... menu of a message.",
+            QuickView::Mentions => app_base::ui_locale::tr("sidebar.quick_view.mentions_empty"),
+            QuickView::Drafts => app_base::ui_locale::tr("sidebar.quick_view.drafts_empty"),
+            QuickView::Saved => app_base::ui_locale::tr("sidebar.quick_view.saved_empty"),
         }
     }
 }
@@ -95,6 +96,7 @@ pub enum AppEvent {
     ForwardSelection,
     ImageViewer,
     StatusMessage,
+    CalendarEventPeek,
     Settings(crate::settings_section::SettingsSection),
     Profile,
     Call,
@@ -133,6 +135,7 @@ pub struct AppState {
     pub new_chat: bool,
     pub new_chat_people: Vec<store::MemberRecord>,
     pub connection: ConnectionState,
+    pub browser_sign_in: BrowserSignInState,
     pub live: LiveState,
     pub last_sync: Option<DateTime<Utc>>,
     pub mode: Mode,
@@ -150,6 +153,7 @@ pub struct AppState {
     pub live_retry: Option<Arc<tokio::sync::Notify>>,
     pub notice_count: u64,
     pub followed_presence: Vec<crate::presence_follow::FollowedPerson>,
+    pub dismissed_absence_notices: std::collections::HashSet<String>,
     pub followed_changes: Vec<(String, &'static str)>,
     pub keep_unread: Option<String>,
     pub restorable_deletes: crate::restorable_deletes::RestorableDeletes,
@@ -159,11 +163,13 @@ pub struct AppState {
     pub(crate) warm_chats: crate::warm_chats::WarmChats,
     pub local_previews: HashMap<String, LocalPreview>,
     pub quick_view: Option<QuickView>,
+    pub manage_team: Option<crate::manage_team::ManageTeam>,
     pub scheduled: Vec<ScheduledDraft>,
     pub scheduled_polling: bool,
     pub saved: SavedSet,
     pub call_history: Vec<teams_core::CallLogEntry>,
     pub calendar_events: Vec<chatsvc::CalendarEvent>,
+    pub calendar_event_peek_request: Option<chatsvc::CalendarEvent>,
     pub calendar_nudge: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     pub calls_list: crate::call::CallsList,
     pub speed_dial: Vec<crate::call::SpeedDialEntry>,
@@ -198,13 +204,13 @@ pub struct AppState {
     pub call_share_motion: bool,
     pub call_share_standout: bool,
     pub call_report_enabled: bool,
-    pub call_strip_width: f32,
     pub call_view: crate::call::ViewSettings,
     pub call_background: crate::call::BackgroundPick,
     pub call_camera: calling::DeviceChoice,
     pub call_input: calling::DeviceChoice,
     pub call_output: calling::DeviceChoice,
     pub call_mic: calling::MicSettings,
+    pub call_video_quality: calling::VideoQuality,
     pub call_effects: calling::CameraEffects,
     pub meet_now_pending: bool,
     pub prejoin: Option<crate::call::PendingJoin>,
@@ -213,7 +219,11 @@ pub struct AppState {
     pub rsvp_send_response: bool,
     pub meeting_toasts: crate::call::MeetingToasts,
     pub demo_meetings: Vec<chatsvc::CalendarEvent>,
+    /// Google week-load failure already surfaced as a notice this session.
+    pub google_sync_notice_shown: bool,
     pub calendar_week: crate::call::week::CalendarWeek,
+    /// Bumped when the hour grid should align to local «now» (open / Today / day-week span).
+    pub calendar_scroll_to_now: u64,
     pub call_backgrounds: crate::call::BackgroundLibrary,
     /// The transfer or invite picker is open; its view lives on the UI side.
     pub transfer_picker_open: bool,
@@ -306,6 +316,7 @@ impl AppState {
             } else {
                 ConnectionState::Connecting
             },
+            browser_sign_in: crate::browser_sign_in::current(),
             live: LiveState::Off,
             last_sync: None,
             mode,
@@ -323,6 +334,7 @@ impl AppState {
             live_retry: None,
             notice_count: 0,
             followed_presence: Vec::new(),
+            dismissed_absence_notices: Default::default(),
             followed_changes: Vec::new(),
             keep_unread: None,
             restorable_deletes: Default::default(),
@@ -332,11 +344,13 @@ impl AppState {
             warm_chats: Default::default(),
             local_previews: HashMap::new(),
             quick_view: None,
+            manage_team: None,
             scheduled: Vec::new(),
             scheduled_polling: false,
             saved: SavedSet::default(),
             call_history: Vec::new(),
             calendar_events: Vec::new(),
+            calendar_event_peek_request: None,
             calendar_nudge: None,
             calls_list: crate::call::CallsList::default(),
             speed_dial,
@@ -371,13 +385,13 @@ impl AppState {
             call_share_motion: false,
             call_share_standout: false,
             call_report_enabled: true,
-            call_strip_width: crate::call::STRIP_DEFAULT_WIDTH,
             call_view: crate::call::ViewSettings::default(),
             call_background: crate::call::BackgroundPick::None,
             call_camera: calling::DeviceChoice::SystemDefault,
             call_input: calling::DeviceChoice::SystemDefault,
             call_output: calling::DeviceChoice::SystemDefault,
             call_mic: calling::MicSettings::default(),
+            call_video_quality: calling::VideoQuality::default(),
             call_effects: calling::CameraEffects::default(),
             meet_now_pending: false,
             prejoin: None,
@@ -386,7 +400,9 @@ impl AppState {
             rsvp_send_response: true,
             meeting_toasts: crate::call::MeetingToasts::default(),
             demo_meetings: Vec::new(),
+            google_sync_notice_shown: false,
             calendar_week: crate::call::week::CalendarWeek::default(),
+            calendar_scroll_to_now: 0,
             call_backgrounds: if mode.demo {
                 crate::call::demo_library()
             } else {
@@ -403,10 +419,11 @@ impl AppState {
         state.followed_presence = crate::presence_follow::load_followed(&state.store);
         state.collapsed = state.load_collapsed();
         state.call_share_sound = crate::call::load_share_sound(&state.store);
-        state.call_share_motion = crate::call::load_flag(&state.store, crate::call::SHARE_MOTION_META_KEY);
-        state.call_share_standout = crate::call::load_flag(&state.store, crate::call::SHARE_STANDOUT_META_KEY);
+        state.call_share_motion =
+            crate::call::load_flag(&state.store, crate::call::SHARE_MOTION_META_KEY);
+        state.call_share_standout =
+            crate::call::load_flag(&state.store, crate::call::SHARE_STANDOUT_META_KEY);
         state.call_report_enabled = crate::call::load_report_enabled(&state.store);
-        state.call_strip_width = crate::call::load_strip_width(&state.store);
         state.call_view = crate::call::ViewSettings::load(&state.store);
         state.call_background = crate::call::load_background(&state.store);
         state.call_camera = crate::call::load_camera(&state.store);
@@ -414,6 +431,7 @@ impl AppState {
         state.call_output = crate::call::load_output(&state.store);
         crate::call::apply_sound_output(&state.call_output);
         state.call_mic = crate::call::load_mic(&state.store);
+        state.call_video_quality = crate::call::load_video_quality(&state.store);
         state.call_effects = crate::call::load_camera_effects(&state.store);
         state.join_options = crate::call::load_join_options(&state.store);
         state.call_backgrounds.customs = crate::call::load_custom_backgrounds(&state.store);
@@ -630,7 +648,7 @@ impl AppState {
                 .cloned()
                 .collect();
         }
-        self.resolve_pending_avatars();
+        self.resolve_pending_avatars(&[]);
         self.sync_presence();
     }
 
@@ -659,9 +677,9 @@ impl AppState {
         }
         if let Some(engine) = self.engine.clone().filter(|_| !uncached.is_empty()) {
             self.directory.mark_avatars_pending(&uncached);
-            let done = data::fetch_avatars(&engine, uncached);
-            self.on_done(done, cx, |state, cx| {
-                state.resolve_pending_avatars();
+            let done = data::fetch_avatars(&engine, uncached.clone());
+            self.on_done(done, cx, move |state, cx| {
+                state.resolve_pending_avatars(&uncached);
                 cx.emit(AppEvent::Directory);
                 cx.notify();
             });
@@ -745,10 +763,12 @@ impl AppState {
         }));
     }
 
-    fn resolve_pending_avatars(&mut self) {
+    fn resolve_pending_avatars(&mut self, requested: &[String]) {
         for user_id in self.directory.pending_avatars() {
-            if let Some(cached) = data::cached_avatar(&self.store, &user_id) {
-                self.directory.set_avatar(&user_id, cached);
+            match data::cached_avatar(&self.store, &user_id) {
+                Some(cached) => self.directory.set_avatar(&user_id, cached),
+                None if requested.contains(&user_id) => self.directory.mark_avatar_failed(&user_id),
+                None => {}
             }
         }
     }
@@ -991,8 +1011,9 @@ impl AppState {
         self.call_end = None;
         let was_drafting = std::mem::take(&mut self.new_chat);
         let left_quick_view = self.quick_view.take().is_some();
+        let left_manage_team = self.manage_team.take().is_some();
         if !was_drafting && self.selection.as_ref() == Some(&selection) {
-            if left_quick_view {
+            if left_quick_view || left_manage_team {
                 cx.emit(AppEvent::Sidebar);
                 cx.notify();
             }
@@ -1006,6 +1027,7 @@ impl AppState {
         cx.notify();
         self.refresh_live_meeting(&conversation_id, cx);
         self.refresh_language_stamps(&conversation_id, cx);
+        self.refresh_partner_absence(&conversation_id, cx);
     }
 
     fn apply_typing(&mut self, event: TypingEvent, cx: &mut dyn Host) {
@@ -1139,6 +1161,16 @@ impl AppState {
                 self.connection = connection;
                 self.refresh_connection_banner(cx);
                 cx.emit(AppEvent::Status);
+            }
+            BackendEvent::BrowserSignIn(sign_in) => {
+                crate::browser_sign_in::set(sign_in.clone());
+                if sign_in != self.browser_sign_in {
+                    app_base::diagnostics::record(format!("browser_sign_in: {sign_in:?}"));
+                }
+                self.browser_sign_in = sign_in;
+                self.refresh_connection_banner(cx);
+                cx.emit(AppEvent::Status);
+                cx.notify();
             }
             BackendEvent::LiveRetry(retry) => self.live_retry = Some(retry),
             BackendEvent::Calls(launcher) => {

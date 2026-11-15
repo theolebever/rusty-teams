@@ -2,7 +2,7 @@ use calling::{CallCommand, Callee, MeetingOptions, MeetingRole, Modality};
 
 use super::actions::NOT_CONNECTED_NOTICE;
 use super::features::TransferCandidate;
-use super::model::{CallKind, Tile};
+use super::model::{CallKind, Tile, TileState};
 use super::options_dialog::OptionsDialog;
 use crate::Host;
 use crate::app_state::{AppEvent, AppState};
@@ -139,7 +139,13 @@ impl AppState {
         let present: Vec<&str> = self
             .call
             .as_ref()
-            .map(|call| call.model.tiles.iter().map(|tile| tile.mri.as_str()).collect())
+            .map(|call| {
+                call.model
+                    .tiles
+                    .iter()
+                    .map(|tile| tile.mri.as_str())
+                    .collect()
+            })
             .unwrap_or_default();
         self.transfer_candidates()
             .into_iter()
@@ -155,6 +161,14 @@ impl AppState {
         {
             self.transfer_picker_open = true;
             cx.notify();
+        }
+    }
+
+    fn drop_invited_tile(&mut self, mri: &str) {
+        if let Some(call) = self.call.as_mut() {
+            call.model
+                .tiles
+                .retain(|tile| tile.mri != mri || tile.state != TileState::Invited);
         }
     }
 
@@ -197,6 +211,7 @@ impl AppState {
             } else {
                 NO_PEER_NOTICE
             };
+            self.drop_invited_tile(&callee.mri);
             self.raise_notice(notice.to_owned(), None, cx);
             return;
         };
@@ -205,6 +220,7 @@ impl AppState {
                 .create_group(&[peer_user_id, invited_user_id], None)
                 .await
         });
+        let invited_mri = callee.mri.clone();
         let this = cx.handle();
         cx.spawn(Box::pin(async move {
             let created = receiver.await.ok().and_then(Result::ok);
@@ -215,7 +231,12 @@ impl AppState {
                         group_thread: Some(thread_id),
                     });
                 }
-                _ => state.raise_notice(INVITE_FAILED_NOTICE.to_owned(), None, cx),
+                _ => {
+                    if state.call.as_ref().is_some_and(|call| call.id == call_id) {
+                        state.drop_invited_tile(&invited_mri);
+                    }
+                    state.raise_notice(INVITE_FAILED_NOTICE.to_owned(), None, cx);
+                }
             })
             .await;
         }));
@@ -228,8 +249,8 @@ mod tests {
     use std::time::Instant;
 
     use calling::{
-        CallCommand, CallControl, CallState, CallUpdate, MeetingCapability, MeetingOptions, MeetingRole,
-        Modality, RosterEntry, call_channel,
+        CallCommand, CallControl, CallState, CallUpdate, MeetingCapability, MeetingOptions,
+        MeetingRole, Modality, RosterEntry, call_channel,
     };
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
     use serde_json::json;
@@ -238,14 +259,21 @@ mod tests {
     use crate::app_state::{AppState, Mode};
     use crate::call::{ActiveCall, CallModel, TransferCandidate};
 
-    fn app_with_meeting(cx: &mut TestAppContext, organizer: bool) -> (Entity<AppState>, CallControl) {
+    fn app_with_meeting(
+        cx: &mut TestAppContext,
+        organizer: bool,
+    ) -> (Entity<AppState>, CallControl) {
         cx.update(gpui_kit::init);
         let store = Arc::new(Store::open_in_memory().unwrap());
         let app = cx.update(|cx| cx.new(|_| AppState::new(store, Mode::default())));
         let (handle, control) = call_channel();
         let mut model = CallModel::meeting("Standup", organizer);
-        model.apply(CallUpdate::State(CallState::Connected { since: Instant::now() }));
-        model.apply(CallUpdate::OwnIdentity { mri: "8:orgid:me".into() });
+        model.apply(CallUpdate::State(CallState::Connected {
+            since: Instant::now(),
+        }));
+        model.apply(CallUpdate::OwnIdentity {
+            mri: "8:orgid:me".into(),
+        });
         model.apply(CallUpdate::Roster(vec![RosterEntry {
             mri: "8:orgid:a".into(),
             display_name: "Ana".into(),
@@ -267,7 +295,8 @@ mod tests {
     }
 
     fn options() -> MeetingOptions {
-        let option = |name: &str, value: serde_json::Value| json!({"name": name, "currentValue": value});
+        let option =
+            |name: &str, value: serde_json::Value| json!({"name": name, "currentValue": value});
         MeetingOptions::from_response(&json!({"options": [
             option("AutoAdmittedUsers", json!("EveryoneInCompany")),
             option("PresenterOption", json!("Everyone")),
@@ -325,15 +354,25 @@ mod tests {
         assert_eq!(control.try_recv_command(), Some(CallCommand::SetLock(true)));
         assert_eq!(
             control.try_recv_command(),
-            Some(CallCommand::SetRole { mri: "8:orgid:a".into(), role: MeetingRole::Presenter })
+            Some(CallCommand::SetRole {
+                mri: "8:orgid:a".into(),
+                role: MeetingRole::Presenter
+            })
         );
         assert_eq!(
             control.try_recv_command(),
-            Some(CallCommand::SetAttendeeModality { mri: "8:orgid:a".into(), modality: Modality::Camera, allowed: false })
+            Some(CallCommand::SetAttendeeModality {
+                mri: "8:orgid:a".into(),
+                modality: Modality::Camera,
+                allowed: false
+            })
         );
         assert_eq!(
             control.try_recv_command(),
-            Some(CallCommand::SetAttendeeRestrictions { mic_off: true, camera_off: true })
+            Some(CallCommand::SetAttendeeRestrictions {
+                mic_off: true,
+                camera_off: true
+            })
         );
         assert_eq!(control.try_recv_command(), None);
     }
@@ -345,7 +384,10 @@ mod tests {
             app.update(cx, |state, cx| {
                 state.apply_call_update(
                     7,
-                    CallUpdate::Capability(MeetingCapability { locked: true, ..MeetingCapability::default() }),
+                    CallUpdate::Capability(MeetingCapability {
+                        locked: true,
+                        ..MeetingCapability::default()
+                    }),
                     cx,
                 )
             })
@@ -354,16 +396,35 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_options_dialog_loads_saves_only_changes_and_keeps_errors_inline(cx: &mut TestAppContext) {
+    fn the_options_dialog_loads_saves_only_changes_and_keeps_errors_inline(
+        cx: &mut TestAppContext,
+    ) {
         let (app, mut control) = app_with_meeting(cx, true);
         cx.update(|cx| app.update(cx, |state, cx| state.open_meeting_options(cx)));
-        assert_eq!(control.try_recv_command(), Some(CallCommand::LoadMeetingOptions));
+        assert_eq!(
+            control.try_recv_command(),
+            Some(CallCommand::LoadMeetingOptions)
+        );
         cx.update(|cx| {
             app.update(cx, |state, cx| {
-                state.apply_call_update(7, CallUpdate::MeetingOptions(Err("The options could not be read".into())), cx)
+                state.apply_call_update(
+                    7,
+                    CallUpdate::MeetingOptions(Err("The options could not be read".into())),
+                    cx,
+                )
             })
         });
-        let error = cx.update(|cx| app.read(cx).call.as_ref().unwrap().options_dialog.as_ref().unwrap().error.clone());
+        let error = cx.update(|cx| {
+            app.read(cx)
+                .call
+                .as_ref()
+                .unwrap()
+                .options_dialog
+                .as_ref()
+                .unwrap()
+                .error
+                .clone()
+        });
         assert_eq!(error.as_deref(), Some("The options could not be read"));
         cx.update(|cx| {
             app.update(cx, |state, cx| {
@@ -381,7 +442,13 @@ mod tests {
         assert_eq!(control.try_recv_command(), None);
         cx.update(|cx| {
             app.update(cx, |state, cx| {
-                state.apply_call_update(7, CallUpdate::MeetingOptionsSaved(Err("the service refused AllowMeetingChat".into())), cx)
+                state.apply_call_update(
+                    7,
+                    CallUpdate::MeetingOptionsSaved(Err(
+                        "the service refused AllowMeetingChat".into()
+                    )),
+                    cx,
+                )
             })
         });
         assert!(cx.update(|cx| app.read(cx).call.as_ref().unwrap().options_dialog.is_some()));
@@ -403,7 +470,11 @@ mod tests {
             chat_id: "19:bo".into(),
         };
         cx.update(|cx| app.update(cx, |state, cx| state.invite_call_person(candidate, cx)));
-        let Some(CallCommand::Invite { callees, group_thread }) = control.try_recv_command() else {
+        let Some(CallCommand::Invite {
+            callees,
+            group_thread,
+        }) = control.try_recv_command()
+        else {
             panic!("an invite command");
         };
         assert_eq!(callees.len(), 1);
@@ -411,7 +482,9 @@ mod tests {
         assert_eq!(group_thread, None);
         let ringing = cx.update(|cx| {
             let tiles = &app.read(cx).call.as_ref().unwrap().model.tiles;
-            tiles.iter().any(|tile| tile.mri == "8:orgid:bo" && tile.invited)
+            tiles
+                .iter()
+                .any(|tile| tile.mri == "8:orgid:bo" && tile.invited)
         });
         assert!(ringing);
     }

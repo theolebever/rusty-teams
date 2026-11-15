@@ -5,8 +5,8 @@ use chatsvc::{
     days_until_expiry,
 };
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, Offset as _, Utc};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -20,6 +20,7 @@ use super::shared_tab::{SharedRun, download_label, item_row};
 use super::widgets::icon;
 use crate::channel_files::SharedItem;
 use crate::downloads::DownloadState;
+use crate::i18n::tr;
 use crate::recap::{
     ATTENDANCE_FAILED, ATTENDANCE_OFF, EMPTY_RECAP, Load, NO_TRANSCRIPT, clock_label,
     expiry_is_urgent, expiry_label, highlight_segments, matching_turns, occurrence_label,
@@ -77,17 +78,13 @@ pub struct RecapView<'a> {
 }
 
 fn section(title: &'static str) -> Div {
-    v_flex()
-        .w_full()
-        .flex_none()
-        .gap(px(10.))
-        .child(
-            div()
-                .text_size(px(13.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(title),
-        )
+    v_flex().w_full().flex_none().gap(px(10.)).child(
+        div()
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::text())
+            .child(title),
+    )
 }
 
 fn muted(text: impl Into<SharedString>) -> Div {
@@ -139,31 +136,39 @@ fn picker(view: &RecapView, offset: FixedOffset, today: NaiveDate, run: &RecapRu
         .flex_none()
         .gap(px(6.))
         .flex_wrap()
-        .children(view.occurrences.iter().enumerate().map(|(index, occurrence)| {
-            let run = run.clone();
-            let active = index == view.selected;
-            div()
-                .id(ElementId::NamedInteger("recap-occurrence".into(), index as u64))
-                .px(px(12.))
-                .py(px(4.))
-                .rounded_full()
-                .cursor_pointer()
-                .text_size(px(12.))
-                .bg(if active {
-                    theme::accent()
-                } else {
-                    theme::surface_raised()
-                })
-                .text_color(if active {
-                    theme::on_accent()
-                } else {
-                    theme::text_soft()
-                })
-                .on_click(move |_, window, cx| {
-                    run(RecapCommand::Occurrence(index), window, cx)
-                })
-                .child(occurrence_label(occurrence, today, offset))
-        }))
+        .children(
+            view.occurrences
+                .iter()
+                .enumerate()
+                .map(|(index, occurrence)| {
+                    let run = run.clone();
+                    let active = index == view.selected;
+                    div()
+                        .id(ElementId::NamedInteger(
+                            "recap-occurrence".into(),
+                            index as u64,
+                        ))
+                        .px(px(12.))
+                        .py(px(4.))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .bg(if active {
+                            theme::accent()
+                        } else {
+                            theme::surface_raised()
+                        })
+                        .text_color(if active {
+                            theme::on_accent()
+                        } else {
+                            theme::text_soft()
+                        })
+                        .on_click(move |_, window, cx| {
+                            run(RecapCommand::Occurrence(index), window, cx)
+                        })
+                        .child(occurrence_label(occurrence, today, offset))
+                }),
+        )
 }
 
 fn recording_card(details: &RecordingDetails) -> Div {
@@ -175,13 +180,17 @@ fn recording_card(details: &RecordingDetails) -> Div {
         .justify_between()
         .text_size(px(12.))
         .text_color(gpui_kit::white())
-        .child(div().child(
-            details
-                .duration_seconds
-                .map(clock_label)
-                .unwrap_or_default(),
-        ))
-        .when(details.audio_only, |row| row.child(div().child("Audio only")));
+        .child(
+            div().child(
+                details
+                    .duration_seconds
+                    .map(clock_label)
+                    .unwrap_or_default(),
+            ),
+        )
+        .when(details.audio_only, |row| {
+            row.child(div().child("Audio only"))
+        });
     div()
         .relative()
         .w(px(CARD_WIDTH))
@@ -275,7 +284,7 @@ fn failure(reason: String, run: &RecapRun) -> AnyElement {
             Button::new("recap-retry")
                 .ghost()
                 .compact()
-                .label("Retry")
+                .label(tr("common.retry"))
                 .on_click(move |_, window, cx| run(RecapCommand::Retry, window, cx)),
         )
         .into_any_element()
@@ -389,9 +398,7 @@ fn transcript_section(view: &RecapView, run: &RecapRun) -> Div {
                 .into_any_element()
         }
     };
-    section("Transcript")
-        .child(downloads)
-        .child(body)
+    section("Transcript").child(downloads).child(body)
 }
 
 fn attendance_row(record: &AttendanceRecord, offset: FixedOffset) -> Div {
@@ -416,7 +423,10 @@ fn attendance_row(record: &AttendanceRecord, offset: FixedOffset) -> Div {
                 .text_color(theme::text())
                 .child(record.name.clone()),
         )
-        .child(cell(time_label(record.joined_at, offset), ATTENDANCE_COLUMN))
+        .child(cell(
+            time_label(record.joined_at, offset),
+            ATTENDANCE_COLUMN,
+        ))
         .child(cell(time_label(record.left_at, offset), ATTENDANCE_COLUMN))
         .child(cell(span_label(record.duration_seconds), ATTENDANCE_COLUMN))
 }

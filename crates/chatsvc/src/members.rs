@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use session::{Method, Request, Session};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::messages::{MessageTransport, SessionMessageTransport, encode, ensure_success};
 use crate::pins::DEFAULT_REGION;
 
@@ -83,6 +83,71 @@ pub fn remove_member_request(region: &str, thread_id: &str, user_id: &str) -> Re
     ))
 }
 
+pub fn create_group_request(region: &str, user_ids: &[String], topic: Option<&str>) -> Request {
+    let members: Vec<Value> = user_ids
+        .iter()
+        .map(|user_id| json!({"id": user_mri(user_id), "role": MEMBER_ROLE}))
+        .collect();
+    let mut properties = json!({
+        "threadType": "chat",
+        "fixedRoster": false,
+        "uniquerosterthread": false,
+        "chatFilesIndexId": "2",
+    });
+    if let Some(topic) = topic.map(str::trim).filter(|topic| !topic.is_empty()) {
+        properties["topic"] = json!(topic);
+    }
+    Request::with_body(
+        Method::Post,
+        threads_url(region),
+        json!({"members": members, "properties": properties}),
+    )
+}
+
+/// 1:1 chat (person or bot): unique roster so Teams can address it as `groupChat` on a call.
+pub fn create_one_to_one_request(region: &str, member_mris: &[String]) -> Request {
+    let members: Vec<Value> = member_mris
+        .iter()
+        .map(|mri| json!({"id": user_mri(mri), "role": MEMBER_ROLE}))
+        .collect();
+    Request::with_body(
+        Method::Post,
+        threads_url(region),
+        json!({
+            "members": members,
+            "properties": {
+                "threadType": "chat",
+                "fixedRoster": true,
+                "uniquerosterthread": true,
+                "chatFilesIndexId": "2",
+            },
+        }),
+    )
+}
+
+fn created_thread_id(body: &Value) -> Option<String> {
+    if let Some(id) = body
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with("19:"))
+    {
+        return Some(id.to_owned());
+    }
+    if let Some(id) = body
+        .get("threadId")
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with("19:"))
+    {
+        return Some(id.to_owned());
+    }
+    let location = body.get("location")?.as_str()?;
+    let last = location.split('?').next()?.rsplit('/').next()?;
+    let decoded = percent_encoding::percent_decode_str(last)
+        .decode_utf8()
+        .ok()?;
+    decoded.starts_with("19:").then(|| decoded.into_owned())
+}
+
 /// Teams renames a group chat by setting the thread property `topic`; an empty topic removes the name.
 pub fn topic_request(region: &str, thread_id: &str, topic: &str) -> Request {
     Request::with_body(
@@ -119,7 +184,11 @@ pub struct ThreadMembers<T: MessageTransport = SessionMessageTransport> {
 
 impl ThreadMembers<SessionMessageTransport> {
     pub fn new(session: &Session) -> Self {
-        ThreadMembers::with_transport(SessionMessageTransport::new(session), DEFAULT_REGION)
+        Self::with_region(session, DEFAULT_REGION)
+    }
+
+    pub fn with_region(session: &Session, region: &str) -> Self {
+        ThreadMembers::with_transport(SessionMessageTransport::new(session), region)
     }
 }
 
@@ -147,6 +216,28 @@ impl<T: MessageTransport> ThreadMembers<T> {
         ensure_success(&self.transport.send(request).await?)
     }
 
+    /// Teams' `createThread` for a group chat; answers with the new thread id.
+    pub async fn create_group(&self, user_ids: &[String], topic: Option<&str>) -> Result<String> {
+        let request = create_group_request(&self.region, user_ids, topic);
+        let answer = self.transport.send(request).await?;
+        ensure_success(&answer)?;
+        created_thread_id(&answer.body)
+            .ok_or_else(|| Error::UnexpectedAnswer("thread creation has no location".into()))
+    }
+
+    /// Teams' `createThread` for a 1:1 unique-roster chat; answers with the new thread id.
+    pub async fn create_one_to_one(&self, member_mris: &[String]) -> Result<String> {
+        let request = create_one_to_one_request(&self.region, member_mris);
+        let answer = self.transport.send(request).await?;
+        ensure_success(&answer)?;
+        created_thread_id(&answer.body).ok_or_else(|| {
+            Error::UnexpectedAnswer(format!(
+                "thread creation has no location (HTTP {} {})",
+                answer.status, answer.body
+            ))
+        })
+    }
+
     pub async fn set_topic(&self, thread_id: &str, topic: &str) -> Result<()> {
         let request = topic_request(&self.region, thread_id, topic);
         ensure_success(&self.transport.send(request).await?)
@@ -155,6 +246,59 @@ impl<T: MessageTransport> ThreadMembers<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_group_thread_lists_everyone_as_admin_and_reads_its_id_from_the_location() {
+        let request = create_group_request("emea", &["me".into(), "ann".into()], Some(" Plan "));
+        assert_eq!(
+            request.url,
+            "https://teams.cloud.microsoft/api/chatsvc/emea/v1/threads"
+        );
+        let body = request.body.unwrap();
+        assert_eq!(
+            body["members"][1],
+            json!({"id": "8:orgid:ann", "role": "Admin"})
+        );
+        assert_eq!(body["properties"]["topic"], "Plan");
+        assert_eq!(
+            created_thread_id(&json!({"location": "https://emea.ng.msg.teams.microsoft.com/v1/threads/19%3Aabc%40thread.v2"})).as_deref(),
+            Some("19:abc@thread.v2")
+        );
+        assert_eq!(
+            created_thread_id(&json!({"location": "https://x/v1/threads/oops"})),
+            None
+        );
+        assert_eq!(
+            created_thread_id(&json!({"id": "19:me_bot@unq.gbl.spaces"})).as_deref(),
+            Some("19:me_bot@unq.gbl.spaces")
+        );
+        assert_eq!(
+            created_thread_id(&json!({"threadId": "19:me_bot@unq.gbl.spaces"})).as_deref(),
+            Some("19:me_bot@unq.gbl.spaces")
+        );
+    }
+
+    #[test]
+    fn a_one_to_one_thread_is_a_unique_roster_chat() {
+        let request = create_one_to_one_request(
+            "emea",
+            &[
+                "me".into(),
+                "28:cf28171e-fcfd-47e4-a1d6-79460b0b3ca0".into(),
+            ],
+        );
+        let body = request.body.unwrap();
+        assert_eq!(body["properties"]["fixedRoster"], true);
+        assert_eq!(body["properties"]["uniquerosterthread"], true);
+        assert_eq!(
+            body["members"][0],
+            json!({"id": "8:orgid:me", "role": "Admin"})
+        );
+        assert_eq!(
+            body["members"][1],
+            json!({"id": "28:cf28171e-fcfd-47e4-a1d6-79460b0b3ca0", "role": "Admin"})
+        );
+    }
+
     use std::sync::Mutex;
 
     use session::ApiResponse;

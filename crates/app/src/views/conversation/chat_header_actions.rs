@@ -12,11 +12,11 @@ use crate::app_state::Selection;
 use crate::data::Directory;
 use crate::find_in_chat::FIND_IN_CHAT;
 use crate::theme;
+use crate::views::avatar::status_glyph;
 use crate::views::chat_menu::{ChatMenuTarget, MenuContext, chat_menu};
-use crate::views::sidebar::channel_menu;
 use crate::views::composer::plus_menu::chat_invitees;
 use crate::views::new_meeting_dialog::open_new_meeting_with;
-use crate::views::avatar::status_glyph;
+use crate::views::sidebar::channel_menu;
 use crate::views::widgets::{icon, menu_icon, symbol};
 
 pub const CHAT_HEADER_MORE_TAG: &str = "chat-header-more";
@@ -61,7 +61,12 @@ impl ConversationView {
             .sidebar
             .teams
             .iter()
-            .find(|entry| entry.channels.iter().any(|channel| &channel.id == channel_id))?
+            .find(|entry| {
+                entry
+                    .channels
+                    .iter()
+                    .any(|channel| &channel.id == channel_id)
+            })?
             .channel_notifications(channel_id);
         let (state, channel_id) = (self.app.clone(), channel_id.clone());
         Some(
@@ -88,7 +93,11 @@ impl ConversationView {
             && self.header_chat_id().is_some()
     }
 
-    pub(super) fn chat_more_button(&self, overflow: bool, cx: &Context<Self>) -> Option<AnyElement> {
+    pub(super) fn chat_more_button(
+        &self,
+        overflow: bool,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
         let chat_id = self
             .header_chat_id()
             .filter(|_| !self.popped_out && !self.pinned)?;
@@ -101,7 +110,7 @@ impl ConversationView {
         } else {
             open_details
         };
-        let copilot_label = self.copilot_label();
+        let copilot_label = self.copilot_label(cx);
         Some(
             Button::new(CHAT_HEADER_MORE_TAG)
                 .icon(IconName::Ellipsis)
@@ -112,7 +121,7 @@ impl ConversationView {
                 .debug_selector(|| CHAT_HEADER_MORE_TAG.into())
                 .dropdown_menu(move |popup, window, cx| {
                     let popup = if overflow {
-                        overflow_items(popup, view.clone(), copilot_label, details_label)
+                        overflow_items(popup, view.clone(), copilot_label.clone(), details_label)
                     } else {
                         popup
                     };
@@ -131,7 +140,7 @@ impl ConversationView {
 fn overflow_items(
     popup: PopupMenu,
     view: WeakEntity<ConversationView>,
-    copilot_label: &'static str,
+    copilot_label: String,
     details_label: &'static str,
 ) -> PopupMenu {
     let (find_view, details_view) = (view.clone(), view.clone());
@@ -157,7 +166,9 @@ fn overflow_items(
             PopupMenuItem::new(details_label)
                 .icon(menu_icon(IconName::PanelRight))
                 .on_click(move |_, _, cx| {
-                    details_view.update(cx, |this, cx| this.toggle_details(cx)).ok();
+                    details_view
+                        .update(cx, |this, cx| this.toggle_details(cx))
+                        .ok();
                 }),
         )
         .separator()

@@ -32,16 +32,20 @@ session.workspace = true
 store.workspace = true
 teams-core.workspace = true
 tokio.workspace = true
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "webp"] }
 raw-window-handle = "0.6"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 sha2 = "0.10"
 resvg = { version = "0.46", default-features = false, features = ["text"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Rune enables Fontconfig dlopen; font-kit must use the same mode in the workspace.
 zed-font-kit = { version = "0.14.1-zed", features = ["source-fontconfig-dlopen"] }
 x11rb = { version = "0.13", features = ["shape"] }
+ksni = { version = "0.3", features = ["blocking"] }
 
 [target.'cfg(windows)'.dependencies]
 libc = "0.2"

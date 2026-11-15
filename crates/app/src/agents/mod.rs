@@ -11,3 +11,4 @@ pub use agents_panel::{AgentsPanel, AgentsPanelEvent};
 pub use run_chip::run_chip;
 pub use settings_section::AgentsSettings;
 pub use start_dialog::{StartDialog, StartDialogEvent};
+pub use state::agents::*;
