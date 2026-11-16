@@ -28,7 +28,7 @@ La direction de ce fork est de porter l’interface sur [Rune](https://github.co
 | Rune | `crates/app-rune`, `rusty-teams-rune` | Interface principale du fork, construite par la CI. Connectée au backend Teams réel, avec un mode démo indépendant du compte. |
 | GPUI | `crates/app`, `teams` | Interface historique conservée et enrichie par les intégrations du projet original. Compilation depuis les sources. |
 
-Dernière intégration amont documentée : [`0e3132f`](https://github.com/danieldaeschle/rusty-teams/commit/0e3132f86faa53fb178cd89bc514fae50120d7f2), fusionnée dans `main` le 15 novembre 2026. Les commits amont suivants doivent être examinés lors des prochaines intégrations. [Comparer les branches actuelles](https://github.com/danieldaeschle/rusty-teams/compare/main...theolebever:rusty-teams:main).
+Dernière intégration amont documentée : [`edc843d`](https://github.com/danieldaeschle/rusty-teams/commit/edc843de3b933138d70609c06f92e848cf1637d6), fusionnée dans `main` le 16 novembre 2026. Les commits amont suivants doivent être examinés lors des prochaines intégrations. [Comparer les branches actuelles](https://github.com/danieldaeschle/rusty-teams/compare/main...theolebever:rusty-teams:main).
 
 ### Différences avec le projet original
 
