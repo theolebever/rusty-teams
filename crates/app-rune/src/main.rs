@@ -62,6 +62,7 @@ mod search;
 mod settings;
 mod settings_backend;
 mod sound;
+mod splash;
 mod status_menu;
 mod teams;
 mod team_menu;
@@ -99,6 +100,7 @@ fn init() -> UiState<Bridge> {
     });
     let mut state = UiState::new(bridge);
     state.starting = true;
+    state.from_splash = true;
     state.launch_command = arguments.command.clone();
     // The stored preferences are queued already; startup reads them (tray, close to tray).
     for update in state.actions.poll() { state.apply(update); }
@@ -168,7 +170,8 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     notifications::ring(s);
     taskbar::set_badge(notifications::badge_count(s));
     tray::sync(s);
-    changed || noticed || ticked || opened || call_changed || reminded || translated
+    let splashed = splash::tick(s, tx);
+    changed || noticed || ticked || opened || call_changed || reminded || translated || splashed
 }
 
 fn main() {
@@ -390,6 +393,7 @@ fn demo_init() -> UiState<DemoActions> {
         s.launch_command = arguments.command.clone();
         s.demo_ready_at = arguments.demo_sync.map(|delay| std::time::Instant::now() + delay);
         s.starting = s.demo_ready_at.is_some();
+        s.from_splash = s.starting;
     }
     s
 }
@@ -397,7 +401,7 @@ fn demo_init() -> UiState<DemoActions> {
 fn demo_poll(s: &mut UiState<DemoActions>, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     if let Some(at) = s.demo_ready_at {
-        if let Some(remaining) = at.checked_duration_since(std::time::Instant::now()) { tx.wake_after(remaining); return false; }
+        if let Some(remaining) = at.checked_duration_since(std::time::Instant::now()) { tx.wake_after(remaining); return splash::tick(s, tx); }
         s.demo_ready_at = None;
         s.starting = false;
         changed = true;

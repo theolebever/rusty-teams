@@ -36,6 +36,10 @@ pub struct UiState<A: Actions> {
     pub read_only: bool,
     pub(crate) window_focused: bool,
     pub(crate) starting: bool,
+    pub(crate) started_at: std::time::Instant,
+    pub(crate) splash_stage: u8,
+    /// Launched behind the splash, so the content fades up when it goes.
+    pub(crate) from_splash: bool,
     pub(crate) demo_ready_at: Option<std::time::Instant>,
     pub screens: crate::screens::ScreenState,
     pub calls: crate::calls::CallView,
@@ -153,6 +157,9 @@ impl<A: Actions> UiState<A> {
             read_only,
             window_focused: false,
             starting: false,
+            started_at: std::time::Instant::now(),
+            splash_stage: 0,
+            from_splash: false,
             demo_ready_at: None,
             screens: crate::screens::ScreenState::default(),
             calls: crate::calls::CallView::default(),
@@ -706,11 +713,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
     if s.starting {
         return zoomed(cx, zoom, col().key("startup-splash").w_full().h_full().fill(c(WHITE))
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
-            .child(col().grow(1.0).w_full().center().gap(16.0)
-                .child(crate::icons::sym("chat_bubble", 48.0).color(c("#5B5FC7")))
-                .child(text("Rusty Teams").font(ts(24.0, 600.0)).color(c(INK)))
-                .child(text(s.status.clone()).font(ts(14.0, 400.0)).color(c(MUTED)))
-                .child(crate::screens::button("Open app", "startup-open", |s: &mut UiState<A>, _| s.starting = false))));
+            .child(crate::splash::view(s)));
     }
     if s.toast.reconnecting {
         return zoomed(cx, zoom, col().key("root").fill(c(WHITE))
@@ -718,6 +721,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
             .child(crate::toast::reconnect(s, cx.is_reduced_motion())));
     }
     let root = col().key("root");
+    // The window's content fades up once, as it replaces the splash.
+    let root = if s.from_splash { root.sequence(Sequence::new(crate::splash::REVEAL)) } else { root };
     let root = crate::view_messages::snappy(root, arriving)
         // Snappy UI: no mount/unmount fades, layout tweens or colour springs anywhere below,
         // except the commit where messages arrive live (`view_messages::snappy`).
