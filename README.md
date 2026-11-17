@@ -141,7 +141,7 @@ Les deux interfaces utilisent le même stockage et les mêmes services Teams. Le
 | `graph`, `chatsvc` | Clients Microsoft Graph et services Teams : messages, canaux, présence et événements temps réel. |
 | `calling` | Signalisation Teams, traduction SDP et audio/vidéo natifs via libwebrtc. |
 | `session` | Sessions, acquisition des jetons et transport HTTP natif, avec repli sur les requêtes dans la page. |
-| `webview`, `browser` | Hôte WebView2 Windows ou gestion d’un Chrome accessible via CDP. |
+| `webview`, `browser` | Hôte WebView2 Windows ou gestion d’un navigateur Chromium (CDP) ou Firefox, Zen, LibreWolf, Floorp (WebDriver BiDi) sous Linux et macOS. |
 | `agents`, `mcp` | Exécution d’agents CLI et serveur MCP. Leur intégration dépend de l’interface. |
 | `cli` | Outil de diagnostic `teams-probe`. |
 

@@ -18,7 +18,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use store::{ChannelTabRecord, MessageRecord, OutboxState, OutboxTarget, is_bot_id};
 use teams_core::{
-    ExecuteAction, FileCard, JumpPlan, LinkPreview, WindowDirection, is_notes_chat, without_islands,
+    ExecuteAction, FileCard, ImageRef, JumpPlan, LinkPreview, WindowDirection, is_notes_chat,
+    without_islands,
 };
 
 mod channel_details;
@@ -518,6 +519,36 @@ impl ConversationView {
         };
         self.app
             .update(cx, |state, cx| state.request_image_viewer(request, cx));
+    }
+
+    /// Downloads a Teams video clip into the image cache, then opens it in the system player.
+    fn play_clip(&mut self, url: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.app.read(cx).engine.clone() else {
+            return;
+        };
+        let clip = ImageRef {
+            id: url.clone(),
+            url,
+            width: None,
+            height: None,
+            alt: None,
+        };
+        let fetched = runtime::spawn(async move { engine.fetch_image(&clip).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(outcome) = fetched.await else {
+                return;
+            };
+            this.update(cx, |this, cx| match outcome {
+                Ok(Some(path)) => cx.open_with_system(&path),
+                Ok(None) => {}
+                Err(error) => this.show_notice(
+                    &format!("Could not play the video: {}", short_error(&error)),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn activate_file(
@@ -2233,6 +2264,7 @@ impl ConversationView {
                 }
                 self.mark_fetched_new(newest_cached, started_at, cx)
             }
+            Ok(Err(error)) if Self::denies_access(&error) => self.fail_access(generation),
             Ok(Err(error)) => self.fail_sync(generation, short_error(&error), cx),
             Err(error) => self.fail_sync(generation, short_error(&error), cx),
         }
@@ -2264,6 +2296,18 @@ impl ConversationView {
             sync.receipts = false;
         }
         self.notice = Some(format!("Could not refresh: {error}"));
+    }
+
+    fn denies_access(error: &teams_core::Error) -> bool {
+        matches!(error, teams_core::Error::Graph(graph::Error::NotAMember))
+    }
+
+    fn fail_access(&mut self, generation: u64) {
+        if let Some(sync) = self.sync_of(generation) {
+            sync.failed = true;
+            sync.receipts = false;
+        }
+        self.notice = Some("No access to this chat".to_owned());
     }
 
     fn mark_fetched_new(
@@ -4894,5 +4938,15 @@ mod tests {
             8.
         );
         assert_eq!(typing_bottom_offset(Some(timeline), None), 8.);
+    }
+
+    #[test]
+    fn no_access_is_a_roster_denial_and_other_errors_still_refresh() {
+        assert!(ConversationView::denies_access(&teams_core::Error::Graph(
+            graph::Error::NotAMember
+        )));
+        assert!(!ConversationView::denies_access(
+            &teams_core::Error::Unsupported("refresh")
+        ));
     }
 }

@@ -158,6 +158,9 @@ fn file_extension(content_type: &str, bytes: &[u8]) -> &'static str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/bmp" => "bmp",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
         _ => "bin",
     }
 }

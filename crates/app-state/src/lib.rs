@@ -54,6 +54,7 @@ pub mod presence_follow;
 pub mod profile_model;
 pub mod profile_state;
 pub mod reaction_model;
+pub mod regional_format;
 pub mod restorable_deletes;
 pub mod rows;
 pub mod scheduled;
@@ -80,6 +81,6 @@ pub use app_base::{
     APP_NAME, appearance, autostart, avatar_image, channel_files, crash_log, demo_cards,
     demo_chart_cards, demo_gifs, demo_input_cards, demo_library, demo_recap, diagnostics,
     downloads, emoticons, format, fuzzy, image_view_math, inline_image, presence_link, read_state,
-    recap, remote_image, runtime, schedule_time, single_instance, stickers, support, translation,
+    recap, regional, remote_image, runtime, schedule_time, single_instance, stickers, support, translation,
     updater, user_activity,
 };

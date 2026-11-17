@@ -29,6 +29,7 @@ pub mod native_dumps;
 pub mod notify;
 pub mod read_state;
 pub mod recap;
+pub mod regional;
 pub mod release_feed;
 pub mod remote_image;
 pub mod schedule_time;
@@ -47,6 +48,13 @@ pub mod ui_locale {
         app_backend::ui_locale::apply_locale(locale);
         #[cfg(feature = "gpui")]
         gpui_kit::component::set_locale(locale);
+    }
+
+    /// Serialises this crate's tests that read or set the global UI language.
+    #[cfg(test)]
+    pub(crate) fn locale_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 pub mod updater;
