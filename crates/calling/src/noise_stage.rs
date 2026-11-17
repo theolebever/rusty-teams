@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 use df::tract::{DfParams, DfTract, ReduceMask, RuntimeParams};
 use ndarray::{ArrayView2, ArrayViewMut2};
@@ -7,14 +9,19 @@ use crate::audio::{FRAME_SAMPLES, SAMPLE_RATE};
 use crate::mic_processing::MicSettings;
 
 const PCM_SCALE: f32 = 32768.0;
-const ATTENUATION_LIMIT_DB: f32 = 30.0;
+const ATTENUATION_LIMIT_DB: f32 = 40.0;
 const MIN_LOCAL_SNR_DB: f32 = -15.0;
 const MAX_LOCAL_SNR_ERB_DB: f32 = 35.0;
 const MAX_LOCAL_SNR_DF_DB: f32 = 35.0;
 const WARM_UP_FRAMES: usize = 100;
+const FRAME_BUDGET: Duration = Duration::from_millis(6);
+const SLOW_FRAME_LIMIT: u32 = 5;
 
 static PROTOTYPE: Mutex<Option<DfTract>> = Mutex::new(None);
 static PREPARE: Once = Once::new();
+static HOOK_STAGE: Mutex<NoiseStage> = Mutex::new(NoiseStage::new());
+static HOOK_ARMED: AtomicBool = AtomicBool::new(false);
+static OVERLOADED: AtomicBool = AtomicBool::new(false);
 
 fn load_model() -> Option<DfTract> {
     let mut model = DfTract::new(DfParams::default(), &runtime_params(ATTENUATION_LIMIT_DB))
@@ -97,11 +104,80 @@ fn ready_model() -> Option<DfTract> {
         .map(DfTract::fork)
 }
 
+fn should_arm_hook(settings: MicSettings, device_track_outgoing: bool) -> bool {
+    settings.ml_noise_suppression() && settings.uses_device_track() && device_track_outgoing
+}
+
+fn capture_hook(channel_index: usize, samples: &mut [f32]) {
+    if !HOOK_ARMED.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(mut stage) = HOOK_STAGE.try_lock() else {
+        return;
+    };
+    let started = Instant::now();
+    stage.process(channel_index, samples);
+    if stage.budget.record(started.elapsed()) {
+        OVERLOADED.store(true, Ordering::Relaxed);
+        HOOK_ARMED.store(false, Ordering::Relaxed);
+    }
+}
+
+fn install_hook(armed: bool) {
+    HOOK_ARMED.store(armed, Ordering::Relaxed);
+    webrtc_sys::noise_hook::set_capture_hook(armed.then_some(capture_hook));
+}
+
+/// Arms DeepFilterNet on the capture hook only while the Pulse / CoreAudio device track is the
+/// outgoing microphone. WebRTC's own noise suppression keeps running before it either way.
+pub fn apply_for_outgoing(settings: MicSettings, device_track_outgoing: bool) {
+    if settings.ml_noise_suppression() {
+        prepare();
+    }
+    let armed =
+        should_arm_hook(settings, device_track_outgoing) && !OVERLOADED.load(Ordering::Relaxed);
+    install_hook(armed);
+}
+
+/// True once the hook ran over its frame budget and switched itself off for this call.
+pub fn overloaded() -> bool {
+    OVERLOADED.load(Ordering::Relaxed)
+}
+
+pub fn clear() {
+    install_hook(false);
+    OVERLOADED.store(false, Ordering::Relaxed);
+    if let Ok(mut stage) = HOOK_STAGE.lock() {
+        *stage = NoiseStage::new();
+    }
+}
+
+#[derive(Default)]
+struct FrameBudget {
+    slow_frames: u32,
+}
+
+impl FrameBudget {
+    const fn new() -> Self {
+        FrameBudget { slow_frames: 0 }
+    }
+
+    fn record(&mut self, elapsed: Duration) -> bool {
+        if elapsed > FRAME_BUDGET {
+            self.slow_frames += 1;
+        } else {
+            self.slow_frames = 0;
+        }
+        self.slow_frames >= SLOW_FRAME_LIMIT
+    }
+}
+
 pub struct NoiseStage {
     channels: Vec<Option<DfTract>>,
     input: Vec<f32>,
     output: Vec<f32>,
     pcm: Vec<f32>,
+    budget: FrameBudget,
 }
 
 impl NoiseStage {
@@ -111,6 +187,7 @@ impl NoiseStage {
             input: Vec::new(),
             output: Vec::new(),
             pcm: Vec::new(),
+            budget: FrameBudget::new(),
         }
     }
 
@@ -164,16 +241,10 @@ impl Default for NoiseStage {
     }
 }
 
-pub fn apply(settings: MicSettings) {
-    if settings.ml_noise_suppression() {
-        prepare();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use crate::mic_processing::NoiseSuppression;
 
     fn white_noise(frame_len: usize, amplitude: f32, state: &mut u32) -> Vec<f32> {
         (0..frame_len)
@@ -267,5 +338,52 @@ mod tests {
         let per_frame = busy / frames;
         eprintln!("deep filter per 10 ms frame: {per_frame:?}");
         assert!(per_frame < Duration::from_millis(if cfg!(debug_assertions) { 60 } else { 5 }));
+    }
+
+    #[test]
+    fn a_short_slow_stretch_is_tolerated_and_a_long_one_trips_the_budget() {
+        let slow = FRAME_BUDGET * 2;
+        let fast = FRAME_BUDGET / 2;
+        let mut budget = FrameBudget::new();
+        for _ in 1..SLOW_FRAME_LIMIT {
+            assert!(!budget.record(slow));
+        }
+        assert!(!budget.record(fast));
+        for _ in 1..SLOW_FRAME_LIMIT {
+            assert!(!budget.record(slow));
+        }
+        assert!(budget.record(slow));
+    }
+
+    #[test]
+    fn only_linux_and_macos_auto_arm_the_hook_and_an_overload_keeps_it_off_until_hangup() {
+        let auto = MicSettings::default();
+        let low = MicSettings {
+            noise_suppression: NoiseSuppression::Low,
+            music_mode: false,
+        };
+        let music = MicSettings {
+            noise_suppression: NoiseSuppression::Auto,
+            music_mode: true,
+        };
+        assert!(!should_arm_hook(auto, false));
+        assert!(!should_arm_hook(low, true));
+        assert!(!should_arm_hook(music, true));
+        assert!(!should_arm_hook(auto, auto.uses_device_track_on(true)));
+
+        clear();
+        apply_for_outgoing(auto, true);
+        assert_eq!(HOOK_ARMED.load(Ordering::Relaxed), auto.uses_device_track());
+
+        OVERLOADED.store(true, Ordering::Relaxed);
+        apply_for_outgoing(auto, true);
+        assert!(!HOOK_ARMED.load(Ordering::Relaxed));
+        assert!(overloaded());
+
+        clear();
+        assert!(!overloaded());
+        apply_for_outgoing(auto, true);
+        assert_eq!(HOOK_ARMED.load(Ordering::Relaxed), auto.uses_device_track());
+        clear();
     }
 }

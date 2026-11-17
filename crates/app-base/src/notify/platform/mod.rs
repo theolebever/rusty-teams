@@ -3,6 +3,8 @@ mod windows_impl;
 #[cfg(windows)]
 pub use windows_impl::*;
 
+#[cfg(target_os = "linux")]
+mod linux_notifications;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux_sound;
 #[cfg(target_os = "linux")]
@@ -11,6 +13,11 @@ mod linux_tray;
 mod stub;
 #[cfg(target_os = "linux")]
 mod x11_input;
+#[cfg(target_os = "linux")]
+pub use linux_notifications::{
+    BusNotification, DesktopNotifications, NotificationEvent, NotificationImage,
+    notifications_inhibited,
+};
 #[cfg(target_os = "linux")]
 pub use linux_tray::Tray;
 #[cfg(not(windows))]
@@ -58,8 +65,30 @@ pub struct ShareGeometry {
 pub enum TrayCommand {
     Toggle,
     Open,
-    ToggleSound,
-    ToggleDoNotDisturb,
-    Settings,
+    SetStatus(chatsvc::ForcedKind),
+    SetStatusDuration(crate::status_choice::StatusDuration),
+    ResetStatus,
+    Notifications,
     Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayPresence {
+    pub title: String,
+    pub forced: Option<chatsvc::ForcedKind>,
+    pub mention: bool,
+}
+
+impl TrayPresence {
+    pub fn new(
+        title: impl Into<String>,
+        forced: Option<chatsvc::ForcedKind>,
+        mention: bool,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            forced,
+            mention,
+        }
+    }
 }

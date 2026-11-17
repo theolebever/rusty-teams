@@ -2,16 +2,24 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use gpui_kit::*;
 use store::Sidebar;
 use teams_core::{ForcedAvailability, ForcedKind};
 
 use super::badge::{Badge, badge_for};
+#[cfg(target_os = "linux")]
+use super::desktop_payload::{
+    self, DesktopKey, DesktopPayload, MeetingLabels, MessageLabels, RingLabels, action,
+};
 use super::incoming::IncomingTracker;
 use super::layout::{self, MEETING_HEIGHT, Slot, ring_height};
 use super::meeting_view::MeetingToastView;
-use super::platform::{self, NativeHandle, Tray, TrayCommand, WorkArea};
+use super::platform::{self, NativeHandle, Tray, TrayCommand, TrayPresence, WorkArea};
+#[cfg(target_os = "linux")]
+use super::platform::{
+    BusNotification, DesktopNotifications, NotificationEvent, NotificationImage,
+};
 use super::ring_view::RingView;
 use super::rules::{
     ChatKind, Decision, Environment, Incoming, Preview, Settings, SoundThrottle, decide,
@@ -39,6 +47,7 @@ use crate::appearance::AppIcon;
 use crate::autostart::{self, StartupSettings};
 use crate::call::DemoScene;
 use crate::data::{self, Directory, PresenceKind};
+use crate::own_status;
 use crate::runtime;
 use crate::settings_section::SettingsSection;
 use crate::single_instance;
@@ -106,7 +115,15 @@ pub struct NotificationCenter {
     hover_hold: bool,
     unread_mentions: HashSet<String>,
     tray: Option<Tray>,
-    tray_do_not_disturb: bool,
+    #[cfg(target_os = "linux")]
+    desktop: Option<DesktopNotifications>,
+    #[cfg(target_os = "linux")]
+    desktop_close: Vec<String>,
+    #[cfg(target_os = "linux")]
+    desktop_published: HashSet<String>,
+    #[cfg(target_os = "linux")]
+    desktop_avatar_cache: HashMap<String, (u64, NotificationImage)>,
+    last_tray_presence: Option<TrayPresence>,
     app_icon: AppIcon,
     shown_badge: Option<Badge>,
     shown_mention_dot: bool,
@@ -131,22 +148,22 @@ impl NotificationCenter {
         let mut settings = settings::load(&app.read(cx).store);
         settings.account = app.read(cx).account_chat_settings().notifications;
         let app_icon = active_appearance::current(cx).app_icon;
-        let tray_do_not_disturb = own_do_not_disturb(app.read(cx));
+        let initial_presence = tray_presence_from(&app.read(cx), false);
         let tray = if app.read(cx).mode.demo {
             None
         } else {
-            Tray::new(
-                settings.sounds.notification_sound,
-                tray_do_not_disturb,
-                app_icon.png(),
-            )
+            Tray::new(initial_presence.clone(), app_icon.png())
         };
+        let last_tray_presence = tray.as_ref().map(|_| initial_presence);
         platform::set_window_icon(window, app_icon.png());
         let appearance_observation = cx.observe_global::<ActiveAppearance>(|this, cx| {
             this.apply_app_icon(active_appearance::current(cx).app_icon, cx)
         });
-        let locale_observation = cx.observe_global::<ActiveLocale>(|this, _| {
+        let locale_observation = cx.observe_global::<ActiveLocale>(|this, cx| {
+            // Locale changes the presence title; force a tray sync.
+            this.last_tray_presence = None;
             this.relocalize_tray();
+            this.sync_tray(cx);
         });
         let subscription = cx.subscribe(&app, |this, _, event: &AppEvent, cx| {
             this.on_app_event(event, cx);
@@ -189,7 +206,19 @@ impl NotificationCenter {
             hover_hold: false,
             unread_mentions: HashSet::new(),
             tray,
-            tray_do_not_disturb,
+            #[cfg(target_os = "linux")]
+            desktop: if app.read(cx).mode.demo {
+                None
+            } else {
+                DesktopNotifications::start()
+            },
+            #[cfg(target_os = "linux")]
+            desktop_close: Vec::new(),
+            #[cfg(target_os = "linux")]
+            desktop_published: HashSet::new(),
+            #[cfg(target_os = "linux")]
+            desktop_avatar_cache: HashMap::new(),
+            last_tray_presence,
             app_icon,
             shown_badge: None,
             shown_mention_dot: false,
@@ -424,7 +453,7 @@ impl NotificationCenter {
             AppEvent::Messages(conversation_id) => self.on_messages(conversation_id, cx),
             AppEvent::Selection => self.on_selection(cx),
             AppEvent::Sidebar => self.refresh_badge(cx),
-            AppEvent::Directory => self.sync_tray_presence(cx),
+            AppEvent::Directory | AppEvent::Status => self.sync_tray(cx),
             AppEvent::Ring => self.on_rings_changed(cx),
             AppEvent::MeetingReminder => self.on_meeting_reminder(cx),
             AppEvent::MeetingChime => self.on_meeting_chime(cx),
@@ -783,6 +812,11 @@ impl NotificationCenter {
     }
 
     fn sync_windows(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if self.desktop.is_some() {
+            self.sync_desktop(cx);
+            return;
+        }
         let visible = self.visible_ids();
         let stale: Vec<u64> = self
             .windows
@@ -1055,6 +1089,8 @@ impl NotificationCenter {
     }
 
     fn drop_toast(&mut self, id: u64, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        self.queue_desktop_close(DesktopKey::Message(id));
         let fast = self.animated(FAST_FADE);
         self.stack.dismiss(id, Instant::now(), fast);
         cx.notify();
@@ -1120,11 +1156,30 @@ impl NotificationCenter {
             self.app
                 .update(cx, |state, cx| state.tick_meeting_reminders(show, cx));
         }
-        if !self.stack.is_empty()
+        let needs_sync = !self.stack.is_empty()
             || !self.windows.is_empty()
             || self.pill.is_some()
             || !self.call_windows.is_empty()
+            || self.app.read(cx).rings.is_ringing()
+            || !self.app.read(cx).meeting_toasts.is_empty();
+        #[cfg(target_os = "linux")]
+        let needs_sync =
+            needs_sync || !self.desktop_close.is_empty() || !self.desktop_published.is_empty();
+        #[cfg(target_os = "linux")]
+        if self
+            .desktop
+            .as_ref()
+            .is_some_and(DesktopNotifications::failed)
         {
+            self.desktop = None;
+            self.desktop_published.clear();
+        }
+        // Poll desktop actions before sync so dismiss/reply land in the same tick.
+        #[cfg(target_os = "linux")]
+        if self.desktop.is_some() {
+            self.poll_desktop(cx);
+        }
+        if needs_sync {
             self.sync_windows(cx);
             cx.notify();
         }
@@ -1165,17 +1220,296 @@ impl NotificationCenter {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn queue_desktop_close(&mut self, key: DesktopKey) {
+        self.desktop_close.push(key.replace_token());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn message_labels() -> MessageLabels {
+        MessageLabels {
+            mark_read: crate::i18n::tr("notify.mark_read"),
+            reply: crate::i18n::tr("notify.reply"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ring_labels() -> RingLabels {
+        RingLabels {
+            decline: crate::i18n::tr("notify.decline"),
+            accept: crate::i18n::tr("notify.accept"),
+            audio: crate::i18n::tr("notify.audio"),
+            video: crate::i18n::tr("notify.video"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn meeting_labels() -> MeetingLabels {
+        MeetingLabels {
+            join: crate::i18n::tr("notify.join"),
+            snooze: crate::i18n::tr("notify.snooze"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn to_bus(payload: DesktopPayload, image: Option<NotificationImage>) -> BusNotification {
+        BusNotification {
+            logical_key: payload.key.replace_token(),
+            replace_key: payload.replace_key,
+            summary: payload.summary,
+            body: payload.body,
+            actions: payload
+                .actions
+                .into_iter()
+                .map(|action| (action.id.to_owned(), action.label))
+                .collect(),
+            timeout_ms: payload.timeout_ms,
+            urgency: payload.urgency as u8,
+            category: payload.category.to_owned(),
+            image,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn avatar_notification_image(
+        &mut self,
+        state: &AppState,
+        user_id: Option<&str>,
+    ) -> Option<NotificationImage> {
+        use crate::data::AvatarState;
+        use image::imageops::FilterType;
+
+        let user_id = user_id?;
+        let AvatarState::Ready(photo) = state.directory.avatar(user_id)? else {
+            return None;
+        };
+        let bytes: &[u8] = &photo.bytes;
+        let fingerprint = photo.id;
+        if let Some((cached_fp, image)) = self.desktop_avatar_cache.get(user_id)
+            && *cached_fp == fingerprint
+        {
+            return Some(image.clone());
+        }
+        let decoded = image::load_from_memory(bytes).ok()?;
+        let rgba = decoded
+            .resize_exact(64, 64, FilterType::Lanczos3)
+            .into_rgba8();
+        let image = NotificationImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            rgba: rgba.into_raw(),
+        };
+        self.desktop_avatar_cache
+            .insert(user_id.to_owned(), (fingerprint, image.clone()));
+        Some(image)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_desktop(&mut self, cx: &mut Context<Self>) {
+        use chrono::Offset;
+
+        if self.desktop.is_none() {
+            return;
+        }
+        let preview_on = shows_preview(&self.settings);
+        let message_labels = Self::message_labels();
+        let ring_labels = Self::ring_labels();
+        let meeting_labels = Self::meeting_labels();
+        let mut visible = Vec::new();
+        let mut visible_logical = HashSet::new();
+        let mut used_avatars = HashSet::new();
+        let message_toasts: Vec<_> = self.stack.visible().to_vec();
+        let (ring_payloads, meeting_payloads) = {
+            let state = self.app.read(cx);
+            let rings: Vec<_> = state
+                .rings
+                .ringing()
+                .map(|entry| {
+                    (
+                        desktop_payload::ring_payload(
+                            entry.ring.ring_id,
+                            entry.caller_name(),
+                            entry.subtitle(),
+                            entry.ring.video,
+                            &ring_labels,
+                        ),
+                        entry.caller_user_id(),
+                    )
+                })
+                .collect();
+            let now = Utc::now();
+            let offset = Local::now().offset().fix();
+            let meetings: Vec<_> = state
+                .meeting_toasts
+                .entries()
+                .iter()
+                .map(|toast| {
+                    let body = crate::call::meeting_subtitle(toast, now, offset);
+                    desktop_payload::meeting_payload(toast, &body, &meeting_labels)
+                })
+                .collect();
+            (rings, meetings)
+        };
+        for toast in &message_toasts {
+            if let Some(user_id) = toast.sender_id.as_deref() {
+                used_avatars.insert(user_id.to_owned());
+            }
+            let image =
+                self.avatar_notification_image(self.app.read(cx), toast.sender_id.as_deref());
+            let payload = desktop_payload::message_payload(toast, preview_on, &message_labels);
+            visible_logical.insert(payload.key.replace_token());
+            visible.push(Self::to_bus(payload, image));
+        }
+        for (payload, caller_id) in ring_payloads {
+            if let Some(user_id) = caller_id.as_deref() {
+                used_avatars.insert(user_id.to_owned());
+            }
+            let image = self.avatar_notification_image(self.app.read(cx), caller_id.as_deref());
+            visible_logical.insert(payload.key.replace_token());
+            visible.push(Self::to_bus(payload, image));
+        }
+        for payload in meeting_payloads {
+            visible_logical.insert(payload.key.replace_token());
+            visible.push(Self::to_bus(payload, None));
+        }
+        self.desktop_avatar_cache
+            .retain(|user_id, _| used_avatars.contains(user_id));
+        let mut close = std::mem::take(&mut self.desktop_close);
+        for previous in &self.desktop_published {
+            if visible_logical.contains(previous) {
+                continue;
+            }
+            if previous.starts_with("ring:") || previous.starts_with("meeting:") {
+                close.push(previous.clone());
+            }
+        }
+        close.sort();
+        close.dedup();
+        if let Some(desktop) = &self.desktop {
+            desktop.sync(visible, close);
+        }
+        self.desktop_published = visible_logical;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_desktop(&mut self, cx: &mut Context<Self>) {
+        let Some(desktop) = &self.desktop else {
+            return;
+        };
+        let events = desktop.poll();
+        for event in events {
+            match event {
+                NotificationEvent::Action {
+                    logical_key,
+                    action_id,
+                } => self.handle_desktop_action(&logical_key, &action_id, cx),
+                NotificationEvent::Reply { logical_key, text } => {
+                    if let Some(DesktopKey::Message(id)) = parse_logical_key(&logical_key) {
+                        self.submit_reply(id, text, cx);
+                    }
+                }
+                NotificationEvent::Closed {
+                    logical_key,
+                    reason,
+                } => {
+                    if reason == CLOSED_BY_USER
+                        && let Some(DesktopKey::Meeting(toast_id)) = parse_logical_key(&logical_key)
+                    {
+                        self.app
+                            .update(cx, |state, cx| state.dismiss_meeting_toast(toast_id, cx));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_desktop_action(
+        &mut self,
+        logical_key: &str,
+        action_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = parse_logical_key(logical_key) else {
+            return;
+        };
+        match key {
+            DesktopKey::Message(id)
+                if action_id == action::DEFAULT
+                    || action_id == action::REPLY
+                    || action_id == "reply-open" =>
+            {
+                self.activate(id, cx);
+            }
+            DesktopKey::Message(id) if action_id == action::MARK_READ => self.mark_read(id, cx),
+            DesktopKey::Ring(ring_id) if action_id == action::DECLINE => {
+                self.queue_desktop_close(DesktopKey::Ring(ring_id));
+                self.app
+                    .update(cx, |state, cx| state.decline_ring(ring_id, cx));
+            }
+            DesktopKey::Ring(ring_id) if action_id == action::ACCEPT_AUDIO => {
+                self.queue_desktop_close(DesktopKey::Ring(ring_id));
+                self.accept_ring(ring_id, calling::AcceptMode::Audio, cx);
+            }
+            DesktopKey::Ring(ring_id) if action_id == action::ACCEPT_VIDEO => {
+                self.queue_desktop_close(DesktopKey::Ring(ring_id));
+                self.accept_ring(ring_id, calling::AcceptMode::Video, cx);
+            }
+            DesktopKey::Meeting(toast_id)
+                if action_id == action::JOIN || action_id == action::DEFAULT =>
+            {
+                self.queue_desktop_close(DesktopKey::Meeting(toast_id));
+                self.join_meeting_toast(toast_id, cx);
+            }
+            DesktopKey::Meeting(toast_id) if action_id == action::SNOOZE => {
+                self.queue_desktop_close(DesktopKey::Meeting(toast_id));
+                self.app
+                    .update(cx, |state, cx| state.snooze_meeting_toast(toast_id, cx));
+            }
+            _ => {}
+        }
+    }
+
     fn poll_tray(&mut self, cx: &mut Context<Self>) {
         let commands = self.tray.as_ref().map(Tray::poll).unwrap_or_default();
         for command in commands {
             match command {
                 TrayCommand::Toggle => self.toggle_main_window(cx),
                 TrayCommand::Open => self.raise_main_window(cx),
-                TrayCommand::ToggleSound => self.update_settings(cx, |settings| {
-                    settings.sounds.notification_sound = !settings.sounds.notification_sound
-                }),
-                TrayCommand::ToggleDoNotDisturb => self.toggle_own_do_not_disturb(cx),
-                TrayCommand::Settings => {
+                TrayCommand::SetStatus(kind) => {
+                    let forced = ForcedAvailability {
+                        kind,
+                        expires_at: None,
+                    };
+                    self.app
+                        .update(cx, |state, cx| state.set_own_availability(Some(forced), cx));
+                    self.sync_tray(cx);
+                }
+                TrayCommand::SetStatusDuration(duration) => {
+                    let Some(kind) = self
+                        .app
+                        .read(cx)
+                        .own_status
+                        .forced
+                        .map(|forced| forced.kind)
+                        .filter(|kind| *kind != ForcedKind::Available)
+                    else {
+                        continue;
+                    };
+                    let forced = ForcedAvailability {
+                        kind,
+                        expires_at: Some(duration.expires_at(Local::now())),
+                    };
+                    self.app
+                        .update(cx, |state, cx| state.set_own_availability(Some(forced), cx));
+                    self.sync_tray(cx);
+                }
+                TrayCommand::ResetStatus => {
+                    self.app
+                        .update(cx, |state, cx| state.set_own_availability(None, cx));
+                    self.sync_tray(cx);
+                }
+                TrayCommand::Notifications => {
                     self.raise_main_window(cx);
                     self.app.update(cx, |state, cx| {
                         state.open_settings(SettingsSection::Notifications, cx)
@@ -1183,22 +1517,6 @@ impl NotificationCenter {
                 }
                 TrayCommand::Quit => cx.quit(),
             }
-        }
-    }
-
-    fn toggle_own_do_not_disturb(&mut self, cx: &mut Context<Self>) {
-        let forced = (!own_do_not_disturb(self.app.read(cx))).then_some(ForcedAvailability {
-            kind: ForcedKind::DoNotDisturb,
-            expires_at: None,
-        });
-        self.app
-            .update(cx, |state, cx| state.set_own_availability(forced, cx));
-        self.sync_tray(cx);
-    }
-
-    fn sync_tray_presence(&mut self, cx: &App) {
-        if self.tray_do_not_disturb != own_do_not_disturb(self.app.read(cx)) {
-            self.sync_tray(cx);
         }
     }
 
@@ -1259,14 +1577,15 @@ impl NotificationCenter {
     }
 
     fn sync_tray(&mut self, cx: &App) {
-        self.tray_do_not_disturb = own_do_not_disturb(self.app.read(cx));
-        if let Some(tray) = &self.tray {
-            tray.sync(
-                self.settings.sounds.notification_sound,
-                self.tray_do_not_disturb,
-                !self.unread_mentions.is_empty(),
-            );
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let presence = tray_presence_from(self.app.read(cx), !self.unread_mentions.is_empty());
+        if self.last_tray_presence.as_ref() == Some(&presence) {
+            return;
         }
+        tray.sync(presence.clone());
+        self.last_tray_presence = Some(presence);
     }
 
     fn refresh_badge(&mut self, cx: &mut Context<Self>) {
@@ -1542,6 +1861,19 @@ fn own_do_not_disturb(state: &AppState) -> bool {
     own_presence(state) == PresenceKind::DoNotDisturb
 }
 
+fn tray_presence_from(state: &AppState, mention: bool) -> TrayPresence {
+    let summary = own_status::state_summary(&state.own_status, own_presence(state), &Local::now());
+    let title = match &summary.until {
+        Some(until) => format!("{} {until}", summary.label),
+        None => summary.label.to_owned(),
+    };
+    TrayPresence::new(
+        title,
+        state.own_status.forced.map(|forced| forced.kind),
+        mention,
+    )
+}
+
 fn sync_loop(handle: &mut Option<SoundHandle>, audible: bool, tone: CallTone) {
     match (audible, handle.is_some()) {
         (true, false) => *handle = Some(sound_cache::start(tone.file_name(), true)),
@@ -1586,6 +1918,21 @@ fn wrapped_lines(text: &str, width: f32, cx: &App) -> usize {
                 + 1
         })
         .sum()
+}
+
+#[cfg(target_os = "linux")]
+const CLOSED_BY_USER: u32 = 2;
+
+#[cfg(target_os = "linux")]
+fn parse_logical_key(key: &str) -> Option<DesktopKey> {
+    let (kind, id) = key.split_once(':')?;
+    let id = id.parse().ok()?;
+    match kind {
+        "message" => Some(DesktopKey::Message(id)),
+        "ring" => Some(DesktopKey::Ring(id)),
+        "meeting" => Some(DesktopKey::Meeting(id)),
+        _ => None,
+    }
 }
 
 fn popup_options(slot: Slot, area: WorkArea) -> WindowOptions {

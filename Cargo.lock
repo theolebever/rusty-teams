@@ -465,6 +465,7 @@ dependencies = [
  "tray-icon",
  "windows 0.62.2",
  "x11rb",
+ "zbus 5.19.0",
  "zed-font-kit",
 ]
 
