@@ -6,33 +6,7 @@ use chrono::{Datelike, Duration, Local, Offset};
 use rune::*;
 use crate::ui::text;
 
-#[allow(dead_code)]
-pub(crate) mod model {
-    mod app_base {
-        pub mod format {
-            pub fn calendar_range_label(
-                start: chrono::NaiveDate,
-                end: chrono::NaiveDate,
-            ) -> String {
-                use chrono::Datelike;
-                if start == end {
-                    end.format("%B %-d, %Y").to_string()
-                } else if start.year() != end.year() {
-                    format!(
-                        "{} - {}",
-                        start.format("%B %-d, %Y"),
-                        end.format("%B %-d, %Y")
-                    )
-                } else if start.month() != end.month() {
-                    format!("{} - {}", start.format("%B %-d"), end.format("%B %-d, %Y"))
-                } else {
-                    format!("{}-{}, {}", start.format("%B %-d"), end.day(), end.year())
-                }
-            }
-        }
-    }
-    include!("../../app-call-model/src/week_grid.rs");
-}
+pub(crate) use app_call_model::week_grid as model;
 
 const HOUR: f32 = 48.0;
 
@@ -99,7 +73,10 @@ fn event<A: Actions + 'static>(s: &UiState<A>, e: &CalendarRow, date: chrono::Na
 pub fn week<A: Actions + 'static>(s: &UiState<A>) -> El {
     let source = events(&s.screens.calendar);
     let count = s.screens.calendar_view.days();
-    let days = model::week_days(&source, s.screens.week, count as i64, Local::now().offset().fix());
+    let dates: Vec<_> = (0..count as i64)
+        .map(|day| s.screens.week + Duration::days(day))
+        .collect();
+    let days = model::week_days(&source, &dates, Local::now().offset().fix());
     let mut headings = row().grow(1.0).min_w(0.0).h_full().equal_columns(count);
     let all_day_height = 26.0
         * days
