@@ -28,6 +28,11 @@ pub fn flash() {
     if let Some(handle) = handle() { platform::flash(handle); }
 }
 
+/// Whether a count reached the taskbar button yet (it needs the window's handle).
+pub fn drawn() -> bool {
+    SHOWN.load(Ordering::Relaxed) != usize::MAX
+}
+
 /// Shows `count` on the taskbar button (none at zero); clearing it also stops a flash.
 pub fn set_badge(count: usize) {
     let Some(handle) = handle() else { return };

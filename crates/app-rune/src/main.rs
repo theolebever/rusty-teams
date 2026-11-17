@@ -168,7 +168,8 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let reminded = reminders::poll(s, chrono::Utc::now());
     let translated = translation::poll(s);
     notifications::ring(s);
-    taskbar::set_badge(notifications::badge_count(s));
+    // Every input of the count arrives through `apply`; counting rebuilds the activity feed.
+    if changed || !taskbar::drawn() { taskbar::set_badge(notifications::badge_count(s)); }
     tray::sync(s);
     let splashed = splash::tick(s, tx);
     changed || noticed || ticked || opened || call_changed || reminded || translated || splashed

@@ -2,7 +2,8 @@
 //!
 //! The managed Chrome session for Microsoft Teams login is unchanged (ADR 0003).
 
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -149,19 +150,10 @@ fn discover_browsers() -> Vec<(String, String)> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
+    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
 }
 
 #[cfg(target_os = "macos")]

@@ -24,7 +24,7 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -45,13 +45,13 @@ jobs:
           gpui-patches: 'false'
 
       - name: Build
-        run: cargo build -p app-rune --release --locked
+        run: cargo build -p app-rune --profile dist --locked
 
       - name: Upload portable executable
         uses: actions/upload-artifact@v7
         with:
           name: teams-windows-amd64-portable
-          path: target/release/rusty-teams-rune.exe
+          path: target/dist/rusty-teams-rune.exe
           if-no-files-found: error
 
       - name: Installer
@@ -65,7 +65,7 @@ jobs:
           $version = $env:RELEASE_TAG -replace '^v', ''
           & "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe" `
             "/DAppVersion=$version" `
-            "/DSourceExe=$env:GITHUB_WORKSPACE/target/release/rusty-teams-rune.exe" `
+            "/DSourceExe=$env:GITHUB_WORKSPACE/target/dist/rusty-teams-rune.exe" `
             "/O$env:GITHUB_WORKSPACE/target/installer" `
             scripts/windows-installer.iss
 

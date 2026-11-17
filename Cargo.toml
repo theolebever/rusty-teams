@@ -80,3 +80,20 @@ opt-level = 1
 
 [profile.release.package.app-state]
 opt-level = 1
+
+# What CI ships (`cargo build --profile dist`): `release` stays fast to build locally, this one
+# is fast to run. Release's per-package opt-level 1 is inherited, so the crates Rune links are reset.
+[profile.dist]
+inherits = "release"
+incremental = false
+codegen-units = 16
+lto = "thin"
+
+[profile.dist.package.app-base]
+opt-level = 3
+
+[profile.dist.package.app-call-model]
+opt-level = 3
+
+[profile.dist.package.app-state]
+opt-level = 3
