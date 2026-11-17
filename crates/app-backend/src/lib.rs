@@ -8,6 +8,8 @@ pub mod format;
 pub mod google_calendar_sync;
 pub mod launcher;
 pub mod notify;
+pub mod org_watch;
+pub mod orgs;
 pub mod presence_link;
 pub mod runtime;
 pub mod schedule;

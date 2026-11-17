@@ -51,7 +51,7 @@ pub mod ui_locale {
 }
 pub mod updater;
 pub mod user_activity;
-pub use app_backend::{appearance, autostart, crash_log, diagnostics, format, presence_link, runtime, support, version};
+pub use app_backend::{appearance, autostart, crash_log, diagnostics, format, orgs, presence_link, runtime, support, version};
 #[cfg(feature = "gpui")]
 pub mod zoom;
 pub const APP_NAME: &str = "Rusty Teams";

@@ -24,6 +24,8 @@ pub trait Host {
     fn handle(&mut self) -> StateHandle;
     fn open_url(&mut self, url: &str);
     fn write_clipboard(&mut self, text: String);
+    /// Ends the app, e.g. after a restart into another org was started.
+    fn quit(&mut self);
 }
 
 /// What a host gives spawned tasks: a way back to the state, a timer and a
@@ -149,6 +151,10 @@ mod gpui_host {
 
         fn write_clipboard(&mut self, text: String) {
             App::write_to_clipboard(self, ClipboardItem::new_string(text));
+        }
+
+        fn quit(&mut self) {
+            App::quit(self);
         }
     }
 

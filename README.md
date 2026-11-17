@@ -111,6 +111,8 @@ cargo run -p app -- --no-sso
 | Capture GPUI sous Linux | `cargo build -p app && scripts/headless-shot.sh shot.png` |
 | Vérification des dispositions GPUI | `cargo build -p app && scripts/layout-sweep.sh` |
 
+Organisations invitées (GPUI) : le menu du compte liste les organisations du compte (domicile et invité) avec leurs conversations non lues ; en choisir une redémarre l’application dessus avec son propre cache. Les nouveaux messages des autres organisations s’affichent en notifications.
+
 Sous Linux, la compilation GPUI nécessite notamment clang 21 ou plus récent pour libwebrtc et mold, configuré dans `.cargo/config.toml`. Voir [apt.llvm.org](https://apt.llvm.org) si la version de clang fournie par la distribution est trop ancienne. Les appels nécessitent aussi glib à l’exécution. Sous Windows, les builds natifs utilisent les outils C++ de Visual Studio et le SDK Windows ; la préparation complète des artefacts est décrite dans [l’action de compilation Windows](.github/actions/setup-windows/action.yml).
 
 ### Binaires et CI

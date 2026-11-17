@@ -335,7 +335,7 @@ impl Bridge {
         });
         let transport = endpoint.map_or_else(|| transport(&database, no_sso), |endpoint| Arc::new(session::CdpTransport::new(&endpoint)) as Arc<dyn session::Transport>);
         let (activity_sender, activity) = watch::channel(false);
-        let events = app_backend::backend::start(store, transport, !read_only, activity);
+        let events = app_backend::backend::start(store, transport, !read_only, activity, None);
         app_backend::runtime::handle().spawn(forward(shared.clone(), events));
         Bridge {
             shared,

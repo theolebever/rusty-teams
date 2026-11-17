@@ -13,6 +13,7 @@ directories.workspace = true
 graph.workspace = true
 resvg = { version = "0.46", default-features = false, features = ["text"] }
 log = "0.4"
+serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 store.workspace = true

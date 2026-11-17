@@ -422,6 +422,7 @@ dependencies = [
  "log",
  "resvg 0.46.0",
  "rust-i18n",
+ "serde",
  "serde_json",
  "session",
  "store",
