@@ -1,8 +1,17 @@
+mod audio_switch;
+mod bots;
+mod escalation;
+mod peer_sdp;
+mod stats;
+mod teardown;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+use self::{audio_switch::*, bots::*, escalation::*, peer_sdp::*, stats::*, teardown::*};
 
 use chatsvc::TrouterCallback;
 use futures_util::StreamExt;
@@ -80,7 +89,7 @@ use crate::sdp::{
     LineRole, OfferPlan, RemoteOffer, SignaledOffer, from_teams_offer, stream_lines,
     to_browser_answer, to_teams_answer, to_teams_offer,
 };
-use crate::send_control::{RequestFilter, parse_request};
+use crate::send_control::{BitrateGovernor, RequestFilter, parse_request};
 use crate::signaling::{
     Answer, Attached, Callee, Conversation, Invitation, InviteTarget, LeaveReason, MeetingTarget,
     NegotiationFailure, Participant, Signaling, TenantRouting, chat_thread_id,
@@ -92,12 +101,13 @@ use crate::timeline::{Timeline, TimelineEntry};
 use crate::transfer::{Replacement, TransferEvent, TransferTarget};
 use crate::trouter_events::{
     CallEnd, CallEvent, CallbackLinks, ProgressStatus, callback_tag, classify, decode_body,
+    nested_links, object_keys,
 };
 use crate::video_frame::{VideoKey, VideoPicture};
 use crate::video_layout::{
-    CAMERA_MID, MediaDescription, ONE_TO_ONE_SHARE_MID, SCREEN_STREAM, SendCapabilityReporter,
-    SlotTable, VideoLines, VideoRouter, add_one_to_one_lines, add_share_line, add_video_lines,
-    offer_plan, one_to_one_plan,
+    CAMERA_MID, MediaDescription, ONE_TO_ONE_SHARE_MID, SCREEN_STREAM, SHARE_MID,
+    SendCapabilityReporter, SlotTable, VideoLines, VideoRouter, add_one_to_one_lines,
+    add_share_line, add_video_lines, offer_plan, one_to_one_plan,
 };
 use crate::video_receive::{
     ReceiveChange, SourceRequester, VideoCounters, VideoReceive, spawn_video_pump,
@@ -307,86 +317,6 @@ fn random_u32() -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x7fff_ffff
 }
 
-#[derive(Default)]
-struct Recording {
-    samples: Vec<i16>,
-    current_second: Vec<i16>,
-    per_second: Vec<(f32, f32)>,
-}
-
-enum PeerEvent {
-    Ice(IceConnectionState),
-    Connection(PeerConnectionState),
-    Track(RtcAudioTrack),
-    VideoTrack { mid: String, track: RtcVideoTrack },
-    Data(Vec<u8>),
-}
-
-struct PeerSession {
-    peer: PeerConnection,
-    events: mpsc::UnboundedReceiver<PeerEvent>,
-    _data_channel: Option<DataChannel>,
-    gathered: Gathered,
-}
-
-#[derive(Clone, Default)]
-struct Gathered {
-    candidates: Arc<std::sync::Mutex<Vec<String>>>,
-    complete: Arc<AtomicBool>,
-    relay_seen_at: Arc<std::sync::Mutex<Option<Instant>>>,
-    waited_ms: Arc<AtomicU64>,
-}
-
-/// libwebrtc gathers continually here, and TCP/TLS relays trickle in late, so a UDP relay plus a short settle is enough.
-fn gathering_settled(complete: bool, since_udp_relay: Option<Duration>) -> bool {
-    complete || since_udp_relay.is_some_and(|since| since >= RELAY_SETTLE)
-}
-
-impl Gathered {
-    fn settled(&self) -> bool {
-        let since_udp_relay = self
-            .relay_seen_at
-            .lock()
-            .expect("relay time lock")
-            .map(|at| at.elapsed());
-        gathering_settled(self.complete.load(Ordering::SeqCst), since_udp_relay)
-    }
-
-    async fn candidates(&self) -> Vec<String> {
-        let waited = Instant::now();
-        while !self.settled() && waited.elapsed() < GATHERING_LIMIT {
-            tokio::time::sleep(GATHERING_POLL).await;
-        }
-        self.complete.store(true, Ordering::SeqCst);
-        self.waited_ms
-            .store(waited.elapsed().as_millis() as u64, Ordering::SeqCst);
-        self.candidates.lock().expect("candidates lock").clone()
-    }
-
-    fn summary(&self) -> String {
-        let count = self.candidates.lock().expect("candidates lock").len();
-        format!(
-            "{count} candidate(s) after {} ms",
-            self.waited_ms.load(Ordering::SeqCst)
-        )
-    }
-}
-
-async fn direct_sdp(teams_sdp: &str, gathered: Option<&Gathered>, kind: SdpKind) -> Result<String> {
-    match gathered {
-        Some(gathered) => with_candidates(teams_sdp, &gathered.candidates().await, kind),
-        None => Ok(teams_sdp.to_owned()),
-    }
-}
-
-struct OfferedMedia {
-    browser_offer: String,
-    signaled: SignaledOffer,
-    video: VideoLines,
-    plan: OfferPlan,
-    modalities: Vec<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
     Conference,
@@ -399,70 +329,13 @@ pub enum AcceptMode {
     Video,
 }
 
-#[derive(Clone, Copy)]
-enum AnswerVideo<'a> {
-    Reject,
-    Receive,
-    Send(&'a RtcVideoTrack),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Change {
-    Hold(bool),
-    Camera(bool),
-    Share(bool),
-}
-
-struct SamePeerOffer {
-    browser_offer: String,
-    signaled: SignaledOffer,
-    change: Change,
-    reply_tags: Vec<String>,
-}
-
-struct GlareResend {
-    change: Change,
-    reply_tags: Vec<String>,
-    at: Instant,
-}
-
-struct NextPeer {
-    session: PeerSession,
-    offered: Option<OfferedMedia>,
-    reply_tags: Vec<String>,
-    deadline: Option<Instant>,
-    connected: bool,
-    retargeted: bool,
-}
-
-fn answers_offer(callback_path: &str, reply_tags: &[String]) -> bool {
-    match callback_tag(callback_path) {
-        Some(tag) if !reply_tags.is_empty() => reply_tags.contains(&tag),
-        _ => true,
+fn remember_call_leg(live: &mut Live, url: Option<&str>) {
+    let Some(url) = url.filter(|url| !url.is_empty()) else {
+        return;
+    };
+    if !live.call_legs.iter().any(|known| known == url) {
+        live.call_legs.push(url.to_owned());
     }
-}
-
-#[derive(Clone)]
-struct RemoteCall {
-    signaling: Arc<Signaling>,
-    conversation: Conversation,
-    participant: Participant,
-    threadless: bool,
-}
-
-#[derive(Default)]
-struct Live {
-    peers: Vec<PeerConnection>,
-    audio: Option<AudioSetup>,
-    remote: Option<RemoteCall>,
-    broker: Option<JoinHandle<()>>,
-    broker_running: Arc<AtomicBool>,
-    callbacks: Option<mpsc::UnboundedReceiver<TrouterCallback>>,
-    route_id: Option<String>,
-    skip_leave: bool,
-    cancel_leave: bool,
-    video_tasks: Vec<JoinHandle<()>>,
-    video_counters: Arc<VideoCounters>,
 }
 
 fn advance(state: &mut CallState, signal: CallSignal, control: &CallControl) -> bool {
@@ -596,300 +469,6 @@ impl CallEngine {
     }
 }
 
-fn open_peer(
-    factory: &PeerConnectionFactory,
-    grant: &RelayGrant,
-    relay_host: &str,
-    with_data_channel: bool,
-) -> Result<PeerSession> {
-    let mut configuration = RtcConfiguration::default();
-    configuration.ice_servers = vec![grant.ice_server(relay_host)];
-    let peer = factory
-        .create_peer_connection(configuration)
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let (sender, events) = mpsc::unbounded_channel();
-    let data_channel = with_data_channel
-        .then(|| open_data_channel(&peer, sender.clone()))
-        .transpose()?;
-    let gathered = Gathered::default();
-    let candidate_sink = gathered.candidates.clone();
-    let relay_seen_at = gathered.relay_seen_at.clone();
-    peer.on_ice_candidate(Some(Box::new(move |candidate| {
-        if candidate.sdp_mline_index() == 0 {
-            let text = candidate.candidate();
-            if is_udp_relay(&text) {
-                relay_seen_at
-                    .lock()
-                    .expect("relay time lock")
-                    .get_or_insert_with(Instant::now);
-            }
-            candidate_sink.lock().expect("candidates lock").push(text);
-        }
-    })));
-    let gathering_done = gathered.complete.clone();
-    peer.on_ice_gathering_state_change(Some(Box::new(move |state| match state {
-        IceGatheringState::Complete => gathering_done.store(true, Ordering::SeqCst),
-        IceGatheringState::Gathering => gathering_done.store(false, Ordering::SeqCst),
-        IceGatheringState::New => {}
-    })));
-    let ice_sender = sender.clone();
-    peer.on_ice_connection_state_change(Some(Box::new(move |state| {
-        let _ = ice_sender.send(PeerEvent::Ice(state));
-    })));
-    let connection_sender = sender.clone();
-    peer.on_connection_state_change(Some(Box::new(move |state| {
-        let _ = connection_sender.send(PeerEvent::Connection(state));
-    })));
-    peer.on_track(Some(Box::new(move |event| match event.track {
-        MediaStreamTrack::Audio(track) => {
-            let _ = sender.send(PeerEvent::Track(track));
-        }
-        MediaStreamTrack::Video(track) => {
-            let mid = event.transceiver.mid().unwrap_or_default();
-            let _ = sender.send(PeerEvent::VideoTrack { mid, track });
-        }
-    })));
-    Ok(PeerSession {
-        peer,
-        events,
-        _data_channel: data_channel,
-        gathered,
-    })
-}
-
-fn open_data_channel(
-    peer: &PeerConnection,
-    sender: mpsc::UnboundedSender<PeerEvent>,
-) -> Result<DataChannel> {
-    let channel = peer
-        .create_data_channel(DATA_CHANNEL_LABEL, DataChannelInit::default())
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    channel.on_message(Some(Box::new(move |buffer| {
-        let _ = sender.send(PeerEvent::Data(buffer.data.to_vec()));
-    })));
-    Ok(channel)
-}
-
-fn one_to_one_directions<'a>(
-    camera: bool,
-    share: bool,
-    camera_mid: &'a str,
-    share_mid: Option<&'a str>,
-    remote_shares: bool,
-) -> impl Fn(MediaLine<'_>) -> Option<&'static str> + 'a {
-    move |line| match line.kind {
-        "video" if line.mid == camera_mid => Some(if camera { "sendrecv" } else { INACTIVE }),
-        "video" if Some(line.mid) == share_mid => Some(match (share, remote_shares) {
-            (true, true) => "sendrecv",
-            (true, false) => "sendonly",
-            (false, true) => "recvonly",
-            (false, false) => INACTIVE,
-        }),
-        _ => None,
-    }
-}
-
-fn share_mid_in(offer_text: &str) -> Option<String> {
-    let mut mid = None;
-    for line in offer_text.lines().map(|line| line.trim_end_matches('\r')) {
-        if line.starts_with("m=") {
-            mid = None;
-        } else if let Some(value) = line.strip_prefix("a=mid:") {
-            mid = Some(value.to_owned());
-        } else if line.starts_with(&format!("a=msid:{SCREEN_STREAM} ")) && mid.is_some() {
-            return mid;
-        }
-    }
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
-fn directions_for(
-    layout: Layout,
-    hold: bool,
-    camera: bool,
-    share: bool,
-    camera_mid: &str,
-    share_mid: Option<&str>,
-    remote_shares: bool,
-    text: &str,
-) -> String {
-    match (hold, layout) {
-        (true, _) => rewrite_directions(text, |_| Some(INACTIVE)),
-        (false, Layout::OneToOne) => rewrite_directions(
-            text,
-            one_to_one_directions(camera, share, camera_mid, share_mid, remote_shares),
-        ),
-        (false, Layout::Conference) => text.to_owned(),
-    }
-}
-
-async fn create_offer(
-    peer: &PeerConnection,
-    factory: &PeerConnectionFactory,
-    track: &RtcAudioTrack,
-    layout: Layout,
-    gathered: Option<&Gathered>,
-) -> Result<OfferedMedia> {
-    let transceiver_init = RtpTransceiverInit {
-        direction: RtpTransceiverDirection::SendRecv,
-        stream_ids: vec![MIC_STREAM.into()],
-        send_encodings: Vec::new(),
-    };
-    peer.add_transceiver(MediaStreamTrack::Audio(track.clone()), transceiver_init)
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let (video, plan) = match layout {
-        Layout::Conference => (add_video_lines(peer, factory)?, offer_plan()),
-        Layout::OneToOne => (add_one_to_one_lines(peer, factory)?, one_to_one_plan()),
-    };
-    let offer = peer
-        .create_offer(OfferOptions {
-            offer_to_receive_audio: true,
-            offer_to_receive_video: true,
-            ..OfferOptions::default()
-        })
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let browser_offer = directions_for(
-        layout,
-        false,
-        false,
-        false,
-        CAMERA_MID,
-        Some(ONE_TO_ONE_SHARE_MID),
-        false,
-        &offer.to_string(),
-    );
-    let description = parse_sdp(&browser_offer, SdpType::Offer)?;
-    peer.set_local_description(description)
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let mut numbers = random_u32;
-    let mut signaled = to_teams_offer(&browser_offer, &plan, &mut numbers)?;
-    signaled.sdp = direct_sdp(&signaled.sdp, gathered, SdpKind::Offer).await?;
-    Ok(OfferedMedia {
-        browser_offer,
-        signaled,
-        video,
-        plan,
-        modalities: accepted_modalities(false),
-    })
-}
-
-struct AnsweredMedia {
-    remote: RemoteOffer,
-    answer_sdp: String,
-    camera_mid: Option<String>,
-    receiving_share_mid: Option<String>,
-}
-
-fn main_video_mid(remote: &RemoteOffer) -> Option<String> {
-    remote
-        .lines
-        .iter()
-        .find(|line| line.role == LineRole::MainVideo)
-        .and_then(|line| line.browser_mids.first().cloned())
-}
-
-fn share_mids(remote: &RemoteOffer) -> Vec<String> {
-    remote
-        .lines
-        .iter()
-        .filter(|line| line.role == LineRole::ScreenShare)
-        .filter_map(|line| line.browser_mids.first().cloned())
-        .collect()
-}
-
-async fn answer_offer(
-    peer: &PeerConnection,
-    track: Option<&RtcAudioTrack>,
-    teams_offer: &str,
-    video: AnswerVideo<'_>,
-    sending_share_mid: Option<String>,
-    camera_on: bool,
-    gathered: Option<&Gathered>,
-) -> Result<AnsweredMedia> {
-    let remote = from_teams_offer(teams_offer)?;
-    let description = parse_sdp(&remote.browser_sdp, SdpType::Offer)?;
-    peer.set_remote_description(description)
-        .await
-        .map_err(|error| {
-            let lines: Vec<String> = remote
-                .lines
-                .iter()
-                .map(|line| format!("{:?}{:?}", line.role, line.browser_mids))
-                .collect();
-            Error::Webrtc(format!("{error} (offer lines: {})", lines.join(" ")))
-        })?;
-    let camera_mid = main_video_mid(&remote).filter(|_| !matches!(video, AnswerVideo::Reject));
-    let kept_share_mids = if matches!(video, AnswerVideo::Reject) {
-        Vec::new()
-    } else {
-        share_mids(&remote)
-    };
-    for transceiver in peer.transceivers() {
-        let is_video = matches!(
-            transceiver.receiver().track(),
-            Some(MediaStreamTrack::Video(_))
-        );
-        let unused = transceiver.mid().is_some_and(|mid| {
-            Some(&mid) != camera_mid.as_ref()
-                && !kept_share_mids.contains(&mid)
-                && Some(&mid) != sending_share_mid.as_ref()
-        });
-        if is_video && unused {
-            let _ = transceiver.stop();
-        }
-    }
-    if let Some(track) = track {
-        peer.add_track(MediaStreamTrack::Audio(track.clone()), &[MIC_STREAM])
-            .map_err(|error| Error::Webrtc(error.to_string()))?;
-    }
-    if let (AnswerVideo::Send(camera), Some(_)) = (video, &camera_mid) {
-        peer.add_track(MediaStreamTrack::Video(camera.clone()), &[CAMERA_STREAM])
-            .map_err(|error| Error::Webrtc(error.to_string()))?;
-    }
-    let answer = peer
-        .create_answer(AnswerOptions::default())
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let mut answer_text = answer.to_string();
-    for mid in kept_share_mids
-        .iter()
-        .filter(|mid| sending_share_mid.as_deref() != Some(mid.as_str()))
-    {
-        answer_text = stop_sending_on(&answer_text, mid);
-    }
-    let sends_camera = camera_on || matches!(video, AnswerVideo::Send(_));
-    if let Some(mid) = camera_mid.as_deref().filter(|_| !sends_camera) {
-        answer_text = stop_sending_on(&answer_text, mid);
-    }
-    peer.set_local_description(parse_sdp(&answer_text, SdpType::Answer)?)
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let receiving_share_mid = kept_share_mids
-        .into_iter()
-        .filter(|mid| sending_share_mid.as_deref() != Some(mid.as_str()))
-        .find(|mid| {
-            matches!(
-                direction_of(&answer_text, mid).as_deref(),
-                Some("recvonly" | "sendrecv")
-            )
-        });
-    let mut numbers = random_u32;
-    let signaled = to_teams_answer(&answer_text, &remote, &mut numbers)?;
-    Ok(AnsweredMedia {
-        remote,
-        answer_sdp: direct_sdp(&signaled.sdp, gathered, SdpKind::Answer).await?,
-        camera_mid,
-        receiving_share_mid,
-    })
-}
-
-fn new_media_leg_id() -> String {
-    uuid::Uuid::new_v4().simple().to_string().to_uppercase()
-}
-
 async fn setup_step<T, E>(
     control: &mut CallControl,
     step: impl std::future::Future<Output = std::result::Result<T, E>>,
@@ -912,17 +491,6 @@ where
         Ok(result) => Ok(result?),
         Err(_) => Err(Error::Signaling("Teams did not answer in time".into())),
     }
-}
-
-async fn next_peer_event(next: &mut Option<NextPeer>) -> Option<PeerEvent> {
-    match next {
-        Some(next) => next.session.events.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
-fn video_possible(remote_set: bool, layout: Layout, path: MediaPath) -> bool {
-    remote_set && !(layout == Layout::OneToOne && path == MediaPath::Mixer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1283,6 +851,7 @@ async fn drive(
                 }
             }
             keep_alive_link = media_links.get("callLeg").cloned();
+            remember_call_leg(live, keep_alive_link.as_deref());
             keep_alive_at = Some(Instant::now() + keep_alive_period(None));
             conversation
         }
@@ -1401,6 +970,7 @@ async fn drive(
     let mut same_peer: Option<SamePeerOffer> = None;
     let mut send_requests = RequestFilter::default();
     let mut send_capabilities = SendCapabilityReporter::default();
+    let mut bitrate_governor = BitrateGovernor::default();
     let mut same_peer_deadline: Option<Instant> = None;
     let mut same_peer_grace_until: Option<Instant> = None;
     let mut meeting_chat = conversation.chat_thread.clone();
@@ -1423,16 +993,17 @@ async fn drive(
     let (echo_add_tx, mut echo_add_rx) = mpsc::unbounded_channel::<Result<()>>();
     let mut echo_add_pending = false;
     loop {
-        if start_camera_pending && video_possible(remote_set, layout, negotiator.path()) {
+        let possible = video_possible(remote_set, layout, negotiator.path());
+        if camera_may_start(start_camera_pending, next.is_some(), possible) {
             start_camera_pending = false;
             control.defer(CallCommand::SetCamera(true));
         }
-        if video_possible(remote_set, layout, negotiator.path())
+        if camera_may_start(share_pending.is_some(), next.is_some(), possible)
             && let Some(source) = share_pending.take()
         {
             control.defer(CallCommand::StartShare(source));
         }
-        if video_possible(remote_set, layout, negotiator.path())
+        if camera_may_start(portal_pending.is_some(), next.is_some(), possible)
             && let Some(kind) = portal_pending.take()
         {
             control.defer(CallCommand::StartPortalShare(kind));
@@ -1447,9 +1018,42 @@ async fn drive(
             );
             deferred_changes.clear();
             negotiator.server_escalation_done();
+            // New mixer leg starts sequence numbers from 1 and has not heard our send capabilities yet.
+            send_requests = RequestFilter::default();
+            send_capabilities = SendCapabilityReporter::default();
             if let Some(mid) = remote_direct_share.take() {
                 video.router().set(&mid, None);
                 control.send(CallUpdate::ScreenShare(None));
+            }
+            // Detach local senders before closing: otherwise peer.close can hang
+            // while the camera/share capture threads still feed the old track.
+            local_video.clear_lines();
+            replace_leg_media_links(&mut media_links, &pending.leg_links);
+            let leg_names = pending
+                .leg_links
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",");
+            timeline.record(
+                "leg links",
+                if leg_names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    leg_names
+                },
+            );
+            if let Some(url) = media_links.get("callLeg").cloned()
+                && keep_alive_link.as_deref() != Some(url.as_str())
+            {
+                keep_alive_link = Some(url.clone());
+                remember_call_leg(live, Some(&url));
+            }
+            if let Some(track) = pending.remote_audio {
+                remote_audio = Some(track.clone());
+                if options.record_remote {
+                    tokio::spawn(record_track(track, recording.clone(), options.tone_hz));
+                }
             }
             let old = std::mem::replace(&mut current, pending.session);
             old.peer.close();
@@ -1462,7 +1066,30 @@ async fn drive(
             {
                 timeline.record("computer sound not carried over", error.to_string());
             }
+            if remote_audio.is_some() {
+                sync_software_audio(
+                    &factory,
+                    options,
+                    &input,
+                    muted,
+                    remote_audio.clone(),
+                    &current.peer,
+                    &track,
+                    software_wanted(
+                        mic_settings,
+                        share_sound_wanted,
+                        &local_video,
+                        live.audio.as_ref(),
+                    ),
+                    true,
+                    &mut software_audio,
+                    mic_settings,
+                    control,
+                    timeline,
+                );
+            }
             offered = pending.offered;
+            let answered = pending.answered;
             if let Some(mid) = direct_video_mid.take() {
                 video.router().set(&mid, None);
             }
@@ -1472,24 +1099,66 @@ async fn drive(
                 if let Err(error) = local_video.set_lines(media.video.clone()) {
                     timeline.record("video lines not attached", error.to_string());
                 }
-                if local_video.camera_on() {
-                    tell_media_descriptions(
-                        &remote,
-                        &media_links,
-                        MediaDescription::camera(true),
-                        &mut media_description_request,
-                        timeline,
-                    );
+                tell_bound_camera(
+                    &remote,
+                    &media_links,
+                    &local_video,
+                    &mut media_description_request,
+                    timeline,
+                );
+                tell_bound_share(
+                    &remote,
+                    &media_links,
+                    &local_video,
+                    &mut media_description_request,
+                    timeline,
+                );
+            } else if let Some(answered) = answered {
+                // Server escalation answered on a new peer: drop the old peer's
+                // senders and bind the camera/share lines that stayed alive there.
+                layout = Layout::Conference;
+                layout_plan = answered.remote.plan();
+                match video_lines_from_answer(&current.peer, &answered) {
+                    Some(lines) => {
+                        if let Err(error) = local_video.set_lines(lines) {
+                            timeline.record("video lines not attached", error.to_string());
+                        }
+                    }
+                    None => {
+                        local_video.clear_lines();
+                        timeline.record(
+                            "video lines not attached",
+                            "no transceiver for the answered camera line",
+                        );
+                    }
                 }
-                if local_video.sharing() {
-                    tell_media_descriptions(
-                        &remote,
-                        &media_links,
-                        MediaDescription::share(true),
-                        &mut media_description_request,
-                        timeline,
-                    );
-                }
+                negotiate_video_lines(
+                    &mut video,
+                    &signaling,
+                    control,
+                    timeline,
+                    &answered.offer_sdp,
+                    &answered.remote.lines,
+                    true,
+                    &media_links,
+                    &roster,
+                );
+                tell_bound_camera(
+                    &remote,
+                    &media_links,
+                    &local_video,
+                    &mut media_description_request,
+                    timeline,
+                );
+                tell_bound_share(
+                    &remote,
+                    &media_links,
+                    &local_video,
+                    &mut media_description_request,
+                    timeline,
+                );
+            } else {
+                local_video.clear_lines();
             }
             remote_set = true;
             if layout == Layout::OneToOne && negotiator.begin_conference_upgrade() {
@@ -1566,6 +1235,7 @@ async fn drive(
                                     control.send(CallUpdate::Lobby(true));
                                 }
                                 keep_alive_link = acceptance.links.get("callLeg").cloned();
+                                remember_call_leg(live, keep_alive_link.as_deref());
                                 keep_alive_seconds = acceptance.keep_alive_seconds;
                                 keep_alive_at = Some(Instant::now() + keep_alive_period(keep_alive_seconds));
                                 if action == MediaAction::ApplyAnswerThenEscalate {
@@ -1706,6 +1376,9 @@ async fn drive(
                             };
                             match applied {
                                 Ok(()) => {
+                                    if let Some(pending) = next.as_mut() {
+                                        pending.leg_links.extend(answer.links.clone());
+                                    }
                                     if let Some(media) = next.as_ref().and_then(|pending| pending.offered.as_ref()) {
                                         media_links.extend(answer.links.clone());
                                         negotiate_video(&mut video, &signaling, control, timeline, &answer.sdp, media, true, &media_links, &roster);
@@ -1753,7 +1426,20 @@ async fn drive(
                                 if let Some(resend) = glare_resend.take() {
                                     defer_to_new_peer(resend.change, &mut deferred_changes, &mut local_video, control);
                                 }
-                                match answer_on_new_peer(&factory, &grant, options, outgoing_track(software_audio.as_ref(), &track), &renegotiation.sdp).await {
+                                let camera_track = local_video.camera_track();
+                                let share_track = local_video.share_track();
+                                match answer_on_new_peer(
+                                    &factory,
+                                    &grant,
+                                    options,
+                                    outgoing_track(software_audio.as_ref(), &track),
+                                    &renegotiation.sdp,
+                                    local_video.camera_on(),
+                                    local_video.camera_on().then_some(&camera_track),
+                                    local_video.sharing().then_some(&share_track),
+                                )
+                                .await
+                                {
                                     Ok((session, answered)) => {
                                         timeline.record_sdp("local answer", &answered.answer_sdp);
                                         live.peers.push(session.peer.clone());
@@ -1761,8 +1447,22 @@ async fn drive(
                                         if let Some(replaced) = next.take() {
                                             replaced.session.peer.close();
                                         }
-                                        next = Some(NextPeer { session, offered: None, reply_tags: Vec::new(), deadline: Some(Instant::now() + NEXT_PEER_LIMIT), connected: false, retargeted: false });
-                                        sent
+                                        let mut leg_links = renegotiation.links.clone();
+                                        if let Ok((extra, keys)) = &sent {
+                                            absorb_answered_links(&mut leg_links, extra, timeline, keys);
+                                        }
+                                        next = Some(NextPeer {
+                                            session,
+                                            offered: None,
+                                            answered: Some(answered),
+                                            leg_links,
+                                            remote_audio: None,
+                                            reply_tags: Vec::new(),
+                                            deadline: Some(Instant::now() + NEXT_PEER_LIMIT),
+                                            connected: false,
+                                            retargeted: false,
+                                        });
+                                        sent.map(|_| ())
                                     }
                                     Err(error) => {
                                         if next.is_none() {
@@ -1779,42 +1479,116 @@ async fn drive(
                                 }
                             }
                             MediaAction::AnswerOnSamePeer => {
-                                let video_answer = if layout == Layout::OneToOne { AnswerVideo::Receive } else { AnswerVideo::Reject };
-                                match answer_offer(&current.peer, None, &renegotiation.sdp, video_answer, local_video.sharing().then(|| local_video.share_mid()).flatten(), local_video.camera_on(), (layout == Layout::OneToOne && negotiator.path() == MediaPath::Direct).then_some(&current.gathered)).await {
+                                // After a server escalation the follow-up offer matches the
+                                // pending peer's m-line order: never answer it on the old peer.
+                                let on_pending = next.as_ref().is_some_and(|pending| pending.answered.is_some());
+                                let peer = if on_pending {
+                                    &next.as_ref().unwrap().session.peer
+                                } else {
+                                    &current.peer
+                                };
+                                let camera_track = local_video.camera_track();
+                                let share_track = local_video.share_track();
+                                let video_answer = if local_video.camera_on() {
+                                    AnswerVideo::Send(&camera_track)
+                                } else {
+                                    AnswerVideo::Receive
+                                };
+                                let keep_slots = on_pending || layout == Layout::Conference;
+                                let gathered = (!on_pending
+                                    && layout == Layout::OneToOne
+                                    && negotiator.path() == MediaPath::Direct)
+                                    .then_some(&current.gathered);
+                                match answer_offer_with(
+                                    peer,
+                                    None,
+                                    &renegotiation.sdp,
+                                    video_answer,
+                                    local_video.sharing().then(|| local_video.share_mid()).flatten(),
+                                    local_video.sharing().then_some(&share_track),
+                                    local_video.camera_on(),
+                                    gathered,
+                                    keep_slots,
+                                    keep_slots,
+                                )
+                                .await
+                                {
                                     Ok(answered) => {
                                         timeline.record_sdp("local answer", &answered.answer_sdp);
+                                        if on_pending {
+                                            if let Some(pending) = next.as_mut() {
+                                                pending.leg_links.extend(renegotiation.links.clone());
+                                            }
+                                        } else {
+                                            media_links.extend(renegotiation.links.clone());
+                                        }
                                         let sent = send_media_answer(&remote, &links, &renegotiation.links, &answered, &media_leg_id).await;
+                                        if let Ok((extra, keys)) = &sent {
+                                            if on_pending {
+                                                if let Some(pending) = next.as_mut() {
+                                                    absorb_answered_links(&mut pending.leg_links, extra, timeline, keys);
+                                                }
+                                            } else {
+                                                absorb_answered_links(&mut media_links, extra, timeline, keys);
+                                            }
+                                        }
                                         for mid in answered.remote.plan().screen_share_mids {
                                             if !layout_plan.screen_share_mids.contains(&mid) {
                                                 layout_plan.screen_share_mids.push(mid);
                                             }
                                         }
-                                        if layout == Layout::OneToOne && answered.receiving_share_mid != remote_direct_share {
-                                            if let Some(mid) = &remote_direct_share {
-                                                video.router().set(mid, None);
+                                        if on_pending {
+                                            if let Some(pending) = next.as_mut() {
+                                                pending.answered = Some(answered);
                                             }
-                                            if let Some(mid) = &answered.receiving_share_mid {
-                                                video.router().set(mid, Some(VideoKey::Screen));
+                                        } else if layout == Layout::Conference {
+                                            negotiate_video_lines(
+                                                &mut video,
+                                                &signaling,
+                                                control,
+                                                timeline,
+                                                &answered.offer_sdp,
+                                                &answered.remote.lines,
+                                                true,
+                                                &media_links,
+                                                &roster,
+                                            );
+                                        } else if layout == Layout::OneToOne {
+                                            if answered.receiving_share_mid != remote_direct_share {
+                                                if let Some(mid) = &remote_direct_share {
+                                                    video.router().set(mid, None);
+                                                }
+                                                if let Some(mid) = &answered.receiving_share_mid {
+                                                    video.router().set(mid, Some(VideoKey::Screen));
+                                                }
+                                                remote_direct_share = answered.receiving_share_mid.clone();
+                                                control.send(CallUpdate::ScreenShare(remote_direct_share.as_ref().and(peer_mri.clone())));
                                             }
-                                            remote_direct_share = answered.receiving_share_mid.clone();
-                                            control.send(CallUpdate::ScreenShare(remote_direct_share.as_ref().and(peer_mri.clone())));
-                                        }
-                                        if layout == Layout::OneToOne
-                                            && !offer_sends_video(&renegotiation.sdp)
-                                            && let Some(key) = main_video_mid(&answered.remote).and_then(|mid| video.router().key_for(&mid))
-                                        {
-                                            control.video.forget(&key);
-                                            control.send(CallUpdate::VideoStopped(key));
+                                            if !offer_sends_video(&renegotiation.sdp)
+                                                && let Some(key) = main_video_mid(&answered.remote).and_then(|mid| video.router().key_for(&mid))
+                                            {
+                                                control.video.forget(&key);
+                                                control.send(CallUpdate::VideoStopped(key));
+                                            }
                                         }
                                         let held = is_hold(&renegotiation.sdp).unwrap_or(false);
                                         if held != remote_hold {
                                             remote_hold = held;
                                             control.send(CallUpdate::Hold(HoldState::from_flags(local_hold, remote_hold)));
                                         }
-                                        sent
+                                        sent.map(|_| ())
                                     }
                                     Err(error) => {
-                                        if current.peer.signaling_state() == SignalingState::HaveRemoteOffer {
+                                        if on_pending {
+                                            if let Some(pending) = next.as_ref()
+                                                && pending.session.peer.signaling_state()
+                                                    == SignalingState::HaveRemoteOffer
+                                            {
+                                                rollback_remote_offer(&pending.session.peer).await;
+                                            }
+                                        } else if current.peer.signaling_state()
+                                            == SignalingState::HaveRemoteOffer
+                                        {
                                             rollback_remote_offer(&current.peer).await;
                                         }
                                         if let Some(url) = &rejection_link {
@@ -2070,6 +1844,70 @@ async fn drive(
                         }
                         RejectedOffer::None => {}
                     },
+                    Ok(CallEvent::MediaAcknowledgement(ack)) => {
+                        if let Some(pending) = next.as_mut() {
+                            pending.leg_links.extend(ack.links);
+                            if pending.answered.is_some() {
+                                // Server-initiated mixer leg switch sends mediaAcknowledgement
+                                // instead of retargetCompletion; switch as soon as ICE connects.
+                                pending.retargeted = true;
+                            }
+                        } else if !ack.links.is_empty() {
+                            let old_request = media_links
+                                .get("applyChannelParameters")
+                                .or_else(|| media_links.get("controlVideoStreaming"))
+                                .cloned();
+                            let old_update = media_links.get("updateMediaDescriptions").cloned();
+                            replace_leg_media_links(&mut media_links, &ack.links);
+                            if let Some(url) = media_links.get("callLeg").cloned()
+                                && keep_alive_link.as_deref() != Some(url.as_str())
+                            {
+                                keep_alive_link = Some(url.clone());
+                                remember_call_leg(live, Some(&url));
+                            }
+                            let new_request = media_links
+                                .get("applyChannelParameters")
+                                .or_else(|| media_links.get("controlVideoStreaming"))
+                                .cloned();
+                            if layout == Layout::Conference
+                                && new_request != old_request
+                                && let Some(url) = new_request
+                            {
+                                video.replace_requester(SourceRequester::start(
+                                    signaling.clone(),
+                                    url,
+                                    video.router().clone(),
+                                    control.video.clone(),
+                                    timeline.clone(),
+                                ));
+                                send_receive_change(control, video.reselect(&roster));
+                            }
+                            if layout == Layout::Conference
+                                && media_links.get("updateMediaDescriptions") != old_update.as_ref()
+                                && local_video.has_lines()
+                            {
+                                send_capabilities = SendCapabilityReporter::default();
+                                if local_video.camera_on() {
+                                    tell_bound_camera(
+                                        &remote,
+                                        &media_links,
+                                        &local_video,
+                                        &mut media_description_request,
+                                        timeline,
+                                    );
+                                }
+                                if local_video.sharing() {
+                                    tell_bound_share(
+                                        &remote,
+                                        &media_links,
+                                        &local_video,
+                                        &mut media_description_request,
+                                        timeline,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Ok(CallEvent::RetargetCompletion(body)) if body["retargetCompleted"]["code"].as_i64() == Some(0) => {
                         if let Some(pending) = next.as_mut() {
                             pending.retargeted = true;
@@ -2128,12 +1966,10 @@ async fn drive(
                                 }
                             }
                         }
+                        // Planned mixer escalation: ignore old-peer death while the new peer is pending.
+                        PeerConnectionState::Disconnected | PeerConnectionState::Failed
+                            if next.is_some() => {}
                         PeerConnectionState::Disconnected => {
-                            if advance(state, CallSignal::MediaDisconnected, control) {
-                                reconnect_deadline = Some(Instant::now() + options.reconnect_window);
-                            }
-                        }
-                        PeerConnectionState::Failed if next.is_some() => {
                             if advance(state, CallSignal::MediaDisconnected, control) {
                                 reconnect_deadline = Some(Instant::now() + options.reconnect_window);
                             }
@@ -2186,6 +2022,12 @@ async fn drive(
                 PeerEvent::VideoTrack { mid, track } => {
                     timeline.record("remote video track", format!("mid {mid} (new peer)"));
                     live.video_tasks.push(spawn_video_pump(track, mid, video.router().clone(), control.video.clone(), live.video_counters.clone()));
+                }
+                PeerEvent::Track(remote_track) => {
+                    timeline.record("remote audio track", "receiving (new peer)");
+                    if let Some(pending) = next.as_mut() {
+                        pending.remote_audio = Some(remote_track);
+                    }
                 }
                 PeerEvent::Connection(PeerConnectionState::Failed) => {
                     negotiator.escalation_failed();
@@ -2258,7 +2100,20 @@ async fn drive(
                 }
                 Some(CallCommand::SetCamera(on)) => {
                     let direct = layout == Layout::OneToOne && negotiator.path() != MediaPath::Mixer;
-                    if !remote_set || (on && !video_possible(remote_set, layout, negotiator.path())) {
+                    if on && next.is_some() {
+                        let first = !start_camera_pending;
+                        start_camera_pending = true;
+                        if local_video.is_available()
+                            && !local_video.camera_on()
+                            && !local_video.camera_previewing()
+                            && let Err(error) = local_video.preview_camera(&camera_choice)
+                        {
+                            control.send(CallUpdate::Notice(notice_with_detail(CAMERA_START_NOTICE, error)));
+                        }
+                        if first {
+                            control.send(CallUpdate::Camera(true));
+                        }
+                    } else if !remote_set || (on && !video_possible(remote_set, layout, negotiator.path())) {
                         if remote_set && next.is_none() && negotiator.begin_conference_upgrade() {
                             let pending = escalate(&factory, &grant, options, outgoing_track(software_audio.as_ref(), &track), &remote, &links, &media_leg_id, &media_links, &mut negotiator, live, timeline).await;
                             next = pending.or(next);
@@ -2292,7 +2147,16 @@ async fn drive(
                             }
                             Ok(()) => {
                                 control.send(CallUpdate::Camera(true));
-                                tell_media_descriptions(&remote, &media_links, MediaDescription::camera(true), &mut media_description_request, timeline);
+                                tell_media_descriptions(
+                                    &remote,
+                                    &media_links,
+                                    MediaDescription::camera_line(
+                                        local_video.camera_mid().unwrap_or_else(|| CAMERA_MID.to_owned()),
+                                        true,
+                                    ),
+                                    &mut media_description_request,
+                                    timeline,
+                                );
                             }
                             Err(error) => control.send(CallUpdate::Notice(notice_with_detail(CAMERA_START_NOTICE, error))),
                         }
@@ -2315,7 +2179,16 @@ async fn drive(
                     } else {
                         local_video.stop_camera();
                         control.send(CallUpdate::Camera(false));
-                        tell_media_descriptions(&remote, &media_links, MediaDescription::camera(false), &mut media_description_request, timeline);
+                        tell_media_descriptions(
+                            &remote,
+                            &media_links,
+                            MediaDescription::camera_line(
+                                local_video.camera_mid().unwrap_or_else(|| CAMERA_MID.to_owned()),
+                                false,
+                            ),
+                            &mut media_description_request,
+                            timeline,
+                        );
                     }
                 }
                 Some(CallCommand::SelectCamera(choice)) => {
@@ -2345,6 +2218,9 @@ async fn drive(
                         control.send(CallUpdate::Notice(NOT_CONNECTED_FOR_VIDEO.into()));
                     } else if local_hold {
                         control.send(CallUpdate::Notice(ON_HOLD_NOTICE.into()));
+                    } else if !local_video.sharing() && next.is_some() {
+                        portal_pending = Some(kind);
+                        control.send(CallUpdate::Notice(SHARE_QUEUED_NOTICE.into()));
                     } else if direct && !local_video.sharing() && (same_peer.is_some() || glare_resend.is_some()) {
                         control.send(CallUpdate::Notice(CHANGE_RUNNING_NOTICE.into()));
                     } else if direct
@@ -2353,7 +2229,10 @@ async fn drive(
                         && let Err(error) = attach_share_line(&current.peer, &factory, &mut local_video, direct_video_mid.as_deref())
                     {
                         control.send(CallUpdate::Notice(notice_with_detail(SHARING_START_NOTICE, error)));
-                    } else if !local_video.sharing() && !video_possible(remote_set, layout, negotiator.path()) {
+                    } else if !local_video.sharing()
+                        && (!video_possible(remote_set, layout, negotiator.path())
+                            || !local_video.share_sending())
+                    {
                         if next.is_none() && negotiator.begin_conference_upgrade() {
                             let pending = escalate(&factory, &grant, options, outgoing_track(software_audio.as_ref(), &track), &remote, &links, &media_leg_id, &media_links, &mut negotiator, live, timeline).await;
                             next = pending.or(next);
@@ -2384,6 +2263,9 @@ async fn drive(
                         control.send(CallUpdate::Notice(NOT_CONNECTED_FOR_VIDEO.into()));
                     } else if local_hold {
                         control.send(CallUpdate::Notice(ON_HOLD_NOTICE.into()));
+                    } else if next.is_some() {
+                        share_pending = Some(source);
+                        control.send(CallUpdate::Notice(SHARE_QUEUED_NOTICE.into()));
                     } else if direct && local_video.share_sending() {
                         match local_video.start_share(&source) {
                             Ok(()) => announce_share(control, &source),
@@ -2416,7 +2298,9 @@ async fn drive(
                             }
                             Err(error) => control.send(CallUpdate::Notice(notice_with_detail(SHARING_START_NOTICE, error))),
                         }
-                    } else if !video_possible(remote_set, layout, negotiator.path()) {
+                    } else if !video_possible(remote_set, layout, negotiator.path())
+                        || !local_video.share_sending()
+                    {
                         if next.is_none() && negotiator.begin_conference_upgrade() {
                             let pending = escalate(&factory, &grant, options, outgoing_track(software_audio.as_ref(), &track), &remote, &links, &media_leg_id, &media_links, &mut negotiator, live, timeline).await;
                             next = pending.or(next);
@@ -2431,7 +2315,16 @@ async fn drive(
                         match local_video.start_share(&source) {
                             Ok(()) => {
                                 announce_share(control, &source);
-                                tell_media_descriptions(&remote, &media_links, MediaDescription::share(true), &mut media_description_request, timeline);
+                                tell_media_descriptions(
+                                    &remote,
+                                    &media_links,
+                                    MediaDescription::share_line(
+                                        local_video.share_mid().unwrap_or_else(|| SHARE_MID.to_owned()),
+                                        true,
+                                    ),
+                                    &mut media_description_request,
+                                    timeline,
+                                );
                                 sync_software_audio(&factory, options, &input, muted, remote_audio.clone(), &current.peer, &track, software_wanted(mic_settings, share_sound_wanted, &local_video, live.audio.as_ref()), false, &mut software_audio, mic_settings, control, timeline);
                             }
                             Err(error) => control.send(CallUpdate::Notice(notice_with_detail(SHARING_START_NOTICE, error))),
@@ -2463,7 +2356,16 @@ async fn drive(
                         local_video.stop_share();
                         sync_software_audio(&factory, options, &input, muted, remote_audio.clone(), &current.peer, &track, software_wanted(mic_settings, share_sound_wanted, &local_video, live.audio.as_ref()), false, &mut software_audio, mic_settings, control, timeline);
                         clear_share(control);
-                        tell_media_descriptions(&remote, &media_links, MediaDescription::share(false), &mut media_description_request, timeline);
+                        tell_media_descriptions(
+                            &remote,
+                            &media_links,
+                            MediaDescription::share_line(
+                                local_video.share_mid().unwrap_or_else(|| SHARE_MID.to_owned()),
+                                false,
+                            ),
+                            &mut media_description_request,
+                            timeline,
+                        );
                     }
                 }
                 Some(CallCommand::SetShareSound(on)) => {
@@ -2760,6 +2662,15 @@ async fn drive(
                     }
                 }
                 Some(CallCommand::EndMeeting) => {
+                    stop_local_publish(
+                        &mut local_video,
+                        &remote,
+                        &media_links,
+                        &mut media_description_request,
+                        control,
+                        timeline,
+                    )
+                    .await;
                     if is_meeting {
                         match remote.signaling.end_for_all(&remote.conversation, &remote.participant).await {
                             Ok(()) => {
@@ -2773,6 +2684,16 @@ async fn drive(
                     break;
                 }
                 Some(CallCommand::Hangup) | None => {
+                    // Stop publishing before leave so remotes do not keep a frozen camera tile.
+                    stop_local_publish(
+                        &mut local_video,
+                        &remote,
+                        &media_links,
+                        &mut media_description_request,
+                        control,
+                        timeline,
+                    )
+                    .await;
                     advance(state, CallSignal::LocalLeave, control);
                     break;
                 }
@@ -2816,8 +2737,14 @@ async fn drive(
                 if layout == Layout::Conference
                     && let Some(size) = local_video.camera_size()
                     && let Some(url) = media_links.get("applyChannelParameters").cloned()
-                    && let Some(body) =
-                        send_capabilities.body_for(size, local_video.video_quality())
+                    && let Some(body) = send_capabilities.body_for_mid(
+                        local_video
+                            .camera_mid()
+                            .as_deref()
+                            .unwrap_or(CAMERA_MID),
+                        size,
+                        local_video.video_quality(),
+                    )
                 {
                     let signaling = signaling.clone();
                     let timeline = timeline.clone();
@@ -2864,6 +2791,28 @@ async fn drive(
                     && let Some(sample) = health_sampler.sample(std::time::Instant::now(), snapshot.health)
                 {
                     let quality = quality_tracker.observe(std::time::Instant::now(), &sample);
+                    if local_video.camera_on()
+                        && snapshot.camera_target_bitrate > 0
+                        && bitrate_governor.observe(
+                            std::time::Instant::now(),
+                            snapshot.video.remote_round_trip_ms,
+                            sample.loss_percent,
+                            snapshot.camera_target_bitrate,
+                        )
+                    {
+                        let cap = bitrate_governor.cap_bps();
+                        if let Err(error) = local_video.cap_camera_bitrate(cap) {
+                            timeline.record("bitrate cap failed", error.to_string());
+                        } else {
+                            timeline.record(
+                                "bitrate cap",
+                                match cap {
+                                    Some(bps) => format!("{} kbit/s", bps / 1000),
+                                    None => "cleared".into(),
+                                },
+                            );
+                        }
+                    }
                     control.send(CallUpdate::Health(CallHealth {
                         level: quality.level,
                         cpu_limited: quality.cpu_limited,
@@ -3051,1634 +3000,8 @@ async fn drive(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn start_escalation(
-    factory: &PeerConnectionFactory,
-    grant: &RelayGrant,
-    options: &CallOptions,
-    track: &RtcAudioTrack,
-    remote: &RemoteCall,
-    links: &CallbackLinks,
-    media_leg_id: &str,
-    acceptance_links: &BTreeMap<String, String>,
-) -> Result<NextPeer> {
-    let url = acceptance_links
-        .get("mediaRenegotiation")
-        .ok_or_else(|| Error::Signaling("acceptance without a mediaRenegotiation link".into()))?;
-    let session = open_peer(factory, grant, &options.relay_host, false)?;
-    let media = create_offer(&session.peer, factory, track, Layout::Conference, None).await?;
-    let body = renegotiation_body(
-        &remote.participant,
-        links,
-        &media.signaled.sdp,
-        media_leg_id,
-        &media.modalities,
-        true,
-        false,
-    );
-    let reply_tags = offer_reply_tags(&body);
-    remote
-        .signaling
-        .post_json("POST mediaRenegotiation", url, body)
-        .await?;
-    Ok(NextPeer {
-        session,
-        offered: Some(media),
-        reply_tags,
-        deadline: Some(Instant::now() + NEXT_PEER_LIMIT),
-        connected: false,
-        retargeted: false,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn escalate(
-    factory: &PeerConnectionFactory,
-    grant: &RelayGrant,
-    options: &CallOptions,
-    track: &RtcAudioTrack,
-    remote: &RemoteCall,
-    links: &CallbackLinks,
-    media_leg_id: &str,
-    acceptance_links: &BTreeMap<String, String>,
-    negotiator: &mut MediaNegotiator,
-    live: &mut Live,
-    timeline: &Timeline,
-) -> Option<NextPeer> {
-    match start_escalation(
-        factory,
-        grant,
-        options,
-        track,
-        remote,
-        links,
-        media_leg_id,
-        acceptance_links,
-    )
-    .await
-    {
-        Ok(pending) => {
-            timeline.record("escalation", "new peer connection, new offer sent");
-            if let Some(media) = &pending.offered {
-                timeline.record_sdp("local offer", &media.signaled.sdp);
-            }
-            live.peers.push(pending.session.peer.clone());
-            Some(pending)
-        }
-        Err(error) => {
-            negotiator.escalation_failed();
-            timeline.record("escalation failed", error.to_string());
-            None
-        }
-    }
-}
-
-async fn answer_on_new_peer(
-    factory: &PeerConnectionFactory,
-    grant: &RelayGrant,
-    options: &CallOptions,
-    track: &RtcAudioTrack,
-    teams_offer: &str,
-) -> Result<(PeerSession, AnsweredMedia)> {
-    let session = open_peer(factory, grant, &options.relay_host, false)?;
-    let answered = answer_offer(
-        &session.peer,
-        Some(track),
-        teams_offer,
-        AnswerVideo::Reject,
-        None,
-        false,
-        None,
-    )
-    .await?;
-    Ok((session, answered))
-}
-
-async fn send_media_answer(
-    remote: &RemoteCall,
-    links: &CallbackLinks,
-    reply_links: &BTreeMap<String, String>,
-    answered: &AnsweredMedia,
-    media_leg_id: &str,
-) -> Result<()> {
-    let url = reply_links
-        .get("mediaAnswer")
-        .ok_or_else(|| Error::Signaling("renegotiation without a mediaAnswer link".into()))?;
-    let body = escalation_answer_body(
-        &remote.participant,
-        links,
-        &answered.answer_sdp,
-        media_leg_id,
-    );
-    remote
-        .signaling
-        .post_json("POST mediaAnswer", url, body)
-        .await
-}
-
-#[allow(clippy::too_many_arguments)]
-fn negotiate_video(
-    video: &mut VideoReceive,
-    signaling: &Arc<Signaling>,
-    control: &CallControl,
-    timeline: &Timeline,
-    answer_sdp: &str,
-    media: &OfferedMedia,
-    from_mixer: bool,
-    links: &BTreeMap<String, String>,
-    roster: &Roster,
-) {
-    let streams = match stream_lines(answer_sdp, &media.signaled.lines) {
-        Ok(streams) => streams,
-        Err(error) => {
-            timeline.record("video slots unknown", error.to_string());
-            return;
-        }
-    };
-    let table = SlotTable::from_streams(&streams);
-    let link = links
-        .get("applyChannelParameters")
-        .or_else(|| links.get("controlVideoStreaming"));
-    timeline.record(
-        "video slots",
-        format!(
-            "{} receive slot(s), screen {}, fromMixer={from_mixer}, request link {}",
-            table.people.len(),
-            table.screen.is_some(),
-            link.is_some()
-        ),
-    );
-    let requester = link.filter(|_| from_mixer).map(|url| {
-        SourceRequester::start(
-            signaling.clone(),
-            url.clone(),
-            video.router().clone(),
-            control.video.clone(),
-            timeline.clone(),
-        )
-    });
-    video.negotiated(table, requester);
-    send_receive_change(control, video.reselect(roster));
-}
-
-async fn camera_devices(mode: VideoMode) -> Vec<CameraDevice> {
-    match mode {
-        VideoMode::Pattern => vec![CameraDevice {
-            key: "pattern".into(),
-            name: "Test pattern".into(),
-        }],
-        VideoMode::Off => Vec::new(),
-        VideoMode::Platform => tokio::task::spawn_blocking(list_cameras)
-            .await
-            .unwrap_or_default(),
-    }
-}
-
-fn refresh_cameras(
-    updates: mpsc::UnboundedSender<CallUpdate>,
-    mode: VideoMode,
-    timeline: Timeline,
-) {
-    tokio::spawn(async move {
-        let started = Instant::now();
-        let cameras = camera_devices(mode).await;
-        timeline.record(
-            "camera list",
-            format!(
-                "{} camera(s) in {} ms",
-                cameras.len(),
-                started.elapsed().as_millis()
-            ),
-        );
-        let _ = updates.send(CallUpdate::Cameras(cameras));
-    });
-}
-
-const SHARE_THUMBNAIL_WINDOWS: usize = 12;
-const SHARE_THUMBNAIL_WIDTH: u32 = 320;
-const SHARE_THUMBNAIL_HEIGHT: u32 = 180;
-
-fn announce_share(control: &CallControl, source: &ShareSource) {
-    control.send(CallUpdate::ShareKind(Some(source.kind)));
-    control.send(CallUpdate::LocalShare(Some(source.label())));
-}
-
-fn clear_share(control: &CallControl) {
-    control.send(CallUpdate::ShareKind(None));
-    control.send(CallUpdate::LocalShare(None));
-}
-
-fn refresh_share_sources(
-    updates: mpsc::UnboundedSender<CallUpdate>,
-    mode: VideoMode,
-    with_thumbnails: bool,
-) {
-    tokio::spawn(async move {
-        let picker = current_share_picker();
-        let sources = match mode {
-            VideoMode::Pattern => vec![
-                ShareSource {
-                    id: 1,
-                    kind: ShareKind::Screen,
-                    title: "Test screen".into(),
-                },
-                ShareSource {
-                    id: 2,
-                    kind: ShareKind::Window,
-                    title: "Test window".into(),
-                },
-            ],
-            VideoMode::Off => Vec::new(),
-            VideoMode::Platform if picker == SharePicker::Portal => Vec::new(),
-            VideoMode::Platform => tokio::task::spawn_blocking(list_share_sources)
-                .await
-                .unwrap_or_default(),
-        };
-        let sources = share_sources_for_menu(picker, sources);
-        let _ = updates.send(CallUpdate::ShareSources(sources.clone()));
-        if picker == SharePicker::Portal || !with_thumbnails {
-            return;
-        }
-        let wanted: Vec<ShareSource> = sources
-            .iter()
-            .filter(|source| source.kind == ShareKind::Screen)
-            .chain(
-                sources
-                    .iter()
-                    .filter(|source| source.kind == ShareKind::Window)
-                    .take(SHARE_THUMBNAIL_WINDOWS),
-            )
-            .cloned()
-            .collect();
-        for source in wanted {
-            let picture = match mode {
-                VideoMode::Platform => {
-                    let wanted = source.clone();
-                    tokio::task::spawn_blocking(move || {
-                        share_thumbnail(&wanted, SHARE_THUMBNAIL_WIDTH, SHARE_THUMBNAIL_HEIGHT)
-                    })
-                    .await
-                    .ok()
-                    .flatten()
-                }
-                VideoMode::Pattern => Some(VideoPicture::solid(
-                    SHARE_THUMBNAIL_WIDTH,
-                    SHARE_THUMBNAIL_HEIGHT,
-                    120,
-                    80,
-                    40,
-                )),
-                VideoMode::Off => None,
-            };
-            if let Some(picture) = picture
-                && updates
-                    .send(CallUpdate::ShareThumbnail {
-                        source,
-                        picture: Arc::new(picture),
-                    })
-                    .is_err()
-            {
-                return;
-            }
-        }
-    });
-}
-
-fn tell_media_descriptions(
-    remote: &RemoteCall,
-    links: &BTreeMap<String, String>,
-    description: MediaDescription,
-    request_id: &mut u32,
-    timeline: &Timeline,
-) {
-    let Some(url) = links.get("updateMediaDescriptions").cloned() else {
-        timeline.record("updateMediaDescriptions skipped", "no link from the mixer");
-        return;
-    };
-    *request_id += 1;
-    let request_id = *request_id;
-    let signaling = remote.signaling.clone();
-    let timeline = timeline.clone();
-    tokio::spawn(async move {
-        let sent = format!(
-            "{} {} request {request_id}",
-            description.mid, description.direction
-        );
-        if let Err(error) = signaling
-            .update_media_descriptions(&url, &[description], request_id)
-            .await
-        {
-            timeline.record("updateMediaDescriptions failed", format!("{sent}: {error}"));
-        }
-    });
-}
-
-fn is_own_meeting(own: Option<&MeetingTarget>, target: &MeetingTarget) -> bool {
-    own.is_some_and(|own| own.thread_id == target.thread_id)
-}
-
-fn attach_share_line(
-    peer: &PeerConnection,
-    factory: &PeerConnectionFactory,
-    local_video: &mut LocalVideo,
-    camera_mid: Option<&str>,
-) -> Result<()> {
-    let camera = camera_mid.and_then(|mid| peer_transceiver(peer, mid));
-    if !local_video.has_lines() && camera.is_none() {
-        return Err(Error::Webrtc("no video line negotiated".into()));
-    }
-    let share = add_share_line(peer, factory)?;
-    local_video
-        .add_share_line(share.clone(), camera)
-        .inspect_err(|_| {
-            let _ = share.stop();
-        })
-}
-
-fn peer_transceiver(peer: &PeerConnection, mid: &str) -> Option<RtpTransceiver> {
-    peer.transceivers()
-        .into_iter()
-        .find(|transceiver| transceiver.mid().as_deref() == Some(mid))
-}
-
-fn start_camera_line(
-    local_video: &mut LocalVideo,
-    peer: &PeerConnection,
-    direct_mid: Option<&str>,
-    choice: &DeviceChoice,
-) -> Result<()> {
-    if !local_video.has_lines() {
-        let mid = direct_mid.ok_or_else(|| Error::Webrtc("no video line negotiated".into()))?;
-        let camera = peer_transceiver(peer, mid)
-            .ok_or_else(|| Error::Webrtc("no transceiver for the camera line".into()))?;
-        if !matches!(
-            camera.direction(),
-            RtpTransceiverDirection::SendRecv | RtpTransceiverDirection::SendOnly
-        ) {
-            peer.add_track(
-                MediaStreamTrack::Video(local_video.camera_track()),
-                &[CAMERA_STREAM],
-            )
-            .map_err(|error| Error::Webrtc(error.to_string()))?;
-        }
-        local_video.set_lines(VideoLines {
-            camera,
-            share: None,
-        })?;
-    }
-    local_video.start_camera(choice)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn offer_same_peer(
-    peer: &PeerConnection,
-    gathered: &Gathered,
-    own_share_mid: Option<String>,
-    plan: &OfferPlan,
-    layout: Layout,
-    camera_mid: &str,
-    hold: bool,
-    camera: bool,
-    share: bool,
-    remote: &RemoteCall,
-    links: &CallbackLinks,
-    media_leg_id: &str,
-    media_links: &BTreeMap<String, String>,
-    negotiator: &mut MediaNegotiator,
-) -> Result<(String, SignaledOffer, Vec<String>)> {
-    let direct = layout == Layout::OneToOne && negotiator.path() == MediaPath::Direct;
-    let url = media_links
-        .get("mediaRenegotiation")
-        .cloned()
-        .ok_or_else(|| Error::Signaling("this call has no mediaRenegotiation link".into()))?;
-    if !negotiator.begin_same_peer_offer() {
-        return Err(Error::Signaling(
-            "another media negotiation is running".into(),
-        ));
-    }
-    let offered = build_same_peer_offer(
-        peer,
-        plan,
-        layout,
-        hold,
-        camera,
-        share,
-        camera_mid,
-        own_share_mid,
-        direct.then_some(gathered),
-    )
-    .await;
-    let (text, signaled) = match offered {
-        Ok(offered) => offered,
-        Err(error) => {
-            negotiator.same_peer_offer_failed();
-            return Err(error);
-        }
-    };
-    let modalities = offer_modalities(
-        layout == Layout::OneToOne && camera && !hold,
-        share && !hold,
-    );
-    let body = renegotiation_body(
-        &remote.participant,
-        links,
-        &signaled.sdp,
-        media_leg_id,
-        &modalities,
-        false,
-        direct,
-    );
-    let reply_tags = offer_reply_tags(&body);
-    if let Err(error) = remote
-        .signaling
-        .post_json("POST mediaRenegotiation (same peer)", &url, body)
-        .await
-    {
-        negotiator.same_peer_offer_failed();
-        rollback_offer(peer).await;
-        return Err(error);
-    }
-    Ok((text, signaled, reply_tags))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn build_same_peer_offer(
-    peer: &PeerConnection,
-    plan: &OfferPlan,
-    layout: Layout,
-    hold: bool,
-    camera: bool,
-    share: bool,
-    camera_mid: &str,
-    own_share_mid: Option<String>,
-    gathered: Option<&Gathered>,
-) -> Result<(String, SignaledOffer)> {
-    let offer = peer
-        .create_offer(OfferOptions {
-            offer_to_receive_audio: true,
-            offer_to_receive_video: true,
-            ..OfferOptions::default()
-        })
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let offer_text = offer.to_string();
-    let share_mid = own_share_mid.or_else(|| share_mid_in(&offer_text));
-    let remote_shares = share_mid.as_deref().is_some_and(|mid| {
-        peer.current_remote_description()
-            .and_then(|remote| direction_of(&remote.to_string(), mid))
-            .is_some_and(|direction| matches!(direction.as_str(), "sendonly" | "sendrecv"))
-    });
-    let text = directions_for(
-        layout,
-        false,
-        camera,
-        share,
-        camera_mid,
-        share_mid.as_deref(),
-        remote_shares,
-        &offer_text,
-    );
-    let description = parse_sdp(&text, SdpType::Offer)?;
-    peer.set_local_description(description)
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))?;
-    let mut numbers = random_u32;
-    let mut plan = plan.clone();
-    if let Some(mid) = share_mid
-        .as_ref()
-        .filter(|mid| !plan.screen_share_mids.contains(mid))
-    {
-        plan.screen_share_mids.push(mid.clone());
-    }
-    let mut signaled = to_teams_offer(
-        &directions_for(
-            layout,
-            hold,
-            camera,
-            share,
-            camera_mid,
-            share_mid.as_deref(),
-            remote_shares,
-            &text,
-        ),
-        &plan,
-        &mut numbers,
-    )?;
-    signaled.sdp = direct_sdp(&signaled.sdp, gathered, SdpKind::Offer).await?;
-    if gathered.is_some()
-        && let Some(role) = negotiated_setup(
-            peer.current_local_description()
-                .map(|local| local.to_string())
-                .as_deref(),
-            peer.current_remote_description()
-                .map(|remote| remote.to_string())
-                .as_deref(),
-        )
-    {
-        signaled.sdp = signaled
-            .sdp
-            .replace("a=setup:actpass", &format!("a=setup:{role}"));
-    }
-    Ok((text, signaled))
-}
-
-/// libwebrtc panics while decoding some parse errors, which used to kill the call task and leave the call hanging.
-fn parse_sdp(text: &str, kind: SdpType) -> Result<SessionDescription> {
-    match std::panic::catch_unwind(|| SessionDescription::parse(text, kind)) {
-        Ok(Ok(description)) => Ok(description),
-        Ok(Err(error)) => Err(Error::Sdp(format!(
-            "{kind:?} rejected: {}",
-            error.description
-        ))),
-        Err(_) => Err(Error::Sdp(format!(
-            "{kind:?} rejected, libwebrtc gave no readable reason"
-        ))),
-    }
-}
-
-async fn rollback_offer(peer: &PeerConnection) {
-    if let Ok(rollback) = parse_sdp("", SdpType::Rollback) {
-        let _ = peer.set_local_description(rollback).await;
-    }
-}
-
-async fn rollback_remote_offer(peer: &PeerConnection) {
-    if let Ok(rollback) = parse_sdp("", SdpType::Rollback) {
-        let _ = peer.set_remote_description(rollback).await;
-    }
-}
-
-fn is_glare_rejection(body: &serde_json::Value) -> bool {
-    body["mediaNegotiationFailure"]["code"].as_i64() == Some(GLARE_CODE)
-}
-
-fn offer_reply_tags(body: &serde_json::Value) -> Vec<String> {
-    let links = &body["mediaNegotiation"]["links"];
-    ["mediaAnswer", "rejection"]
-        .iter()
-        .filter_map(|name| links[*name].as_str().and_then(callback_tag))
-        .collect()
-}
-
-#[cfg(test)]
-mod reply_tag_tests {
-    use super::*;
-
-    #[test]
-    fn answers_and_rejections_match_the_offer_by_tag() {
-        let tags = vec!["aaaa1111".to_owned(), "bbbb2222".to_owned()];
-        assert!(answers_offer(
-            "callAgent/c/aaaa1111/call/mediaAnswer/",
-            &tags
-        ));
-        assert!(answers_offer("callAgent/c/bbbb2222/call/rejection/", &tags));
-        assert!(!answers_offer(
-            "callAgent/c/cccc3333/call/mediaAnswer/",
-            &tags
-        ));
-        assert!(answers_offer("callAgent/c/cccc3333/call/mediaAnswer/", &[]));
-    }
-
-    #[test]
-    fn an_offer_names_both_reply_tags() {
-        let body = serde_json::json!({"mediaNegotiation": {"links": {
-            "mediaAnswer": "https://t.example/callAgent/c/aaaa1111/call/mediaAnswer/",
-            "rejection": "https://t.example/callAgent/c/bbbb2222/call/rejection/"}}});
-        assert_eq!(
-            offer_reply_tags(&body),
-            vec!["aaaa1111".to_owned(), "bbbb2222".to_owned()]
-        );
-    }
-}
-
-fn defer_to_new_peer(
-    change: Change,
-    deferred: &mut Vec<Change>,
-    local_video: &mut LocalVideo,
-    control: &CallControl,
-) {
-    match change {
-        Change::Camera(true) => {
-            control.send(CallUpdate::Camera(true));
-            deferred.push(change);
-        }
-        Change::Share(true) => deferred.push(change),
-        change => undo_change(change, local_video, control),
-    }
-}
-
-/// A server escalation that fails leaves the call direct, so only what waited for the new peer is undone.
-fn settle_failed_escalation(
-    server: bool,
-    layout: Layout,
-    negotiator: &mut MediaNegotiator,
-    deferred: &mut Vec<Change>,
-    local_video: &mut LocalVideo,
-    control: &CallControl,
-) {
-    if server {
-        negotiator.server_escalation_failed();
-        for change in deferred.drain(..) {
-            undo_change(change, local_video, control);
-        }
-    } else if layout == Layout::OneToOne {
-        drop_local_media(local_video, control);
-    }
-}
-
-fn drop_local_media(local_video: &mut LocalVideo, control: &CallControl) {
-    if local_video.sharing() {
-        local_video.stop_share();
-        clear_share(control);
-    }
-    if local_video.camera_on() {
-        local_video.stop_camera();
-        control.send(CallUpdate::Camera(false));
-    }
-}
-
-fn undo_change(change: Change, local_video: &mut LocalVideo, control: &CallControl) {
-    match change {
-        Change::Camera(true) => {
-            local_video.stop_camera();
-            control.send(CallUpdate::Camera(false));
-        }
-        Change::Camera(false) => control.send(CallUpdate::Camera(false)),
-        Change::Share(true) => {
-            local_video.stop_share();
-            clear_share(control);
-            control.send(CallUpdate::Notice(notice_with_detail(
-                SHARING_START_NOTICE,
-                "",
-            )));
-        }
-        Change::Share(false) => {}
-        Change::Hold(_) => control.send(CallUpdate::Notice(HOLD_CHANGE_FAILED_NOTICE.into())),
-    }
-}
-
-fn withhold_media(
-    muted: &mut bool,
-    audio: &AudioSetup,
-    software_audio: Option<&SoftwareAudio>,
-    remote: &RemoteCall,
-    local_video: &mut LocalVideo,
-    control: &CallControl,
-) {
-    *muted = apply_mute(
-        MuteCommand::Mute,
-        *muted,
-        audio,
-        software_audio,
-        remote,
-        control,
-    );
-    if local_video.camera_on() {
-        local_video.stop_camera();
-        control.send(CallUpdate::Camera(false));
-    }
-}
-
-async fn apply_background(
-    choice: BackgroundChoice,
-    local_video: &LocalVideo,
-    control: &CallControl,
-    timeline: &Timeline,
-) {
-    match choice {
-        BackgroundChoice::None => local_video.set_background(false, None),
-        BackgroundChoice::Blur => local_video.set_background(true, None),
-        BackgroundChoice::Image(path) => {
-            match tokio::task::spawn_blocking(move || BackgroundPicture::load(&path)).await {
-                Ok(Ok(picture)) => local_video.set_background(true, Some(Arc::new(picture))),
-                Ok(Err(error)) => {
-                    timeline.record("background image failed", error.to_string());
-                    control.send(CallUpdate::Notice(BACKGROUND_IMAGE_FAILED_NOTICE.into()));
-                }
-                Err(_) => {}
-            }
-        }
-    }
-}
-
-async fn save_meeting_options(
-    session: &session::Session,
-    target: &MeetingTarget,
-    writes: &[OptionWrite],
-) -> std::result::Result<meeting_options::MeetingOptions, String> {
-    for change in writes {
-        meeting_options::write(session, target, change)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    meeting_options::fetch(session, target)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-fn target_of<'a>(roster: &'a Roster, mri: &'a str) -> Target<'a> {
-    let display_name = roster
-        .members()
-        .iter()
-        .find(|member| member.mri == mri)
-        .map_or("", |member| member.display_name.as_str());
-    Target { mri, display_name }
-}
-
-const RECORDING_STOP_RETRIES: usize = 6;
-const RECORDING_STOP_RETRY_WAIT: Duration = Duration::from_secs(5);
-
-/// The recorder answers 409 to a stop sent while its start is still settling.
-fn recorder_busy(error: &Error) -> bool {
-    matches!(error, Error::Signaling(reason) if reason.contains("HTTP 409"))
-}
-
-fn report_organizer_result(
-    result: Result<u16>,
-    label: &str,
-    notice: &'static str,
-    control: &CallControl,
-    timeline: &Timeline,
-) {
-    if let Err(error) = &result {
-        timeline.record(format!("{label} failed"), error.to_string());
-        control.send(CallUpdate::Notice(notice.to_owned()));
-    }
-    control.send(CallUpdate::Organizer {
-        action: label.to_owned(),
-        outcome: result.map_err(|error| error.to_string()),
-    });
-}
-
-fn named_caption(mut entry: CaptionEntry, roster: &Roster) -> CaptionEntry {
-    if entry.display_name.is_empty() {
-        entry.display_name = roster
-            .name_of(&entry.user_id)
-            .unwrap_or_default()
-            .to_owned();
-    }
-    entry
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BotJob {
-    Captions,
-    Recording,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_bot_steps(
-    job: BotJob,
-    flow: &mut CaptionFlow,
-    roster: &Roster,
-    remote: &RemoteCall,
-    links: &CallbackLinks,
-    meeting_chat: Option<&str>,
-    plan: &RecordingPlan,
-    bot_pending: &mut bool,
-    control: &CallControl,
-    timeline: &Timeline,
-) {
-    let is_active: fn(&crate::roster::CaptionBot) -> bool = match job {
-        BotJob::Captions => |bot| bot.active,
-        BotJob::Recording => |bot| bot.recording,
-    };
-    let fail = |flow: &mut CaptionFlow, reason: &str| {
-        flow.failed();
-        control.send(match job {
-            BotJob::Captions => CallUpdate::Captions(CaptionState::Failed(reason.to_owned())),
-            BotJob::Recording => CallUpdate::Notice(reason.to_owned()),
-        });
-        if job == BotJob::Recording {
-            control.send(CallUpdate::RecordingPending(false));
-        }
-    };
-    let (join_failure, start_failure) = match job {
-        BotJob::Captions => (CAPTIONS_JOIN_FAILED_NOTICE, CAPTIONS_START_FAILED_NOTICE),
-        BotJob::Recording => (RECORDING_JOIN_FAILED_NOTICE, RECORDING_START_FAILED_NOTICE),
-    };
-    loop {
-        match flow.next_for(roster.caption_bot(), is_active) {
-            CaptionStep::Wait => return,
-            CaptionStep::AddBot => {
-                if *bot_pending {
-                    continue;
-                }
-                let Some(thread) = meeting_chat else {
-                    return fail(
-                        flow,
-                        "This call has no chat for the captions and the recording",
-                    );
-                };
-                *bot_pending = true;
-                let added = remote
-                    .signaling
-                    .add_caption_bot(
-                        &remote.conversation,
-                        &remote.participant,
-                        thread,
-                        links,
-                        remote.threadless,
-                    )
-                    .await;
-                if job == BotJob::Recording {
-                    report_organizer_result(
-                        added
-                            .as_ref()
-                            .map(|status| *status)
-                            .map_err(|error| Error::Signaling(error.to_string())),
-                        "recording add bot",
-                        join_failure,
-                        control,
-                        timeline,
-                    );
-                }
-                if let Err(error) = added {
-                    timeline.record("bot invitation failed", error.to_string());
-                    *bot_pending = false;
-                    return fail(flow, join_failure);
-                }
-            }
-            CaptionStep::Start => {
-                let Some(url) = roster.caption_bot().and_then(|bot| bot.command_url.clone()) else {
-                    return;
-                };
-                match job {
-                    BotJob::Captions => {
-                        if let Err(error) = remote
-                            .signaling
-                            .caption_command(&url, BotAction::Start, &remote.participant)
-                            .await
-                        {
-                            timeline.record("caption start failed", error.to_string());
-                            return fail(flow, start_failure);
-                        }
-                        if let Err(error) = remote
-                            .signaling
-                            .set_caption_preference(&remote.conversation, &remote.participant, true)
-                            .await
-                        {
-                            timeline.record("caption preference failed", error.to_string());
-                        }
-                    }
-                    BotJob::Recording => {
-                        let started = remote
-                            .signaling
-                            .recording_command(&url, plan.start(), &remote.participant, &plan.title)
-                            .await;
-                        let failed = started.is_err();
-                        report_organizer_result(
-                            started,
-                            "recording start",
-                            start_failure,
-                            control,
-                            timeline,
-                        );
-                        if failed {
-                            return fail(flow, start_failure);
-                        }
-                    }
-                }
-            }
-            CaptionStep::Stop => {
-                let Some(url) = roster.caption_bot().and_then(|bot| bot.command_url.clone()) else {
-                    continue;
-                };
-                match job {
-                    BotJob::Captions => {
-                        if let Err(error) = remote
-                            .signaling
-                            .caption_command(&url, BotAction::Stop, &remote.participant)
-                            .await
-                        {
-                            timeline.record("caption stop failed", error.to_string());
-                        }
-                        if let Err(error) = remote
-                            .signaling
-                            .set_caption_preference(
-                                &remote.conversation,
-                                &remote.participant,
-                                false,
-                            )
-                            .await
-                        {
-                            timeline.record("caption preference failed", error.to_string());
-                        }
-                    }
-                    BotJob::Recording => {
-                        let remote = remote.clone();
-                        let updates = control.updates();
-                        let (command, title) = (plan.stop(), plan.title.clone());
-                        tokio::spawn(async move {
-                            let mut stopped = remote
-                                .signaling
-                                .recording_command(&url, command, &remote.participant, &title)
-                                .await;
-                            for _ in 0..RECORDING_STOP_RETRIES {
-                                if !stopped.as_ref().is_err_and(recorder_busy) {
-                                    break;
-                                }
-                                tokio::time::sleep(RECORDING_STOP_RETRY_WAIT).await;
-                                stopped = remote
-                                    .signaling
-                                    .recording_command(&url, command, &remote.participant, &title)
-                                    .await;
-                            }
-                            if stopped.is_err() {
-                                let _ = updates
-                                    .send(CallUpdate::Notice(RECORDING_STOP_FAILED_NOTICE.into()));
-                            }
-                            let _ = updates.send(CallUpdate::Organizer {
-                                action: "recording stop".into(),
-                                outcome: stopped.map_err(|error| error.to_string()),
-                            });
-                        });
-                    }
-                }
-            }
-            CaptionStep::ReportOn => {
-                if job == BotJob::Captions {
-                    control.send(CallUpdate::Captions(CaptionState::On));
-                }
-            }
-        }
-    }
-}
-
-fn send_receive_change(control: &CallControl, change: ReceiveChange) {
-    if let Some(sharer) = change.screen_sharer {
-        control.send(CallUpdate::ScreenShare(sharer));
-    }
-}
-
-fn record_audio_devices(
-    timeline: &Timeline,
-    lists: &devices::DeviceLists,
-    input: Option<&AppliedDevice>,
-    output: Option<&AppliedDevice>,
-) {
-    let name = |devices: &[AudioDevice], applied: Option<&AppliedDevice>| {
-        applied
-            .and_then(|applied| devices.iter().find(|device| device.index == applied.index))
-            .map_or("none", |device| device.name.as_str())
-            .to_owned()
-    };
-    timeline.record(
-        "audio devices",
-        format!(
-            "input={} output={}",
-            name(&lists.inputs, input),
-            name(&lists.outputs, output)
-        ),
-    );
-}
-
-fn follow_device_change(
-    flow: Flow,
-    (previous, current): (&[AudioDevice], &[AudioDevice]),
-    choice: &DeviceChoice,
-    applied: &mut Option<AppliedDevice>,
-    select: impl Fn(u16) -> bool,
-    timeline: &Timeline,
-    control: &CallControl,
-) -> bool {
-    let system_default = devices::system_default_id(flow);
-    let (index, fell_back) =
-        match devices::reselect(applied.as_ref(), current, choice, system_default.as_deref()) {
-            Reselect::Keep => return false,
-            Reselect::Select(index) => (index, false),
-            Reselect::FallBack(index) => (index, true),
-        };
-    let selected = select(index);
-    timeline.record(
-        "device change",
-        format!("{flow:?} {choice:?} -> index {index} fallback={fell_back} applied={selected}"),
-    );
-    if selected {
-        *applied = current
-            .iter()
-            .find(|device| device.index == index)
-            .map(|device| AppliedDevice {
-                index,
-                key: device.key(),
-            });
-    }
-    if fell_back {
-        let fallback = current.iter().find(|device| device.index == index);
-        control.send(CallUpdate::Notice(devices::disconnect_notice(
-            previous, choice, fallback,
-        )));
-    }
-    selected
-}
-
 fn far_future() -> Instant {
     Instant::now() + FAR_FUTURE
-}
-
-fn apply_mute(
-    command: MuteCommand,
-    currently_muted: bool,
-    audio: &AudioSetup,
-    software_audio: Option<&SoftwareAudio>,
-    remote: &RemoteCall,
-    control: &CallControl,
-) -> bool {
-    let effect = MuteEffect::for_muted(command.target(currently_muted));
-    audio.track.set_enabled(effect.track_enabled);
-    if let Some(software_audio) = software_audio {
-        software_audio.set_microphone_muted(effect.muted);
-    }
-    control.send(CallUpdate::Muted(effect.muted));
-    let remote = remote.clone();
-    tokio::spawn(async move {
-        let _ = remote
-            .signaling
-            .update_endpoint_state(
-                &remote.conversation,
-                &remote.participant,
-                effect.endpoint_is_muted,
-            )
-            .await;
-    });
-    effect.muted
-}
-
-fn silence_for_hold(
-    on_hold: bool,
-    muted: bool,
-    audio: Option<&AudioSetup>,
-    software_audio: Option<&SoftwareAudio>,
-) {
-    let silent = on_hold || muted;
-    if let Some(audio) = audio {
-        audio
-            .track
-            .set_enabled(MuteEffect::for_muted(silent).track_enabled);
-    }
-    if let Some(software_audio) = software_audio {
-        software_audio.set_microphone_muted(silent);
-    }
-}
-
-fn swap_audio_track(peer: &PeerConnection, track: &RtcAudioTrack) -> Result<()> {
-    let sender = peer
-        .senders()
-        .into_iter()
-        .find(|sender| matches!(sender.track(), Some(MediaStreamTrack::Audio(_))))
-        .ok_or_else(|| Error::Webrtc("no audio sender".into()))?;
-    sender
-        .set_track(Some(MediaStreamTrack::Audio(track.clone())))
-        .map_err(|error| Error::Webrtc(error.to_string()))
-}
-
-fn outgoing_track<'a>(
-    software_audio: Option<&'a SoftwareAudio>,
-    device_track: &'a RtcAudioTrack,
-) -> &'a RtcAudioTrack {
-    pick_track(software_audio.map(|audio| &audio.track), device_track)
-}
-
-fn pick_track<'a, T>(software: Option<&'a T>, device: &'a T) -> &'a T {
-    software.unwrap_or(device)
-}
-
-fn software_wanted(
-    mic_settings: MicSettings,
-    share_sound_wanted: bool,
-    local_video: &LocalVideo,
-    audio: Option<&AudioSetup>,
-) -> Option<SoftwareAudioPlan> {
-    let sharing_sound = share_sound_wanted && local_video.sharing();
-    SoftwareAudioPlan::wanted(
-        mic_settings,
-        sharing_sound,
-        audio.is_some_and(AudioSetup::uses_devices),
-    )
-}
-
-fn restore_device_track(
-    factory: &PeerConnectionFactory,
-    input: &DeviceChoice,
-    peer: &PeerConnection,
-    device_track: &RtcAudioTrack,
-    timeline: &Timeline,
-) {
-    use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
-    if !factory.adm_recording_enabled() {
-        factory.set_adm_recording_enabled(true);
-        devices::select_input(factory, input);
-    }
-    if let Err(error) = swap_audio_track(peer, device_track) {
-        timeline.record("microphone track not restored", error.to_string());
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn sync_software_audio(
-    factory: &PeerConnectionFactory,
-    options: &CallOptions,
-    input: &DeviceChoice,
-    muted: bool,
-    remote_audio: Option<RtcAudioTrack>,
-    peer: &PeerConnection,
-    device_track: &RtcAudioTrack,
-    wanted: Option<SoftwareAudioPlan>,
-    restart: bool,
-    software_audio: &mut Option<SoftwareAudio>,
-    mic_settings: MicSettings,
-    control: &CallControl,
-    timeline: &Timeline,
-) {
-    let running = software_audio.as_ref().map(|audio| audio.plan);
-    if running == wanted && !restart {
-        crate::noise_stage::apply_for_outgoing(mic_settings, software_audio.is_none());
-        return;
-    }
-    if running.is_some() {
-        timeline.record("software audio", "stopping");
-    }
-    *software_audio = None;
-    let was_sharing_sound = running.is_some_and(|plan| plan.computer_sound);
-    let Some(plan) = wanted else {
-        restore_device_track(factory, input, peer, device_track, timeline);
-        control.send(CallUpdate::ShareSound(false));
-        crate::noise_stage::apply_for_outgoing(mic_settings, true);
-        return;
-    };
-    let started = SoftwareAudio::start(
-        factory,
-        options.audio,
-        options.tone_hz,
-        input,
-        plan,
-        muted,
-        remote_audio,
-    )
-    .and_then(|audio| swap_audio_track(peer, &audio.track).map(|()| audio));
-    match started {
-        Ok(audio) => {
-            timeline.record(
-                "software audio",
-                format!("{:?}, computer sound {:?}", plan.processing, audio.loopback),
-            );
-            if let Some(source) = &audio.microphone_source {
-                timeline.record("mic capture", source.clone());
-            }
-            if audio.microphone_source.is_some() {
-                use libwebrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
-                factory.set_adm_recording_enabled(false);
-            }
-            if let Some(warning) = &audio.warning {
-                timeline.record("computer sound warning", warning.clone());
-            }
-            control.send(CallUpdate::ShareSound(plan.computer_sound));
-            if let Some(notice) = audio.microphone_notice {
-                control.send(CallUpdate::Notice(notice.into()));
-            }
-            *software_audio = Some(audio);
-        }
-        Err(error) => {
-            timeline.record("software audio failed", error.to_string());
-            restore_device_track(factory, input, peer, device_track, timeline);
-            if was_sharing_sound || plan.computer_sound {
-                control.send(CallUpdate::ShareSound(false));
-            }
-            let notice = if plan.computer_sound {
-                "Computer sound could not start, sharing without it"
-            } else {
-                "Microphone processing could not start, using the standard microphone"
-            };
-            control.send(CallUpdate::Notice(notice.into()));
-        }
-    }
-    crate::noise_stage::apply_for_outgoing(mic_settings, software_audio.is_none());
-}
-
-async fn tear_down(
-    mut live: Live,
-    inner: &Inner,
-    timeline: &Timeline,
-    report: &mut CallReport,
-    cancelled: bool,
-) {
-    if crate::noise_stage::overloaded() {
-        timeline.record("noise suppression", "DeepFilterNet too slow, WebRTC only");
-    }
-    crate::noise_stage::clear();
-    for peer in &live.peers {
-        peer.close();
-    }
-    if let Some(audio) = live.audio.take() {
-        audio.stop().await;
-    }
-    live.broker_running.store(false, Ordering::SeqCst);
-    if !live.skip_leave
-        && let Some(remote) = &live.remote
-    {
-        let reason = if cancelled {
-            LeaveReason::Cancel
-        } else {
-            LeaveReason::Hangup
-        };
-        match remote
-            .signaling
-            .leave(&remote.conversation, &remote.participant, reason)
-            .await
-        {
-            Ok(()) => report.left_cleanly = true,
-            Err(error) => timeline.record("leave failed", error.to_string()),
-        }
-    }
-    if report.end.is_none()
-        && let Some(callbacks) = live.callbacks.as_mut()
-        && live.remote.is_some()
-    {
-        let waited = timeout(END_CALLBACK_WAIT, async {
-            while let Some(callback) = callbacks.recv().await {
-                let event = handle_callback(&callback, timeline);
-                if let Ok(CallEvent::End(end)) = event {
-                    return Some(end);
-                }
-            }
-            None
-        })
-        .await;
-        report.end = waited.ok().flatten();
-    }
-    if let Some(broker) = live.broker.take() {
-        broker.abort();
-    }
-    for task in live.video_tasks.drain(..) {
-        task.abort();
-    }
-    if let Some(route_id) = &live.route_id {
-        inner.unregister_route(route_id);
-    }
-    timeline.record("closed", "peer closed, call route removed");
-}
-
-fn setup_end_kind(end: &CallEnd) -> EndKind {
-    match end.kind() {
-        EndKind::Normal | EndKind::Other => EndKind::Unavailable,
-        kind => kind,
-    }
-}
-
-fn handle_callback(callback: &TrouterCallback, timeline: &Timeline) -> Result<CallEvent> {
-    let body = decode_body(callback)?;
-    let (_, event) = classify(&callback.path, body)?;
-    let detail = match &event {
-        CallEvent::Acceptance(acceptance) => format!(
-            "answer sdp {} bytes, fromMixer={}",
-            acceptance.sdp.len(),
-            acceptance.from_mixer
-        ),
-        CallEvent::End(end) => format!(
-            "code={} subCode={} phrase={}",
-            end.code, end.sub_code, end.phrase
-        ),
-        CallEvent::Progress(status) => format!("{status:?}"),
-        CallEvent::ConversationEnd(body)
-        | CallEvent::Rejection(body)
-        | CallEvent::AddParticipantFailure(body)
-        | CallEvent::RetargetCompletion(body) => outcome_summary(body),
-        CallEvent::ControlVideoStreaming(body) => parse_request(body)
-            .map_or_else(|| "body not understood".to_owned(), |request| request.shape),
-        _ => String::new(),
-    };
-    timeline.record(format!("Trouter {}", event.name()), detail);
-    match &event {
-        CallEvent::Acceptance(acceptance) => timeline.record_sdp("remote answer", &acceptance.sdp),
-        CallEvent::MediaAnswer(answer) => timeline.record_sdp("remote answer", &answer.sdp),
-        CallEvent::MediaRenegotiation(renegotiation) => {
-            timeline.record_sdp("remote offer", &renegotiation.sdp)
-        }
-        _ => {}
-    }
-    Ok(event)
-}
-
-async fn apply_answer(
-    peer: &PeerConnection,
-    teams_answer: &str,
-    signaled: &SignaledOffer,
-    browser_offer: &str,
-) -> Result<()> {
-    let answer = to_browser_answer(teams_answer, signaled, browser_offer)?;
-    set_browser_answer(peer, &answer).await
-}
-
-/// libwebrtc does not restart a send stream that an inactive answer stopped, so a hold keeps the streams and only mutes.
-async fn apply_hold_answer(
-    peer: &PeerConnection,
-    teams_answer: &str,
-    signaled: &SignaledOffer,
-    browser_offer: &str,
-) -> Result<()> {
-    let answer = to_browser_answer(teams_answer, signaled, browser_offer)?;
-    set_browser_answer(peer, &keep_media_running(&answer, browser_offer)).await
-}
-
-async fn set_browser_answer(peer: &PeerConnection, answer: &str) -> Result<()> {
-    let description = parse_sdp(answer, SdpType::Answer)?;
-    peer.set_remote_description(description)
-        .await
-        .map_err(|error| Error::Webrtc(error.to_string()))
-}
-
-/// Writes an SDP with ICE credentials, fingerprints and addresses masked, for debugging the dialect.
-fn dump_sdp(options: &CallOptions, name: &str, sdp: &str) {
-    let Some(directory) = &options.sdp_dump_dir else {
-        return;
-    };
-    let masked: Vec<String> = sdp
-        .lines()
-        .map(|line| {
-            for prefix in ["a=ice-ufrag:", "a=ice-pwd:", "a=fingerprint:", "a=crypto:"] {
-                if line.starts_with(prefix) {
-                    return format!("{prefix}<masked>");
-                }
-            }
-            line.split(' ')
-                .map(mask_address)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect();
-    let _ = std::fs::create_dir_all(directory);
-    let _ = std::fs::write(directory.join(name), masked.join("\n"));
-}
-
-fn dump_timeline(options: &CallOptions, timeline: &Timeline, failure: Option<&Error>) {
-    let Some(directory) = &options.sdp_dump_dir else {
-        return;
-    };
-    let mut lines: Vec<String> = timeline
-        .entries()
-        .iter()
-        .map(|entry| {
-            format!(
-                "{:>6} ms  {}  {}",
-                entry.elapsed_ms, entry.label, entry.detail
-            )
-        })
-        .collect();
-    lines.push(match failure {
-        Some(error) => format!("failed: {error}"),
-        None => "ended without error".to_owned(),
-    });
-    let _ = std::fs::create_dir_all(directory);
-    let _ = std::fs::write(directory.join("timeline.txt"), lines.join("\n"));
-}
-
-fn mask_address(token: &str) -> String {
-    let dotted_quad =
-        token.split('.').count() == 4 && token.split('.').all(|part| part.parse::<u8>().is_ok());
-    let colon_address =
-        token.matches(':').count() >= 2 && !token.starts_with("a=") && !token.starts_with("urn:");
-    if (dotted_quad && token != "10.10.10.10" && token != "0.0.0.0" && token != "127.0.0.1")
-        || colon_address
-    {
-        "<addr>".to_owned()
-    } else {
-        token.to_owned()
-    }
-}
-
-async fn record_track(track: RtcAudioTrack, recording: Arc<Mutex<Recording>>, tone_hz: f32) {
-    let mut stream = NativeAudioStream::new(track, SAMPLE_RATE as i32, 1);
-    while let Some(frame) = stream.next().await {
-        let mut recording = recording.lock().await;
-        recording.samples.extend_from_slice(&frame.data);
-        recording.current_second.extend_from_slice(&frame.data);
-        if recording.current_second.len() >= SAMPLE_RATE as usize {
-            let second: Vec<i16> = std::mem::take(&mut recording.current_second);
-            let summary = (rms(&second), tone_ratio(&second, tone_hz));
-            recording.per_second.push(summary);
-        }
-    }
-}
-
-async fn poll_broker(
-    signaling: Arc<Signaling>,
-    conversation: Conversation,
-    running: Arc<AtomicBool>,
-) {
-    let Ok(first) = conversation.link("subscribe") else {
-        return;
-    };
-    let mut url = first.to_owned();
-    while running.load(Ordering::SeqCst) {
-        match signaling.poll_broker(&url).await {
-            Ok(Some(next)) => url = next,
-            Ok(None) => tokio::time::sleep(BROKER_IDLE_WAIT).await,
-            Err(_) => tokio::time::sleep(BROKER_RETRY_WAIT).await,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct StatsSnapshot {
-    inbound_packets: u64,
-    inbound_bytes: u64,
-    outbound_packets: u64,
-    outbound_bytes: u64,
-    source_levels: Vec<String>,
-    video_senders: Vec<String>,
-    audio_level: f64,
-    local_level: f64,
-    echo_return_loss_enhancement: f64,
-    video: VideoReport,
-    share_inbound_packets: u64,
-    share_outbound_packets: u64,
-    share_receive: Option<ShareReceive>,
-    dtls_state: String,
-    tls_version: String,
-    dtls_cipher: String,
-    srtp_cipher: String,
-    selected_pair: Option<String>,
-    health: HealthCounters,
-    transport: TransportDetails,
-}
-
-#[derive(Debug, Default)]
-struct ShareReceive {
-    frames_decoded: u32,
-    key_frames_decoded: u32,
-    width: u32,
-    height: u32,
-    frames_per_second: f64,
-    pli_count: u32,
-    fir_count: u32,
-    freeze_count: u32,
-    qp_sum: u64,
-    bytes_received: u64,
-}
-
-impl ShareReceive {
-    fn average_qp(&self) -> u64 {
-        self.qp_sum
-            .checked_div(u64::from(self.frames_decoded))
-            .unwrap_or(0)
-    }
-
-    fn summary(&self) -> String {
-        format!(
-            " share in decoded={} keyframes={} {}x{} fps={:.0} qp={} bytes={} pli={} fir={} freezes={}",
-            self.frames_decoded,
-            self.key_frames_decoded,
-            self.width,
-            self.height,
-            self.frames_per_second,
-            self.average_qp(),
-            self.bytes_received,
-            self.pli_count,
-            self.fir_count,
-            self.freeze_count
-        )
-    }
-}
-
-async fn collect_stats(peer: &PeerConnection, share_mids: &[String]) -> StatsSnapshot {
-    let Ok(stats) = peer.get_stats().await else {
-        return StatsSnapshot::default();
-    };
-    let mut snapshot = StatsSnapshot::default();
-    (snapshot.health, snapshot.transport) = health_from_stats(&stats);
-    let mut selected_pair_id = None;
-    for entry in &stats {
-        match entry {
-            RtcStats::InboundRtp(inbound) if inbound.stream.kind == "audio" => {
-                snapshot.inbound_packets += inbound.received.packets_received;
-                snapshot.inbound_bytes += inbound.inbound.bytes_received;
-                snapshot.audio_level = snapshot.audio_level.max(inbound.inbound.audio_level);
-            }
-            RtcStats::MediaSource(source) if source.source.kind == "audio" => {
-                snapshot.local_level = snapshot.local_level.max(source.audio.audio_level);
-                snapshot.source_levels.push(format!(
-                    "{}={:.3}",
-                    source.source.track_identifier, source.audio.audio_level
-                ));
-                snapshot.echo_return_loss_enhancement = source.audio.echo_return_loss_enhancement;
-            }
-            RtcStats::OutboundRtp(outbound) if outbound.stream.kind == "audio" => {
-                snapshot.outbound_packets += outbound.sent.packets_sent;
-                snapshot.outbound_bytes += outbound.sent.bytes_sent;
-            }
-            RtcStats::InboundRtp(inbound) if inbound.stream.kind == "video" => {
-                snapshot.video.inbound_packets += inbound.received.packets_received;
-                if share_mids.contains(&inbound.inbound.mid) {
-                    snapshot.share_inbound_packets += inbound.received.packets_received;
-                    snapshot.share_receive = Some(ShareReceive {
-                        frames_decoded: inbound.inbound.frames_decoded,
-                        key_frames_decoded: inbound.inbound.key_frames_decoded,
-                        width: inbound.inbound.frame_width,
-                        height: inbound.inbound.frame_height,
-                        frames_per_second: inbound.inbound.frames_per_second,
-                        pli_count: inbound.inbound.pli_count,
-                        fir_count: inbound.inbound.fir_count,
-                        freeze_count: inbound.inbound.freeze_count,
-                        qp_sum: inbound.inbound.qp_sum,
-                        bytes_received: inbound.inbound.bytes_received,
-                    });
-                }
-                snapshot.video.inbound_frames_decoded += u64::from(inbound.inbound.frames_decoded);
-                snapshot.video.inbound_width = snapshot
-                    .video
-                    .inbound_width
-                    .max(inbound.inbound.frame_width);
-                snapshot.video.inbound_height = snapshot
-                    .video
-                    .inbound_height
-                    .max(inbound.inbound.frame_height);
-            }
-            RtcStats::RemoteInboundRtp(remote) if remote.stream.kind == "video" => {
-                snapshot.video.remote_reports += remote.remote_inbound.round_trip_time_measurements;
-                snapshot.video.remote_round_trip_ms = snapshot
-                    .video
-                    .remote_round_trip_ms
-                    .max(remote.remote_inbound.round_trip_time * 1000.0);
-            }
-            RtcStats::OutboundRtp(outbound) if outbound.stream.kind == "video" => {
-                snapshot.video.outbound_packets += outbound.sent.packets_sent;
-                if share_mids.contains(&outbound.outbound.mid) {
-                    snapshot.share_outbound_packets += outbound.sent.packets_sent;
-                }
-                snapshot.video.outbound_frames_encoded +=
-                    u64::from(outbound.outbound.frames_encoded);
-                snapshot.video_senders.push(format!(
-                    "mid {} packets={} key={} pli={} fir={} nack={} target={:.0}kbps limit={:?} active={}",
-                    outbound.outbound.mid,
-                    outbound.sent.packets_sent,
-                    outbound.outbound.key_frames_encoded,
-                    outbound.outbound.pli_count,
-                    outbound.outbound.fir_count,
-                    outbound.outbound.nack_count,
-                    outbound.outbound.target_bitrate / 1000.0,
-                    outbound.outbound.quality_limitation_reason,
-                    outbound.outbound.active
-                ));
-                snapshot.video.outbound_width = snapshot
-                    .video
-                    .outbound_width
-                    .max(outbound.outbound.frame_width);
-                snapshot.video.outbound_height = snapshot
-                    .video
-                    .outbound_height
-                    .max(outbound.outbound.frame_height);
-            }
-            RtcStats::Transport(transport) => {
-                snapshot.dtls_state = format!("{:?}", transport.transport.dtls_state);
-                snapshot.tls_version = transport.transport.tls_version.clone();
-                snapshot.dtls_cipher = transport.transport.dtls_cipher.clone();
-                snapshot.srtp_cipher = transport.transport.srtp_cipher.clone();
-                if !transport.transport.selected_candidate_pair_id.is_empty() {
-                    selected_pair_id = Some(transport.transport.selected_candidate_pair_id.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(pair_id) = selected_pair_id {
-        let pair = stats.iter().find_map(|entry| match entry {
-            RtcStats::CandidatePair(pair) if pair.rtc.id == pair_id => Some(pair),
-            _ => None,
-        });
-        if let Some(pair) = pair {
-            let describe = |candidate_id: &str| {
-                stats
-                    .iter()
-                    .find_map(|entry| match entry {
-                        RtcStats::LocalCandidate(local) if local.rtc.id == candidate_id => {
-                            Some(&local.local_candidate)
-                        }
-                        RtcStats::RemoteCandidate(remote) if remote.rtc.id == candidate_id => {
-                            Some(&remote.remote_candidate)
-                        }
-                        _ => None,
-                    })
-                    .map(|candidate| {
-                        let kind = candidate
-                            .candidate_type
-                            .map(|kind| format!("{kind:?}"))
-                            .unwrap_or_default();
-                        let relay = candidate
-                            .relay_protocol
-                            .map(|relay| format!(" via {relay:?}"))
-                            .unwrap_or_default();
-                        format!("{kind}/{}{relay}", candidate.protocol)
-                    })
-                    .unwrap_or_else(|| "?".into())
-            };
-            snapshot.selected_pair = Some(format!(
-                "local {} <-> remote {}",
-                describe(&pair.candidate_pair.local_candidate_id),
-                describe(&pair.candidate_pair.remote_candidate_id)
-            ));
-        }
-    }
-    snapshot
 }
 
 #[cfg(test)]
@@ -4751,6 +3074,62 @@ mod tests {
     }
 
     #[test]
+    fn camera_does_not_start_while_a_peer_escalation_is_pending() {
+        assert!(camera_may_start(true, false, true));
+        assert!(!camera_may_start(true, true, true));
+        assert!(!camera_may_start(false, false, true));
+        assert!(!camera_may_start(true, false, false));
+    }
+
+    #[test]
+    fn leg_switch_keeps_mixer_control_links_when_renegotiation_omits_them() {
+        let mut media_links = BTreeMap::from([
+            (
+                "updateMediaDescriptions".to_owned(),
+                "https://m/update".to_owned(),
+            ),
+            (
+                "applyChannelParameters".to_owned(),
+                "https://m/apply".to_owned(),
+            ),
+            ("callLeg".to_owned(), "https://m/leg".to_owned()),
+        ]);
+        replace_leg_media_links(
+            &mut media_links,
+            &BTreeMap::from([("mediaAnswer".to_owned(), "https://m/answer".to_owned())]),
+        );
+        assert_eq!(
+            media_links
+                .get("updateMediaDescriptions")
+                .map(String::as_str),
+            Some("https://m/update")
+        );
+        assert_eq!(
+            media_links
+                .get("applyChannelParameters")
+                .map(String::as_str),
+            Some("https://m/apply")
+        );
+        assert_eq!(
+            media_links.get("mediaAnswer").map(String::as_str),
+            Some("https://m/answer")
+        );
+        replace_leg_media_links(
+            &mut media_links,
+            &BTreeMap::from([(
+                "updateMediaDescriptions".to_owned(),
+                "https://m/update-new".to_owned(),
+            )]),
+        );
+        assert_eq!(
+            media_links
+                .get("updateMediaDescriptions")
+                .map(String::as_str),
+            Some("https://m/update-new")
+        );
+    }
+
+    #[test]
     fn keep_alive_fires_at_ninety_percent_of_the_interval() {
         assert_eq!(keep_alive_period(Some(2700)), Duration::from_secs(2430));
         assert_eq!(keep_alive_period(None), Duration::from_secs(2430));
@@ -4801,7 +3180,7 @@ mod tests {
             .unwrap();
         let source = NativeAudioSource::new(AudioSourceOptions::default(), SAMPLE_RATE, 1, 100);
         let track = factory.create_audio_track("microphone", source);
-        let offer = include_str!("../tests/fixtures/teams_p2p_offer.sdp");
+        let offer = include_str!("../../tests/fixtures/teams_p2p_offer.sdp");
         let answered = answer_offer(
             &peer,
             Some(&track),
