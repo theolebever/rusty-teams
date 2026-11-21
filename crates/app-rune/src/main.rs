@@ -194,6 +194,16 @@ fn main() {
         print!("{}", arguments::HELP);
         return;
     }
+    // The registry stores folders, so a relative path must not outlive the working directory.
+    if let Some(database) = arguments.database.take() {
+        match std::path::absolute(&database) {
+            Ok(path) => arguments.database = Some(path),
+            Err(error) => {
+                eprintln!("Could not resolve {}: {error}", database.display());
+                std::process::exit(1);
+            }
+        }
+    }
     if let Ok(value) = std::env::var(app_base::updater::RELAUNCH_ENV) {
         app_base::updater::wait_for_previous_exit(&value);
     }
@@ -203,7 +213,7 @@ fn main() {
         // ponytail: the running instance only takes links, so a command relaunches this exe
         // with its link (one short-lived extra process per forwarded command).
         if let Some(command) = &arguments.command
-            && let Err(error) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg(command.link()).spawn())
+            && let Err(error) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg(command.link()).env_remove(app_base::updater::RELAUNCH_ENV).spawn())
         {
             eprintln!("Could not forward {command:?}: {error}");
         }
