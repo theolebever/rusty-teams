@@ -53,7 +53,9 @@
       let entry;
       try { entry = JSON.parse(localStorage.getItem(key)); } catch (error) { continue; }
       if (!entry || typeof entry !== 'object') continue;
-      if (key.startsWith('tmp.auth.v1.') && entry.item?.error?.errorCode === 'InteractionRequired') interaction = true;
+      if (key.startsWith('tmp.auth.v1.') && entry.item?.error?.errorCode === 'InteractionRequired') {
+        interactionResources.add(key.slice(key.indexOf('.Token.') + 7).toLowerCase().replace(/\/+$/, ''));
+      }
       if (entry.id && entry.nonce && entry.data) sealed.push([key, entry]);
       else take(key, entry);
     }
@@ -67,7 +69,8 @@
   const cache = (window.__rustyTeamsTokens = window.__rustyTeamsTokens || {});
   // Lives until the page reloads, which a sign-out or the 401 path triggers anyway.
   const memo = (window.__rustyTeamsGrants = window.__rustyTeamsGrants || {});
-  // Set when Teams marks the sign-in InteractionRequired, or when only expired refresh tokens remain.
+  // Resources Teams marked InteractionRequired; interaction is set for the acquired resource or when only expired refresh tokens remain.
+  const interactionResources = new Set();
   let interaction = false;
   const acquire = async (resource, scope) => {
     const base = resource.replace(/\/+$/, '');
@@ -100,7 +103,7 @@
     const refreshTokens = ownRefreshTokens
       .filter(entry => !entry.expiresOn || Number(entry.expiresOn) * 1000 > Date.now())
       .sort((first, second) => Number(second.lastUpdatedAt || 0) - Number(first.lastUpdatedAt || 0));
-    if (!token && !refreshTokens.length && ownRefreshTokens.length) interaction = true;
+    if (!token && (interactionResources.has(base.toLowerCase()) || (!refreshTokens.length && ownRefreshTokens.length))) interaction = true;
     let refreshError = null;
     for (const refreshToken of token ? [] : refreshTokens) {
       const form = new URLSearchParams({
