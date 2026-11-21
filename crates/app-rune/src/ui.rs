@@ -57,6 +57,8 @@ pub struct UiState<A: Actions> {
     pub own: crate::status_menu::State,
     pub profile: crate::profile::State,
     pub toast: crate::toast::State,
+    /// The account picker replaces the window while open (`account_picker.rs`).
+    pub account_picker: Option<crate::account_picker::Picker>,
     pub chats: Vec<ChatRow>,
     pub selected: Option<String>,
     pub teams: Vec<TeamRow>,
@@ -176,6 +178,7 @@ impl<A: Actions> UiState<A> {
             own: Default::default(),
             profile: Default::default(),
             toast: Default::default(),
+            account_picker: None,
             chats: Vec::new(),
             selected: None,
             teams: Vec::new(),
@@ -417,7 +420,15 @@ impl<A: Actions> UiState<A> {
             Update::OwnStatus(status) => self.own.status = status,
             Update::Profile { user_id, result } => self.profile.loaded(user_id, result),
             Update::OpenChat(id) => self.profile.chat_request = Some(id),
-            Update::Chats(rows) => { self.chats = rows; self.starting = false; }
+            Update::Chats(rows) => {
+                self.chats = rows;
+                self.starting = false;
+                // Chats after a sign-in the picker asked for mean the session is back.
+                if self.account_picker.is_some_and(|picker| picker.signing_in) { self.account_picker = None; }
+            }
+            Update::SessionExpired => {
+                if self.starting { crate::account_picker::open_picker(self, true) } else { self.toast.session_expired = true }
+            }
             Update::Folders(folders) => self.chatlist.folders = folders,
             Update::Favorites(ids) => self.chatlist.favorites = ids,
             Update::ChatPaging { more, loading } => { self.chatlist.has_older = more; self.chatlist.loading_older = loading; }
@@ -710,6 +721,12 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
     cx.titlebar_height(crate::view_chrome::TITLE_BAR_HEIGHT * zoom);
     let width = cx.layout_size("root").map_or(1100.0, |size| size[0]);
     let arriving = !s.appearing.is_empty() && !cx.is_reduced_motion();
+    if s.account_picker.is_some() {
+        return zoomed(cx, zoom, col().key("account-picker-host").w_full().h_full().fill(c(WHITE))
+            .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
+            .child(crate::account_picker::view(s))
+            .children(crate::toast::layer(s)));
+    }
     if s.starting {
         return zoomed(cx, zoom, col().key("startup-splash").w_full().h_full().fill(c(WHITE))
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
@@ -730,6 +747,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .fill(c(WHITE))
         .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
         .children(crate::toast::banner(s))
+        .children(crate::toast::session_expired(s))
         .child(
             row()
                 .grow(1.0)

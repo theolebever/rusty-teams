@@ -3,6 +3,7 @@
 //! Rusty Teams on Rune: chat list, conversation and composer on the real backend.
 //! Run with `--help` for account, browser and demo options.
 
+mod account_picker;
 mod accounts;
 mod agenda;
 mod agent_panel;

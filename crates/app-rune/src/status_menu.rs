@@ -314,6 +314,10 @@ fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
             s.own.menu = false;
             s.own.dialog = true;
         }))
+        .child(item("status-switch-account", None, "Switch account", false, |s: &mut UiState<A>| {
+            s.own.menu = false;
+            crate::account_picker::open_picker(s, false);
+        }))
 }
 
 fn chip<A: Actions + 'static>(key: String, label: &str, on: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {

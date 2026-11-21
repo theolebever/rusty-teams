@@ -66,6 +66,8 @@ pub(crate) struct Shared {
     /// The account folder of this run, recorded in the registry once it is `Online`.
     folder: PathBuf,
     identity_saved: AtomicBool,
+    /// Opens the sign-in window of an account (`Actions::sign_in`).
+    transport: Arc<dyn session::Transport>,
 }
 
 impl Shared {
@@ -293,6 +295,7 @@ impl Bridge {
         let database = database.unwrap_or_else(|| data_path(DATABASE_FILE));
         let folder = accounts::account_folder(&database);
         let store = Arc::new(open_store(&database));
+        let transport = endpoint.map_or_else(|| transport(&database, no_sso), |endpoint| Arc::new(session::CdpTransport::new(&endpoint)) as Arc<dyn session::Transport>);
         let shared = Arc::new_cyclic(|weak: &std::sync::Weak<Shared>| {
             let weak = weak.clone();
             let video_weak = weak.clone();
@@ -329,6 +332,7 @@ impl Bridge {
             store: store.clone(),
             folder,
             identity_saved: AtomicBool::new(false),
+            transport: transport.clone(),
         }});
         shared.publish(Update::Preferences(Box::new(crate::settings_backend::load(&store))));
         let mut runs = crate::agent_runs::history(&store).unwrap_or_else(|error| { shared.publish(Update::Status(error)); Vec::new() });
@@ -340,7 +344,6 @@ impl Bridge {
                 shared.publish(update);
             }
         });
-        let transport = endpoint.map_or_else(|| transport(&database, no_sso), |endpoint| Arc::new(session::CdpTransport::new(&endpoint)) as Arc<dyn session::Transport>);
         let (activity_sender, activity) = watch::channel(false);
         let events = app_backend::backend::start(store, transport, !read_only, activity, None);
         app_backend::runtime::handle().spawn(forward(shared.clone(), events));
@@ -412,6 +415,21 @@ impl Bridge {
 }
 
 impl Actions for Bridge {
+    fn accounts(&self) -> Vec<accounts::Account> { accounts::Accounts::load(&accounts::default_root()).list }
+    fn current_folder(&self) -> Option<PathBuf> { Some(self.shared.folder.clone()) }
+    fn sign_in(&self, email: &str) {
+        let (transport, email) = (self.shared.transport.clone(), email.to_owned());
+        app_backend::runtime::handle().spawn(async move {
+            if let Err(error) = transport.sign_in(session::App::Teams, &email).await {
+                app_backend::diagnostics::record(format!("Rune: sign-in window not opened: {error}"));
+            }
+        });
+    }
+    fn switch_account(&self, folder: &Path) -> Result<(), String> { switch_to(folder) }
+    fn add_account(&self) -> Result<(), String> {
+        let folder = accounts::new_folder(&accounts::default_root()).map_err(|error| error.to_string())?;
+        switch_to(&folder)
+    }
     fn pop_out_chat(&self, id: &str) { self.shared.publish(Update::PopOutChat(id.into())); }
     fn create_meeting(&self, request: u64, mut draft: app_backend::schedule::MeetingDraft) {
         let Some(launcher) = self.shared.launcher().filter(|_| !self.shared.read_only) else {
@@ -1455,6 +1473,15 @@ impl Bridge {
 /// Publishes the signed-in user and photo, and refreshes their own presence (answered by a
 /// `PresenceStatusChanged` event).
 /// Writes the signed-in identity into the account registry, once per run.
+/// Makes `folder` the most recent account, then starts this exe on it. The caller quits.
+fn switch_to(folder: &Path) -> Result<(), String> {
+    let root = accounts::default_root();
+    let mut registry = accounts::Accounts::load(&root);
+    registry.touch(folder, Utc::now().timestamp());
+    registry.save(&root).map_err(|error| error.to_string())?;
+    accounts::relaunch(std::env::args_os().skip(1)).map_err(|error| error.to_string())
+}
+
 fn remember_account(shared: &Shared) {
     if shared.identity_saved.swap(true, Ordering::Relaxed) {
         return;
@@ -1540,7 +1567,9 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                     refresh_me(&shared, &engine);
                     remember_account(&shared);
                 }
+                let expired = state == ConnectionState::SessionExpired;
                 shared.publish(Update::Status(status_text(&state)));
+                if expired { shared.publish(Update::SessionExpired); }
             }
             BackendEvent::Engine(engine) => {
                 *shared.engine.lock().unwrap_or_else(PoisonError::into_inner) =

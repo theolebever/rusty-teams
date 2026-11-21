@@ -107,10 +107,6 @@ impl Accounts {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the account picker adds accounts in a later task")
-)]
 pub(crate) fn new_folder(root: &Path) -> io::Result<PathBuf> {
     let folder = root.join("accounts").join(Uuid::new_v4().to_string());
     fs::create_dir_all(&folder)?;
@@ -119,7 +115,6 @@ pub(crate) fn new_folder(root: &Path) -> io::Result<PathBuf> {
 
 /// Restarts this exe with its arguments minus `--database`, so the picker's choice wins.
 /// Only spawns; the caller quits the current window.
-#[expect(dead_code, reason = "the account picker relaunches in a later task")]
 pub(crate) fn relaunch(args: impl IntoIterator<Item = OsString>) -> io::Result<()> {
     std::process::Command::new(std::env::current_exe()?)
         .args(relaunch_arguments(args))
@@ -131,10 +126,6 @@ pub(crate) fn relaunch(args: impl IntoIterator<Item = OsString>) -> io::Result<(
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the account picker relaunches in a later task")
-)]
 fn relaunch_arguments(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut kept = Vec::new();
     let mut args = args.into_iter();

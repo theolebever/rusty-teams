@@ -192,6 +192,8 @@ pub enum Update {
     EditFinished { conversation_id: String, message_id: String, result: Result<(), String> },
     /// Human-readable connection line: "Connecting…", "Online", "Sign in in the browser window", …
     Status(String),
+    /// The Teams session ended and needs a sign-in again (`account_picker.rs`).
+    SessionExpired,
     /// The signed-in user, known once the first sidebar refresh stored it.
     Me { user_id: String, name: String, email: String },
     OwnStatus(teams_core::PresenceStatus),
@@ -249,6 +251,16 @@ pub enum Update {
 
 /// What the view asks of the bridge. Calls return at once; results arrive as `Update`s.
 pub trait Actions {
+    /// The registered accounts (`accounts.rs`), for the account picker.
+    fn accounts(&self) -> Vec<crate::accounts::Account> { Vec::new() }
+    /// The account folder this run uses.
+    fn current_folder(&self) -> Option<std::path::PathBuf> { None }
+    /// Opens the sign-in window for the account with this email.
+    fn sign_in(&self, _email: &str) {}
+    /// Makes `folder` the account to start with and restarts on it; the caller quits on `Ok`.
+    fn switch_account(&self, _folder: &std::path::Path) -> Result<(), String> { Ok(()) }
+    /// Adds an account in a new folder and restarts on it; the caller quits on `Ok`.
+    fn add_account(&self) -> Result<(), String> { Ok(()) }
     fn pop_out_chat(&self, _id: &str) {}
     fn create_meeting(&self, _request: u64, _draft: app_backend::schedule::MeetingDraft) {}
     fn load_inline_file(&self, _target: SendTarget, _marker: String, _path: std::path::PathBuf) {}

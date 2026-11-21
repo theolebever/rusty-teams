@@ -31,6 +31,8 @@ pub struct State {
     live_banner: bool,
     pub(crate) retry_ready: bool,
     pub(crate) last_sync: Option<DateTime<Utc>>,
+    /// The Teams session ended while the window was up (`session_expired`).
+    pub(crate) session_expired: bool,
 }
 
 /// The banner text for a connection status line; `None` when it is a notice or online.
@@ -146,6 +148,29 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             .child(text(text_line).font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0).grow(1.0))
             .children((connection.is_none() && live == Some(LiveState::Failed) && s.toast.retry_ready).then(||
                 crate::screens::button("Retry", "live-retry", |s: &mut UiState<A>, _| s.actions.retry_live()))),
+    )
+}
+
+/// The strip offering a sign-in again once the session expired (`account_picker::open_picker`).
+pub fn session_expired<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
+    if !s.toast.session_expired {
+        return None;
+    }
+    let palette = active_palette();
+    Some(
+        row()
+            .key("session-expired-banner")
+            .h(32.0)
+            .px(12.0)
+            .mx(8.0)
+            .mb(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(8.0)
+            .fill(rgb(palette.amber).alpha(0.14))
+            .child(sym("status_away", 14.0).color(rgb(palette.amber)))
+            .child(text("Session expired").font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0).grow(1.0))
+            .child(crate::screens::button("Sign in again", "session-sign-in", |s: &mut UiState<A>, _| crate::account_picker::open_picker(s, true))),
     )
 }
 
