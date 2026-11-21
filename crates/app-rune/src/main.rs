@@ -3,7 +3,6 @@
 //! Rusty Teams on Rune: chat list, conversation and composer on the real backend.
 //! Run with `--help` for account, browser and demo options.
 
-#[cfg_attr(not(test), expect(dead_code, reason = "wired into startup in the next task"))]
 mod accounts;
 mod agenda;
 mod agent_panel;
@@ -184,7 +183,7 @@ fn main() {
         return;
     }
     // Rune consumes its snapshot/script options and leaves account options for us.
-    let arguments = match Arguments::parse(rune::extra_args().iter().cloned()) {
+    let mut arguments = match Arguments::parse(rune::extra_args().iter().cloned()) {
         Ok(arguments) => arguments,
         Err(error) => {
             eprintln!("{error}\nUse --help for available options.");
@@ -195,7 +194,12 @@ fn main() {
         print!("{}", arguments::HELP);
         return;
     }
-    if !arguments.demo && arguments.database.is_none() && !rune::single_instance("rusty-teams-rune") {
+    if let Ok(value) = std::env::var(app_base::updater::RELAUNCH_ENV) {
+        app_base::updater::wait_for_previous_exit(&value);
+    }
+    // Only a plain launch shares the running instance; an explicit `--database` opens its own.
+    let explicit_database = arguments.database.is_some();
+    if !arguments.demo && !explicit_database && !rune::single_instance("rusty-teams-rune") {
         // ponytail: the running instance only takes links, so a command relaunches this exe
         // with its link (one short-lived extra process per forwarded command).
         if let Some(command) = &arguments.command
@@ -207,13 +211,15 @@ fn main() {
     }
     let demo = arguments.demo;
     if !demo {
-        let directory = arguments.database.as_deref()
-            .and_then(std::path::Path::parent)
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(std::path::Path::to_path_buf)
-            .or_else(|| directories::ProjectDirs::from("", "", store::DATA_DIR_NAME)
-                .map(|directories| directories.data_local_dir().to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let root = accounts::default_root();
+        let mut accounts = accounts::Accounts::load(&root);
+        if arguments.database.is_none() {
+            arguments.database = Some(accounts.current().folder.join(bridge::DATABASE_FILE));
+        }
+        let directory = arguments
+            .database
+            .as_deref()
+            .map_or_else(|| root.clone(), accounts::account_folder);
         if let Err(error) = std::fs::create_dir_all(&directory) {
             eprintln!("Could not create {}: {error}", directory.display());
             std::process::exit(1);
@@ -222,6 +228,10 @@ fn main() {
         app_backend::diagnostics::install(directory.join(app_backend::diagnostics::DIAGNOSTICS_FILE));
         if let Err(error) = rune_notify::register(&rune_notify::Identity::new("rusty-teams-rune", TITLE).activation(notifications::ACTIVATION_SCHEME)) {
             app_backend::diagnostics::record(format!("Notifications unavailable: {error}"));
+        }
+        accounts.touch(&directory, chrono::Utc::now().timestamp());
+        if let Err(error) = accounts.save(&root) {
+            app_backend::diagnostics::record(format!("Could not save the account list: {error}"));
         }
     }
     ARGUMENTS.set(arguments).expect("arguments are initialized once");

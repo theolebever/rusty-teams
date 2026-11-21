@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use scraper::{Html, Node};
@@ -13,9 +13,10 @@ use store::{ChatRecord, MessageRecord, SidebarTeam, Store};
 use teams_core::CoreEvent;
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 
+use crate::accounts;
 use crate::types::{Actions, ChannelRow, ChatRow, MessageRow, SendTarget, TeamRow, Update};
 
-const DATABASE_FILE: &str = "cache.sqlite3";
+pub(crate) const DATABASE_FILE: &str = "cache.sqlite3";
 const WEBVIEW_FOLDER: &str = "WebView2";
 const WINDOW_TITLE: &str = "Rusty Teams - Sign in";
 const STORE_OPEN_ATTEMPTS: u32 = 20;
@@ -62,6 +63,9 @@ pub(crate) struct Shared {
     wake: Box<dyn Fn() + Send + Sync>,
     pub(crate) agent_stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(crate) store: Arc<Store>,
+    /// The account folder of this run, recorded in the registry once it is `Online`.
+    folder: PathBuf,
+    identity_saved: AtomicBool,
 }
 
 impl Shared {
@@ -287,6 +291,7 @@ impl Bridge {
     ) -> Bridge {
         let (updates, receiver) = mpsc::channel();
         let database = database.unwrap_or_else(|| data_path(DATABASE_FILE));
+        let folder = accounts::account_folder(&database);
         let store = Arc::new(open_store(&database));
         let shared = Arc::new_cyclic(|weak: &std::sync::Weak<Shared>| {
             let weak = weak.clone();
@@ -322,6 +327,8 @@ impl Bridge {
             updates,
             wake: Box::new(wake),
             store: store.clone(),
+            folder,
+            identity_saved: AtomicBool::new(false),
         }});
         shared.publish(Update::Preferences(Box::new(crate::settings_backend::load(&store))));
         let mut runs = crate::agent_runs::history(&store).unwrap_or_else(|error| { shared.publish(Update::Status(error)); Vec::new() });
@@ -1447,6 +1454,23 @@ impl Bridge {
 
 /// Publishes the signed-in user and photo, and refreshes their own presence (answered by a
 /// `PresenceStatusChanged` event).
+/// Writes the signed-in identity into the account registry, once per run.
+fn remember_account(shared: &Shared) {
+    if shared.identity_saved.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let email = shared.store.meta("me_email").ok().flatten().unwrap_or_default();
+    let name = shared.store.meta("me_display_name").ok().flatten().unwrap_or_default();
+    let root = accounts::default_root();
+    let mut registry = accounts::Accounts::load(&root);
+    // set_identity ignores unlisted folders, so the folder is listed first.
+    registry.touch(&shared.folder, Utc::now().timestamp());
+    registry.set_identity(&shared.folder, &email, &name);
+    if let Err(error) = registry.save(&root) {
+        app_backend::diagnostics::record(format!("Could not save the account list: {error}"));
+    }
+}
+
 fn refresh_me(shared: &Arc<Shared>, engine: &Arc<Engine>) {
     let (shared, engine) = (shared.clone(), engine.clone());
     app_backend::runtime::handle().spawn(async move {
@@ -1514,6 +1538,7 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 if state == ConnectionState::Online && let Some(engine) = shared.engine() {
                     shared.publish_chats(&engine);
                     refresh_me(&shared, &engine);
+                    remember_account(&shared);
                 }
                 shared.publish(Update::Status(status_text(&state)));
             }

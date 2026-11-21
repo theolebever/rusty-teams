@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -6,6 +7,21 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const FILE: &str = "accounts.json";
+
+/// The default folder: the registry root, and the account folder when no `--database` is given.
+pub(crate) fn default_root() -> PathBuf {
+    directories::ProjectDirs::from("", "", store::DATA_DIR_NAME)
+        .map(|directories| directories.data_local_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The folder that holds a database: its parent, or the default folder for a bare file name.
+pub(crate) fn account_folder(database: &Path) -> PathBuf {
+    database
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map_or_else(default_root, Path::to_path_buf)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Account {
@@ -91,10 +107,45 @@ impl Accounts {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the account picker adds accounts in a later task")
+)]
 pub(crate) fn new_folder(root: &Path) -> io::Result<PathBuf> {
     let folder = root.join("accounts").join(Uuid::new_v4().to_string());
     fs::create_dir_all(&folder)?;
     Ok(folder)
+}
+
+/// Restarts this exe with its arguments minus `--database`, so the picker's choice wins.
+/// Only spawns; the caller quits the current window.
+#[expect(dead_code, reason = "the account picker relaunches in a later task")]
+pub(crate) fn relaunch(args: impl IntoIterator<Item = OsString>) -> io::Result<()> {
+    std::process::Command::new(std::env::current_exe()?)
+        .args(relaunch_arguments(args))
+        .env(
+            app_base::updater::RELAUNCH_ENV,
+            std::process::id().to_string(),
+        )
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the account picker relaunches in a later task")
+)]
+fn relaunch_arguments(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut kept = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--database" {
+            args.next();
+        } else {
+            kept.push(arg);
+        }
+    }
+    kept
 }
 
 /// Renames an unreadable registry to `accounts.json.bak`. Returns false, and records why, if it could not.
@@ -244,6 +295,12 @@ mod tests {
         assert_eq!(first.parent(), Some(root.join("accounts").as_path()));
         assert_ne!(first, new_folder(&root).unwrap());
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn relaunch_arguments_drop_database() {
+        let args = ["--database", "x", "--sso"].map(OsString::from);
+        assert_eq!(relaunch_arguments(args), vec![OsString::from("--sso")]);
     }
 
     #[test]
