@@ -524,6 +524,7 @@ dependencies = [
  "teams-core",
  "tempfile",
  "tokio",
+ "uuid",
  "webview",
  "windows 0.62.2",
 ]
