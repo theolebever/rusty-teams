@@ -424,10 +424,14 @@ impl<A: Actions> UiState<A> {
                 self.chats = rows;
                 self.starting = false;
                 // Chats after a sign-in the picker asked for mean the session is back.
-                if self.account_picker.is_some_and(|picker| picker.signing_in) { self.account_picker = None; }
+                if self.account_picker.as_ref().is_some_and(|picker| picker.signing_in) { self.account_picker = None; }
             }
             Update::SessionExpired => {
                 if self.starting { crate::account_picker::open_picker(self, true) } else { self.toast.session_expired = true }
+            }
+            Update::SignInFailed(error) => {
+                if let Some(picker) = &mut self.account_picker { picker.signing_in = false; }
+                self.toast.show(error);
             }
             Update::Folders(folders) => self.chatlist.folders = folders,
             Update::Favorites(ids) => self.chatlist.favorites = ids,

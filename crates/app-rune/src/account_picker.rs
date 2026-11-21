@@ -1,6 +1,8 @@
 //! The account picker: shown when the Teams session expired at startup, or from the status menu.
 //! Choosing an account restarts Rune on its folder; the bridge does the work (`bridge.rs`).
 
+use std::path::PathBuf;
+
 use app_backend::schemes::active_palette;
 use rune::*;
 
@@ -10,11 +12,14 @@ use crate::icons::sym;
 use crate::types::Actions;
 use crate::ui::{UiState, text, ts};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Picker {
     pub expired: bool,
     /// Set once the sign-in window of the current account was asked for.
     pub signing_in: bool,
+    /// The registry and this run's folder, read once when the picker opens.
+    pub accounts: Vec<Account>,
+    pub current: Option<PathBuf>,
 }
 
 /// Shows the picker; the session banner goes with it.
@@ -22,20 +27,21 @@ pub(crate) fn open_picker<A: Actions>(s: &mut UiState<A>, expired: bool) {
     s.account_picker = Some(Picker {
         expired,
         signing_in: false,
+        accounts: s.actions.accounts(),
+        current: s.actions.current_folder(),
     });
     s.toast.session_expired = false;
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let Some(picker) = s.account_picker else {
+    let Some(picker) = s.account_picker.as_ref() else {
         return col();
     };
     let palette = active_palette();
     let muted = rgb(palette.text_muted);
-    let current = s.actions.current_folder();
     let mut list = col().key("account-list").w_full().gap(4.0);
-    for (index, account) in s.actions.accounts().into_iter().enumerate() {
-        let is_current = current.as_deref() == Some(account.folder.as_path());
+    for (index, account) in picker.accounts.iter().cloned().enumerate() {
+        let is_current = picker.current.as_deref() == Some(account.folder.as_path());
         list = list.child(account_row::<A>(
             index,
             account,
@@ -269,18 +275,20 @@ mod tests {
         rt.state.actions.calls.borrow().clone()
     }
 
+    /// `(expired, signing_in)` of the open picker, `None` when closed.
+    fn flags(rt: &Runtime<UiState<Fake>>) -> Option<(bool, bool)> {
+        rt.state
+            .account_picker
+            .as_ref()
+            .map(|picker| (picker.expired, picker.signing_in))
+    }
+
     #[test]
     fn expired_start_shows_picker() {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
         rt.update(|s, _| s.starting = true);
         apply(&mut rt, Update::SessionExpired);
-        assert_eq!(
-            rt.state.account_picker,
-            Some(Picker {
-                expired: true,
-                signing_in: false
-            })
-        );
+        assert_eq!(flags(&rt), Some((true, false)));
         assert!(
             rt.find("account-badge").is_some(),
             "the current account is marked expired"
@@ -298,6 +306,15 @@ mod tests {
     }
 
     #[test]
+    fn accounts_are_read_once_when_the_picker_opens() {
+        let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        open(&mut rt, false);
+        let picker = rt.state.account_picker.clone().expect("picker open");
+        assert_eq!(picker.accounts, vec![account("C:/a", "ada@x.com")]);
+        assert_eq!(picker.current, Some(PathBuf::from("C:/a")));
+    }
+
+    #[test]
     fn clicking_current_signs_in() {
         let mut rt = rt(vec![
             account("C:/a", "ada@x.com"),
@@ -306,13 +323,17 @@ mod tests {
         open(&mut rt, true);
         click(&mut rt, "account-0");
         assert_eq!(calls(&rt), ["sign_in ada@x.com"]);
-        assert_eq!(
-            rt.state.account_picker,
-            Some(Picker {
-                expired: true,
-                signing_in: true
-            })
-        );
+        assert_eq!(flags(&rt), Some((true, true)));
+    }
+
+    #[test]
+    fn sign_in_failure_reopens_the_choice_with_the_reason() {
+        let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        open(&mut rt, true);
+        click(&mut rt, "account-0");
+        apply(&mut rt, Update::SignInFailed("no window".into()));
+        assert_eq!(flags(&rt), Some((true, false)));
+        assert!(rt.find("toast").is_some(), "the reason is shown");
     }
 
     #[test]
@@ -339,13 +360,7 @@ mod tests {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
         click(&mut rt, "title-account");
         click(&mut rt, "status-switch-account");
-        assert_eq!(
-            rt.state.account_picker,
-            Some(Picker {
-                expired: false,
-                signing_in: false
-            })
-        );
+        assert_eq!(flags(&rt), Some((false, false)));
         assert!(!rt.state.own.menu);
         assert!(
             rt.find("account-cancel").is_some(),
@@ -358,29 +373,28 @@ mod tests {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
         open(&mut rt, false);
         click(&mut rt, "account-cancel");
-        assert_eq!(rt.state.account_picker, None);
+        assert_eq!(flags(&rt), None);
     }
 
     #[test]
     fn session_banner_opens_the_expired_picker() {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
         apply(&mut rt, Update::SessionExpired);
-        assert_eq!(
-            rt.state.account_picker, None,
-            "the banner waits for a click"
-        );
+        assert_eq!(flags(&rt), None, "the banner waits for a click");
         click(&mut rt, "session-sign-in");
-        assert_eq!(
-            rt.state.account_picker,
-            Some(Picker {
-                expired: true,
-                signing_in: false
-            })
-        );
+        assert_eq!(flags(&rt), Some((true, false)));
         assert!(
             !rt.state.toast.session_expired,
             "the banner clears when the picker opens"
         );
+    }
+
+    #[test]
+    fn online_clears_the_session_banner() {
+        let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        apply(&mut rt, Update::SessionExpired);
+        apply(&mut rt, Update::Status("Online".into()));
+        assert!(rt.find("session-expired-banner").is_none());
     }
 
     #[test]
@@ -389,6 +403,6 @@ mod tests {
         open(&mut rt, true);
         click(&mut rt, "account-0");
         apply(&mut rt, Update::Chats(Vec::new()));
-        assert_eq!(rt.state.account_picker, None);
+        assert_eq!(flags(&rt), None);
     }
 }

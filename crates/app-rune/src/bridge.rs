@@ -418,10 +418,12 @@ impl Actions for Bridge {
     fn accounts(&self) -> Vec<accounts::Account> { accounts::Accounts::load(&accounts::default_root()).list }
     fn current_folder(&self) -> Option<PathBuf> { Some(self.shared.folder.clone()) }
     fn sign_in(&self, email: &str) {
-        let (transport, email) = (self.shared.transport.clone(), email.to_owned());
+        let (shared, email) = (self.shared.clone(), email.to_owned());
         app_backend::runtime::handle().spawn(async move {
-            if let Err(error) = transport.sign_in(session::App::Teams, &email).await {
-                app_backend::diagnostics::record(format!("Rune: sign-in window not opened: {error}"));
+            if let Err(error) = shared.transport.sign_in(session::App::Teams, &email).await {
+                let message = format!("Could not open the sign-in window: {error}");
+                app_backend::diagnostics::record(format!("Rune: {message}"));
+                shared.publish(Update::SignInFailed(message));
             }
         });
     }
@@ -1476,10 +1478,17 @@ impl Bridge {
 /// Makes `folder` the most recent account, then starts this exe on it. The caller quits.
 fn switch_to(folder: &Path) -> Result<(), String> {
     let root = accounts::default_root();
-    let mut registry = accounts::Accounts::load(&root);
+    let before = accounts::Accounts::load(&root);
+    let mut registry = before.clone();
     registry.touch(folder, Utc::now().timestamp());
     registry.save(&root).map_err(|error| error.to_string())?;
-    accounts::relaunch(std::env::args_os().skip(1)).map_err(|error| error.to_string())
+    accounts::relaunch(std::env::args_os().skip(1)).map_err(|error| {
+        // Keep the previous account as the one the next launch opens.
+        if let Err(restore) = before.save(&root) {
+            app_backend::diagnostics::record(format!("Could not restore the account list: {restore}"));
+        }
+        error.to_string()
+    })
 }
 
 fn remember_account(shared: &Shared) {

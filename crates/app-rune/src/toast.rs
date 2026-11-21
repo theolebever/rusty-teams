@@ -81,6 +81,7 @@ impl State {
             self.reconnecting = false;
             self.bad_since = None;
             self.banner = false;
+            self.session_expired = false;
         }
         let notice = !is_connection_line(status);
         if notice {

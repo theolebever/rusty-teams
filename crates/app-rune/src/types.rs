@@ -194,6 +194,8 @@ pub enum Update {
     Status(String),
     /// The Teams session ended and needs a sign-in again (`account_picker.rs`).
     SessionExpired,
+    /// The sign-in window of an account could not open; the picker offers the choice again.
+    SignInFailed(String),
     /// The signed-in user, known once the first sidebar refresh stored it.
     Me { user_id: String, name: String, email: String },
     OwnStatus(teams_core::PresenceStatus),
