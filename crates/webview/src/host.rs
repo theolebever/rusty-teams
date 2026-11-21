@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use serde_json::Value;
-use session::{App, Error, TabCommand, TabEvent, is_login_url};
+use session::{App, Error, TabCommand, TabEvent, is_login_url, returned_from_sign_in, sign_in_url};
 use tokio::sync::watch;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
@@ -346,6 +346,12 @@ fn watch_loads(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
         for command in waiting {
             call(&shared, app, command);
         }
+        if returned_from_sign_in(app, &url) {
+            unsafe {
+                let _ = sender.Navigate(&HSTRING::from(app.start_url()));
+            }
+            return Ok(());
+        }
         if is_running_app(app, &url) {
             unsafe { SetTimer(Some(shared.windows[&app]), PARK_TIMER, PARK_DELAY_MS, None) };
             if shared.park_gate.borrow().held(app) {
@@ -522,6 +528,7 @@ fn drain(shared: &Rc<Shared>) {
             UiRequest::Call { app, command } => call(shared, app, command),
             UiRequest::Subscribe { app, sink } => shared.subscribers.borrow_mut().add(app, sink),
             UiRequest::Wake { app } => wake(shared, app),
+            UiRequest::SignIn { app, login_hint } => sign_in(shared, app, &login_hint),
             UiRequest::Hold { app, held } => hold(shared, app, held),
             UiRequest::Retry => {
                 if !shared.state.borrow().ready && !shared.restarting.replace(true) {
@@ -636,6 +643,14 @@ fn wake(shared: &Rc<Shared>, app: App) {
         } else {
             webview.Navigate(&HSTRING::from(app.start_url()))
         };
+    }
+}
+
+fn sign_in(shared: &Shared, app: App, login_hint: &str) {
+    if let Some(webview) = webview_of(shared, app) {
+        unsafe {
+            let _ = webview.Navigate(&HSTRING::from(sign_in_url(login_hint).as_str()));
+        }
     }
 }
 

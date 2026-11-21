@@ -31,6 +31,10 @@ pub trait Transport: Send + Sync {
 
     /// While held the host must not navigate the app on its own (no parking).
     fn hold(&self, _app: App, _held: bool) {}
+
+    fn sign_in(&self, _app: App, _login_hint: &str) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub struct CdpTransport {

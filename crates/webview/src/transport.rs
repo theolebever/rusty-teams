@@ -29,6 +29,10 @@ pub(crate) enum UiRequest {
     Wake {
         app: App,
     },
+    SignIn {
+        app: App,
+        login_hint: String,
+    },
     Hold {
         app: App,
         held: bool,
@@ -149,6 +153,11 @@ impl Transport for WebViewTransport {
 
     fn wake(&self, app: App) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { self.send(UiRequest::Wake { app }) })
+    }
+
+    fn sign_in(&self, app: App, login_hint: &str) -> BoxFuture<'_, Result<()>> {
+        let login_hint = login_hint.to_owned();
+        Box::pin(async move { self.send(UiRequest::SignIn { app, login_hint }) })
     }
 
     fn hold(&self, app: App, held: bool) {
