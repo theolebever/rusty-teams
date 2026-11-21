@@ -84,12 +84,19 @@ pub fn sign_in_url(login_hint: &str) -> String {
 
 /// True when a navigation on the app origin carries an authorization `code` in its query or fragment.
 pub fn returned_from_sign_in(app: App, url: &str) -> bool {
-    app.origins().iter().any(|origin| url.starts_with(origin))
-        && url
-            .split(['?', '#'])
-            .skip(1)
-            .flat_map(|part| part.split('&'))
-            .any(|pair| pair.starts_with("code="))
+    app.origins().iter().any(|origin| {
+        url.strip_prefix(origin)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+    }) && url
+        .split(['?', '#'])
+        .skip(1)
+        .flat_map(|part| part.split('&'))
+        .any(|pair| pair.starts_with("code="))
+}
+
+/// Only Rune's own sign-in returns to the start page; Teams' MSAL redirect with a `code` must be left alone.
+pub fn should_return_to_start(requested: bool, app: App, url: &str) -> bool {
+    requested && returned_from_sign_in(app, url)
 }
 
 pub fn has_login_tab(targets: &[Target]) -> bool {
@@ -173,6 +180,22 @@ mod tests {
         assert!(!returned_from_sign_in(
             App::Teams,
             "https://login.microsoftonline.com/?code=1"
+        ));
+        assert!(!returned_from_sign_in(
+            App::Teams,
+            "https://teams.cloud.microsoft.evil/#code=1"
+        ));
+    }
+
+    #[test]
+    fn returns_to_start_only_after_rune_requested_the_sign_in() {
+        let code = "https://teams.cloud.microsoft/v2/#code=0.AAA";
+        assert!(should_return_to_start(true, App::Teams, code));
+        assert!(!should_return_to_start(false, App::Teams, code));
+        assert!(!should_return_to_start(
+            true,
+            App::Teams,
+            "https://teams.cloud.microsoft/v2/"
         ));
     }
 

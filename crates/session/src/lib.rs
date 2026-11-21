@@ -10,7 +10,8 @@ mod session;
 mod transport;
 
 pub use app::{
-    App, Target, find_app_tab, has_login_tab, is_login_url, returned_from_sign_in, sign_in_url,
+    App, Target, find_app_tab, has_login_tab, is_login_url, returned_from_sign_in,
+    should_return_to_start, sign_in_url,
 };
 pub use error::{Error, Result};
 pub use events::{

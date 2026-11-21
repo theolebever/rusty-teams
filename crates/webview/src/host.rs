@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +7,9 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use serde_json::Value;
-use session::{App, Error, TabCommand, TabEvent, is_login_url, returned_from_sign_in, sign_in_url};
+use session::{
+    App, Error, TabCommand, TabEvent, is_login_url, should_return_to_start, sign_in_url,
+};
 use tokio::sync::watch;
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
@@ -68,6 +70,7 @@ pub(crate) struct Shared {
     requests: mpsc::Receiver<UiRequest>,
     restarting: Cell<bool>,
     login_prompt: RefCell<LoginPrompt>,
+    sign_in_requested: RefCell<HashSet<App>>,
     sleep: RefCell<Sleep<TabCommand>>,
     sleep_blocker: Cell<Option<&'static str>>,
     calls: RefCell<CallTally>,
@@ -133,6 +136,7 @@ fn run(
         requests,
         restarting: Cell::new(false),
         login_prompt: RefCell::new(LoginPrompt::default()),
+        sign_in_requested: RefCell::new(HashSet::new()),
         sleep: RefCell::new(Sleep::default()),
         sleep_blocker: Cell::new(None),
         calls: RefCell::new(CallTally::default()),
@@ -346,7 +350,9 @@ fn watch_loads(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
         for command in waiting {
             call(&shared, app, command);
         }
-        if returned_from_sign_in(app, &url) {
+        let requested = shared.sign_in_requested.borrow().contains(&app);
+        if should_return_to_start(requested, app, &url) {
+            shared.sign_in_requested.borrow_mut().remove(&app);
             unsafe {
                 let _ = sender.Navigate(&HSTRING::from(app.start_url()));
             }
@@ -648,6 +654,7 @@ fn wake(shared: &Rc<Shared>, app: App) {
 
 fn sign_in(shared: &Shared, app: App, login_hint: &str) {
     if let Some(webview) = webview_of(shared, app) {
+        shared.sign_in_requested.borrow_mut().insert(app);
         unsafe {
             let _ = webview.Navigate(&HSTRING::from(sign_in_url(login_hint).as_str()));
         }
