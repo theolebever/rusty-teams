@@ -10,6 +10,8 @@ pub enum Error {
     NoAppTab,
     #[error("Microsoft 365 login required: {0}")]
     LoginRequired(String),
+    #[error("Microsoft 365 session expired")]
+    SessionExpired,
     #[error("no fresh token for {scope}{detail}")]
     NoFreshToken { scope: String, detail: String },
     #[error("HTTP {status}: {message} ({url})")]

@@ -294,6 +294,9 @@ impl Session {
             };
             let outcome: Outcome = serde_json::from_value(outcome)
                 .map_err(|error| Error::Cdp(format!("unexpected page answer: {error}")))?;
+            if outcome.sign_in {
+                return Err(Error::SessionExpired);
+            }
             if let Some(results) = outcome.results {
                 return Ok(Some(results.into_iter().map(WireResult::into).collect()));
             }

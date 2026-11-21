@@ -53,6 +53,7 @@
       let entry;
       try { entry = JSON.parse(localStorage.getItem(key)); } catch (error) { continue; }
       if (!entry || typeof entry !== 'object') continue;
+      if (key.startsWith('tmp.auth.v1.') && entry.item?.error?.errorCode === 'InteractionRequired') interaction = true;
       if (entry.id && entry.nonce && entry.data) sealed.push([key, entry]);
       else take(key, entry);
     }
@@ -66,6 +67,8 @@
   const cache = (window.__rustyTeamsTokens = window.__rustyTeamsTokens || {});
   // Lives until the page reloads, which a sign-out or the 401 path triggers anyway.
   const memo = (window.__rustyTeamsGrants = window.__rustyTeamsGrants || {});
+  // Set when Teams marks the sign-in InteractionRequired, or when only expired refresh tokens remain.
+  let interaction = false;
   const acquire = async (resource, scope) => {
     const base = resource.replace(/\/+$/, '');
     const wanted = (base + '/' + scope).toLowerCase();
@@ -93,10 +96,11 @@
       if (grants(cached.scopes)) { token = cached.token; expiresOn = cached.expires; }
       else return {token: null, refreshError: `the app is not granted ${scope}`};
     }
-    const refreshTokens = entries
-      .filter(entry => entry.credentialType === 'RefreshToken' && ownAccount(entry))
+    const ownRefreshTokens = entries.filter(entry => entry.credentialType === 'RefreshToken' && ownAccount(entry));
+    const refreshTokens = ownRefreshTokens
       .filter(entry => !entry.expiresOn || Number(entry.expiresOn) * 1000 > Date.now())
       .sort((first, second) => Number(second.lastUpdatedAt || 0) - Number(first.lastUpdatedAt || 0));
+    if (!token && !refreshTokens.length && ownRefreshTokens.length) interaction = true;
     let refreshError = null;
     for (const refreshToken of token ? [] : refreshTokens) {
       const form = new URLSearchParams({
@@ -127,7 +131,7 @@
   };
   const {token, refreshError} = await acquire(resource, scope);
   const page = {visibility: document.visibilityState, plain, sealed: sealed.length, opened};
-  if (!token) return {noToken: true, refreshError, page};
+  if (!token) return {noToken: true, signIn: interaction, refreshError, page};
   const exchange = (request) => new Promise((resolve) => {
     const separator = '\u001e';
     const {handshake, invocations, doneTypes, timeoutMs} = request.signalr;

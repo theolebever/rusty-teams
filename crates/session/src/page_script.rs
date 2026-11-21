@@ -11,7 +11,8 @@ use crate::session::{FETCH_SCRIPT, NOT_GRANTED_PREFIX, Session};
 
 const LOADING_DOCUMENT_DENIAL: &str = "Access is denied for this document";
 const LOADING_DOCUMENT_WAIT: Duration = Duration::from_secs(1);
-const TOKEN_MARKER: &str = "if (!token) return {noToken: true, refreshError, page};";
+const TOKEN_MARKER: &str =
+    "if (!token) return {noToken: true, signIn: interaction, refreshError, page};";
 const ACQUIRE_CALL: &str = "const {token, refreshError} = await acquire(resource, scope);";
 
 /// A JS function expression: `(factory)({marginMs, forceRefresh})` resolves to `acquire(resource, scope)`, which answers `{token, refreshError}`.
@@ -74,6 +75,9 @@ impl Session {
         if outcome.get("noToken").and_then(Value::as_bool) == Some(true) {
             let outcome: Outcome = serde_json::from_value(outcome)
                 .map_err(|error| Error::Cdp(format!("unexpected page answer: {error}")))?;
+            if outcome.sign_in {
+                return Err(Error::SessionExpired);
+            }
             let reason = outcome.refresh_error.unwrap_or_default();
             if reason.starts_with(NOT_GRANTED_PREFIX) {
                 return Err(Error::LoginRequired(format!(

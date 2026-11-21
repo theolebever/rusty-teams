@@ -263,6 +263,49 @@ async fn missing_token_with_login_tab_is_login_required() {
 }
 
 #[tokio::test]
+async fn expired_session_is_session_expired() {
+    let expired = json!({
+        "noToken": true,
+        "signIn": true,
+        "page": {"visibility": "visible", "plain": 2, "sealed": 0, "opened": 0}
+    });
+    let browser = start_browser(vec![expired], TEAMS_TAB.to_vec()).await;
+    let session = Session::connect_with(&browser.endpoint, fast_config())
+        .await
+        .unwrap();
+    let error = session
+        .request(
+            Method::Get,
+            "https://graph.microsoft.com/v1.0/me",
+            &Scope::graph("User.Read"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::SessionExpired), "{error}");
+    assert_eq!(browser.expressions.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn fresh_page_without_entries_is_not_expired() {
+    let missing = json!({"noToken": true});
+    let browser = start_browser(vec![missing; 40], TEAMS_TAB.to_vec()).await;
+    let session = Session::connect_with(&browser.endpoint, fast_config())
+        .await
+        .unwrap();
+    let error = session
+        .request(
+            Method::Get,
+            "https://graph.microsoft.com/v1.0/me",
+            &Scope::graph("User.Read"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::NoFreshToken { .. }), "{error}");
+}
+
+#[tokio::test]
 async fn no_browser_is_typed() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

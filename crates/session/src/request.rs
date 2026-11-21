@@ -245,6 +245,8 @@ pub(crate) struct Outcome {
     pub results: Option<Vec<WireResult>>,
     #[serde(default, rename = "refreshError")]
     pub refresh_error: Option<String>,
+    #[serde(default, rename = "signIn")]
+    pub sign_in: bool,
     #[serde(default)]
     pub page: Option<PageState>,
 }
