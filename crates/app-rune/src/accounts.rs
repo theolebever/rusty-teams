@@ -19,20 +19,20 @@ pub(crate) struct Account {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Accounts {
     pub list: Vec<Account>,
+    /// Set when an unreadable file could not be moved aside, so `save` must leave it alone.
+    keep_file: bool,
 }
 
 impl Accounts {
     pub(crate) fn load(root: &Path) -> Accounts {
         let path = root.join(FILE);
-        let (mut list, fresh) = match fs::read_to_string(&path) {
+        let (mut list, fresh, keep_file) = match fs::read_to_string(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (Vec::new(), true, false),
             Ok(text) => match serde_json::from_str(&text) {
-                Ok(list) => (list, false),
-                Err(_) => {
-                    let _ = fs::rename(&path, root.join(format!("{FILE}.bak")));
-                    (Vec::new(), false)
-                }
+                Ok(list) => (list, false, false),
+                Err(_) => (Vec::new(), false, !set_aside(&path)),
             },
-            Err(_) => (Vec::new(), true),
+            Err(_) => (Vec::new(), false, !set_aside(&path)),
         };
         if fresh {
             list.extend(siblings(root));
@@ -41,10 +41,13 @@ impl Accounts {
             list.insert(0, blank(root.to_path_buf(), 0));
         }
         list.retain(|account| account.folder == root || account.folder.exists());
-        Accounts { list }
+        Accounts { list, keep_file }
     }
 
     pub(crate) fn save(&self, root: &Path) -> io::Result<()> {
+        if self.keep_file {
+            return Ok(());
+        }
         let tmp = root.join(format!("{FILE}.tmp"));
         let json = serde_json::to_string_pretty(&self.list).map_err(io::Error::other)?;
         fs::write(&tmp, json)?;
@@ -88,10 +91,26 @@ impl Accounts {
     }
 }
 
-pub(crate) fn new_folder(root: &Path) -> PathBuf {
+pub(crate) fn new_folder(root: &Path) -> io::Result<PathBuf> {
     let folder = root.join("accounts").join(Uuid::new_v4().to_string());
-    fs::create_dir_all(&folder).expect("account folder can be created");
-    folder
+    fs::create_dir_all(&folder)?;
+    Ok(folder)
+}
+
+/// Renames an unreadable registry to `accounts.json.bak`. Returns false, and records why, if it could not.
+fn set_aside(path: &Path) -> bool {
+    let bak = path.with_file_name(format!("{FILE}.bak"));
+    match fs::rename(path, &bak) {
+        Ok(()) => true,
+        Err(error) => {
+            app_backend::diagnostics::record(format!(
+                "could not keep {} as {}: {error}",
+                path.display(),
+                bak.display()
+            ));
+            false
+        }
+    }
 }
 
 fn blank(folder: PathBuf, last_used: i64) -> Account {
@@ -137,19 +156,10 @@ mod tests {
         (base, root)
     }
 
-    fn blank(folder: &Path) -> Account {
-        Account {
-            folder: folder.to_path_buf(),
-            email: String::new(),
-            name: String::new(),
-            last_used: 0,
-        }
-    }
-
     #[test]
     fn missing_file_lists_only_root() {
         let (base, root) = layout();
-        assert_eq!(Accounts::load(&root).list, vec![blank(&root)]);
+        assert_eq!(Accounts::load(&root).list, vec![blank(root.clone(), 0)]);
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -186,7 +196,7 @@ mod tests {
         accounts.touch(&gone, 1);
         accounts.save(&root).unwrap();
         fs::remove_dir_all(&gone).unwrap();
-        assert_eq!(Accounts::load(&root).list, vec![blank(&root)]);
+        assert_eq!(Accounts::load(&root).list, vec![blank(root.clone(), 0)]);
         fs::remove_dir_all(&base).unwrap();
     }
 
@@ -194,7 +204,7 @@ mod tests {
     fn corrupt_file_is_kept_as_bak() {
         let (base, root) = layout();
         fs::write(root.join(FILE), "{").unwrap();
-        assert_eq!(Accounts::load(&root).list, vec![blank(&root)]);
+        assert_eq!(Accounts::load(&root).list, vec![blank(root.clone(), 0)]);
         assert_eq!(
             fs::read_to_string(root.join("accounts.json.bak")).unwrap(),
             "{"
@@ -203,12 +213,36 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_file_is_kept_as_bak() {
+        let (base, root) = layout();
+        fs::write(root.join(FILE), [0xff, 0xfe]).unwrap();
+        assert_eq!(Accounts::load(&root).list, vec![blank(root.clone(), 0)]);
+        assert_eq!(
+            fs::read(root.join("accounts.json.bak")).unwrap(),
+            [0xff, 0xfe]
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn file_that_cannot_be_moved_aside_is_not_overwritten() {
+        let (base, root) = layout();
+        // A directory at the backup path makes the rename fail on Windows and Unix alike.
+        fs::create_dir_all(root.join("accounts.json.bak")).unwrap();
+        fs::write(root.join(FILE), "{").unwrap();
+        let accounts = Accounts::load(&root);
+        accounts.save(&root).unwrap();
+        assert_eq!(fs::read_to_string(root.join(FILE)).unwrap(), "{");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn new_folder_is_created_under_root() {
         let (base, root) = layout();
-        let first = new_folder(&root);
+        let first = new_folder(&root).unwrap();
         assert!(first.is_dir());
         assert_eq!(first.parent(), Some(root.join("accounts").as_path()));
-        assert_ne!(first, new_folder(&root));
+        assert_ne!(first, new_folder(&root).unwrap());
         fs::remove_dir_all(&base).unwrap();
     }
 
