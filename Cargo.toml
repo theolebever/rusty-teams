@@ -5,7 +5,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.4.0"
+version = "0.5.0"
 license = "MIT"
 publish = false
 
@@ -49,6 +49,7 @@ browser = { path = "crates/browser" }
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 gpui-component = { path = "vendor/gpui-component" }
+gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 webrtc-sys = { path = "vendor/webrtc-sys" }
 libwebrtc = { path = "vendor/libwebrtc" }

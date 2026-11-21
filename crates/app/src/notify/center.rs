@@ -150,7 +150,7 @@ impl NotificationCenter {
         settings.account = app.read(cx).account_chat_settings().notifications;
         let app_icon = active_appearance::current(cx).app_icon;
         let initial_presence = tray_presence_from(&app.read(cx), false);
-        let tray = if app.read(cx).mode.demo {
+        let tray = if app.read(cx).mode.demo || !settings.show_in_tray {
             None
         } else {
             Tray::new(initial_presence.clone(), app_icon.png())
@@ -359,7 +359,7 @@ impl NotificationCenter {
     pub fn start_in_background(&self, window: &mut Window, cx: &mut App) {
         match (&self.tray, self.main_native) {
             (Some(_), Some(native)) => platform::hide_window(native),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             (Some(_), None) => crate::main_window::hide(cx),
             _ => window.minimize_window(),
         }
@@ -374,7 +374,7 @@ impl NotificationCenter {
                 platform::hide_window(native);
                 true
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             (true, Some(_), None) => {
                 crate::main_window::mark_hiding(cx);
                 false
@@ -390,6 +390,7 @@ impl NotificationCenter {
         let previous = self.settings.sounds.clone();
         change(&mut self.settings);
         settings::save(&self.app.read(cx).store, &self.settings);
+        self.show_in_tray(self.settings.show_in_tray, cx);
         self.sync_tray(cx);
         if self.settings.sounds != previous {
             let updated = self.settings.sounds.clone();
@@ -1545,7 +1546,7 @@ impl NotificationCenter {
             if let Some(native) = self.main_native {
                 platform::hide_window(native);
             } else {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 crate::main_window::hide(cx);
             }
         } else {
@@ -1560,7 +1561,7 @@ impl NotificationCenter {
     }
 
     fn raise_main_window(&mut self, cx: &mut Context<Self>) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if crate::main_window::is_hidden(cx) {
             crate::main_window::show(cx);
             return;
@@ -1574,12 +1575,9 @@ impl NotificationCenter {
     }
 
     fn apply_app_icon(&mut self, icon: AppIcon, cx: &mut Context<Self>) {
-        if icon != self.app_icon {
-            self.show_app_icon(icon, cx);
+        if icon == self.app_icon {
+            return;
         }
-    }
-
-    fn show_app_icon(&mut self, icon: AppIcon, cx: &mut Context<Self>) {
         self.app_icon = icon;
         let mention = !self.unread_mentions.is_empty();
         if let Some(tray) = &mut self.tray {
@@ -1588,6 +1586,17 @@ impl NotificationCenter {
         let _ = self.main_window.update(cx, |_, window, _| {
             platform::set_window_icon(window, icon.png())
         });
+    }
+
+    fn show_in_tray(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if !shown {
+            self.tray = None;
+            self.last_tray_presence = None;
+        } else if self.tray.is_none() && !self.demo_mode {
+            let presence = tray_presence_from(self.app.read(cx), !self.unread_mentions.is_empty());
+            self.tray = Tray::new(presence, self.app_icon.png());
+            self.last_tray_presence = None;
+        }
     }
 
     fn relocalize_tray(&self) {

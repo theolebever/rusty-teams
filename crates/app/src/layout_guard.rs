@@ -198,7 +198,7 @@ mod frames {
     };
     use crate::views::conversation::{
         FEED_EDGE_TAG, FORWARD_FOOTER_BAR_TAG, FORWARD_FOOTER_COUNT_TAG, FORWARD_FOOTER_NEXT_TAG,
-        FORWARD_FOOTER_TAG, HEADER_DIVIDER, MEMBERS_BUTTON, TIMELINE_TAG,
+        FORWARD_FOOTER_TAG, HEADER_DIVIDER, MEMBERS_BUTTON, TIMELINE_TAG, TYPING_TAG,
     };
     use crate::views::find_panel::{
         FIND_DIVIDER_TAG, FIND_INPUT_TAG, FIND_PANEL_TAG, FIND_RESULTS_TAG,
@@ -206,7 +206,7 @@ mod frames {
     use crate::views::forward_dialog::{FORWARD_CARD_TAG, FORWARD_PREVIEW_TAG};
     use crate::views::group_name::{GROUP_NAME_BUTTON, GROUP_NAME_FORM};
     use crate::views::message_row::{
-        BUBBLE_TAGS, IMPORTANCE_LABEL_TAG, bubble_padding_y, select_box_selector,
+        BUBBLE_META_TAGS, BUBBLE_TAGS, IMPORTANCE_LABEL_TAG, bubble_padding_y, select_box_selector,
     };
     use crate::views::pin_banner::{BANNER_INSET, PIN_BANNER_TAG};
     use crate::views::post_card::{
@@ -374,13 +374,14 @@ mod frames {
         SettingsSection::Agents,
         "Agents pages carry their own PAGE_PADDING side inset, the body narrows its side padding to keep the text edge",
     )];
-    const SETTINGS_SECTIONS: [SettingsSection; 11] = [
+    const SETTINGS_SECTIONS: [SettingsSection; 12] = [
         SettingsSection::General,
         SettingsSection::Notifications,
         SettingsSection::Appearance,
         SettingsSection::Chats,
         SettingsSection::Calls,
         SettingsSection::Calendar,
+        SettingsSection::CalendarAccounts,
         SettingsSection::Devices,
         SettingsSection::Agents,
         SettingsSection::Mcp,
@@ -1365,6 +1366,162 @@ mod frames {
     }
 
     #[gpui_kit::test]
+    fn the_typing_bubble_stays_put_when_an_own_message_arrives(cx: &mut TestAppContext) {
+        let (handle, app) = mount(cx);
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        visual.simulate_resize(size(px(1280.), px(520.)));
+        visual.update(|_, cx| {
+            app.update(cx, |state, cx| {
+                state.select(Selection::Chat(REACTION_CHAT.to_owned()), cx)
+            })
+        });
+        collect(&mut visual, Some(TYPING_TAG));
+        collect(&mut visual, None);
+        let resting = visual
+            .debug_bounds(TYPING_TAG)
+            .expect("typing bubble")
+            .bottom();
+        visual.update(|_, cx| {
+            app.update(cx, |state, cx| {
+                let record = store::MessageRecord {
+                    conversation_id: REACTION_CHAT.to_owned(),
+                    message_id: "guard-own".to_owned(),
+                    sender_id: Some(demo::DEMO_USER_ID.to_owned()),
+                    sender_name: Some("Me".to_owned()),
+                    created_at: chrono::Utc::now().max(demo::at(0, 10, 48)),
+                    body_html: "<p>Sent while Mara types</p>".to_owned(),
+                    links_json: "[]".to_owned(),
+                    attachments_json: "[]".to_owned(),
+                    reactions_json: "[]".to_owned(),
+                    mentions_json: "[]".to_owned(),
+                    ..Default::default()
+                };
+                state
+                    .store
+                    .upsert_messages(&[record])
+                    .expect("store message");
+                state.typing.start(
+                    REACTION_CHAT,
+                    demo::MARA_ID,
+                    "Mara Lindqvist",
+                    std::time::Instant::now(),
+                    chrono::Utc::now() + chrono::Duration::days(1),
+                );
+                state.apply(
+                    crate::backend::BackendEvent::Core(teams_core::CoreEvent::MessagesChanged {
+                        conversation_id: REACTION_CHAT.to_owned(),
+                    }),
+                    cx,
+                );
+            })
+        });
+        let mut bottoms = Vec::new();
+        for _ in 0..12 {
+            visual.executor().advance_clock(Duration::from_millis(16));
+            visual.run_until_parked();
+            visual.update(|window, cx| window.render_frame(cx));
+            bottoms.push(
+                visual
+                    .debug_bounds(TYPING_TAG)
+                    .map(|bounds| f32::from(bounds.bottom())),
+            );
+        }
+        let positions: Vec<f32> = bottoms
+            .iter()
+            .map(|bottom| bottom.expect("typing bubble"))
+            .collect();
+        let steps: Vec<f32> = positions
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .filter(|step| step.abs() > 0.5)
+            .collect();
+        let reversals = steps
+            .windows(2)
+            .filter(|pair| pair[0].signum() != pair[1].signum())
+            .count();
+        assert_eq!(reversals, 0, "resting {resting:?}, frames {positions:?}");
+    }
+
+    #[gpui_kit::test]
+    fn a_chat_with_someone_of_another_organization_says_external(cx: &mut TestAppContext) {
+        let (handle, app) = mount(cx);
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        visual.simulate_resize(size(px(1280.), px(800.)));
+        visual.update(|_, cx| {
+            app.update(cx, |state, cx| {
+                state
+                    .directory
+                    .external
+                    .insert(demo::MARA_ID.to_owned(), Some("Example Corp".to_owned()));
+                state.select(Selection::Chat(REACTION_CHAT.to_owned()), cx)
+            })
+        });
+        collect(&mut visual, Some(TIMELINE_TAG));
+        collect(&mut visual, None);
+        assert!(
+            visual
+                .debug_bounds(crate::views::conversation::chat_header_actions::EXTERNAL_BADGE)
+                .is_some()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_time_of_a_short_own_message_with_a_reaction_stays_in_its_bubble(
+        cx: &mut TestAppContext,
+    ) {
+        const SHORT_CHAT: &str = "demo-chat-priya";
+        let (handle, app) = mount(cx);
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        visual.simulate_resize(size(px(1280.), px(800.)));
+        visual.update(|_, cx| {
+            app.update(cx, |state, cx| {
+                let reactions = vec![teams_core::ReactionInfo {
+                    reaction_type: "like".to_owned(),
+                    user_id: Some(demo::MARA_ID.to_owned()),
+                    user_name: Some("Mara Lindqvist".to_owned()),
+                    created_at: Some(chrono::Utc::now()),
+                }];
+                let record = store::MessageRecord {
+                    conversation_id: SHORT_CHAT.to_owned(),
+                    message_id: "guard-short".to_owned(),
+                    sender_id: Some(demo::DEMO_USER_ID.to_owned()),
+                    sender_name: Some("Me".to_owned()),
+                    created_at: chrono::Utc::now().max(demo::at(0, 10, 48)),
+                    body_html: "<p>danke</p>".to_owned(),
+                    links_json: "[]".to_owned(),
+                    attachments_json: "[]".to_owned(),
+                    reactions_json: serde_json::to_string(&reactions).expect("reactions"),
+                    mentions_json: "[]".to_owned(),
+                    ..Default::default()
+                };
+                state
+                    .store
+                    .upsert_messages(&[record])
+                    .expect("store message");
+                state.select(Selection::Chat(SHORT_CHAT.to_owned()), cx)
+            })
+        });
+        collect(&mut visual, Some(TIMELINE_TAG));
+        collect(&mut visual, None);
+        let pairs: Vec<(Bounds<Pixels>, Bounds<Pixels>)> = BUBBLE_TAGS
+            .iter()
+            .zip(BUBBLE_META_TAGS)
+            .filter_map(|(bubble, meta)| {
+                Some((visual.debug_bounds(bubble)?, visual.debug_bounds(meta)?))
+            })
+            .collect();
+        let (bubble, meta) = pairs
+            .iter()
+            .max_by(|left, right| f32::from(left.0.top()).total_cmp(&f32::from(right.0.top())))
+            .expect("the newest bubble and its time");
+        assert_eq!(
+            f32::from(bubble.right() - meta.right()),
+            8.,
+            "time {meta:?} is not 8 px inside its bubble {bubble:?}"
+        );
+    }
+
+    #[gpui_kit::test]
     fn a_new_message_never_opens_a_gap_between_the_rows_above(cx: &mut TestAppContext) {
         const GAP_CHAT: &str = "demo-chat-priya";
         let (handle, app) = mount(cx);
@@ -1766,6 +1923,56 @@ mod frames {
             visual.run_until_parked();
             assert!(found.is_empty(), "{}", found.join("\n"));
         }
+    }
+
+    #[gpui_kit::test]
+    fn a_long_members_list_scrolls_to_its_last_person(cx: &mut TestAppContext) {
+        const PEOPLE: usize = 12;
+        let (handle, state) = mount(cx);
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        visual.simulate_resize(size(px(1280.), px(800.)));
+        visual.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                if let Some(chat) = state
+                    .sidebar
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == MEMBERS_CHAT)
+                {
+                    chat.members = (0..PEOPLE)
+                        .map(|index| store::MemberRecord {
+                            user_id: Some(format!("guard-person-{index}")),
+                            display_name: format!("Person {index}"),
+                        })
+                        .collect();
+                }
+                state.select(Selection::Chat(MEMBERS_CHAT.to_owned()), cx)
+            })
+        });
+        collect(&mut visual, Some(MEMBERS_BUTTON));
+        let button = visual
+            .debug_bounds(MEMBERS_BUTTON)
+            .expect("members button rendered");
+        visual.simulate_click(button.center(), Default::default());
+        collect(&mut visual, Some("chat-members-popup/list"));
+        let list = visual
+            .debug_bounds("chat-members-popup/list")
+            .expect("list");
+        let last_row = "chat-members-popup/row-11";
+        visual.simulate_event(ScrollWheelEvent {
+            position: list.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-2_000.))),
+            ..Default::default()
+        });
+        collect(&mut visual, None);
+        let list = visual
+            .debug_bounds("chat-members-popup/list")
+            .expect("list");
+        let last = visual.debug_bounds(last_row).expect("last person rendered");
+        assert!(
+            last.bottom() <= list.bottom() + px(0.5),
+            "last person {last:?} below the list {list:?}"
+        );
     }
 
     #[gpui_kit::test]

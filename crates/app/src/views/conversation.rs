@@ -23,7 +23,7 @@ use teams_core::{
 };
 
 mod channel_details;
-mod chat_header_actions;
+pub(crate) mod chat_header_actions;
 mod copilot;
 pub use channel_details::{
     CHANNEL_DETAILS_BUTTON, CHANNEL_DETAILS_PINNED_TAG, CHANNEL_DETAILS_SHARED_TAG,
@@ -166,6 +166,27 @@ enum HoverSlot {
     Toolbar,
 }
 
+/// Where the pointer is right now. A move from a row onto its toolbar reports the toolbar
+/// enter before the row leave, so a leave only starts the grace when neither part holds it.
+#[derive(Default)]
+struct PointerOn {
+    row: Option<String>,
+    toolbar: Option<String>,
+}
+
+impl PointerOn {
+    fn slot(&mut self, slot: HoverSlot) -> &mut Option<String> {
+        match slot {
+            HoverSlot::Row => &mut self.row,
+            HoverSlot::Toolbar => &mut self.toolbar,
+        }
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.row.as_deref() == Some(key) || self.toolbar.as_deref() == Some(key)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ViewMode {
     Flat,
@@ -254,10 +275,12 @@ pub struct ConversationView {
     downloads: Downloads,
     hovered_message: Option<String>,
     hover_leave_serial: u64,
+    pointer_on: PointerOn,
     toolbar_hovered: Option<String>,
     context_menu: Option<OpenContextMenu>,
     context_serial: u64,
     timeline_bounds: TimelineBounds,
+    typing_offset: Cell<f32>,
     header_width: Rc<Cell<f32>>,
     toolbar_pinned: Option<String>,
     toolbar_suppressed: Option<String>,
@@ -735,10 +758,12 @@ impl ConversationView {
             downloads: Downloads::default(),
             hovered_message: None,
             hover_leave_serial: 0,
+            pointer_on: PointerOn::default(),
             toolbar_hovered: None,
             context_menu: None,
             context_serial: 0,
             timeline_bounds: TimelineBounds::default(),
+            typing_offset: Cell::new(TYPING_BOTTOM_GAP),
             header_width: Rc::default(),
             toolbar_pinned: None,
             toolbar_suppressed: None,
@@ -1168,6 +1193,7 @@ impl ConversationView {
                 .update(cx, |composer, cx| composer.focus(window, cx));
         }
         self.hovered_message = None;
+        self.pointer_on = PointerOn::default();
         self.apply_pending_jump(cx);
     }
 
@@ -1184,6 +1210,7 @@ impl ConversationView {
             self.toolbar_pinned = None;
             self.toolbar_suppressed = None;
             self.hovered_message = None;
+            self.pointer_on = PointerOn::default();
             self.sync_generation += 1;
             self.draft.update(cx, |draft, cx| draft.reset(window, cx));
             self.composer
@@ -3069,14 +3096,20 @@ impl ConversationView {
         if hovered && matches!(slot, HoverSlot::Row) {
             self.request_post_follow(key, cx);
         }
+        let pointer = self.pointer_on.slot(slot);
         if !hovered {
-            if self.hovered_message.as_deref() == Some(key)
-                || self.toolbar_hovered.as_deref() == Some(key)
+            if pointer.as_deref() == Some(key) {
+                *pointer = None;
+            }
+            if !self.pointer_on.holds(key)
+                && (self.hovered_message.as_deref() == Some(key)
+                    || self.toolbar_hovered.as_deref() == Some(key))
             {
                 self.leave_hover_later(key.to_owned(), cx);
             }
             return;
         }
+        *pointer = Some(key.to_owned());
         self.hover_leave_serial += 1;
         match slot {
             HoverSlot::Row => self.hovered_message = Some(key.to_owned()),
@@ -3105,7 +3138,7 @@ impl ConversationView {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOVER_LEAVE_GRACE).await;
             this.update(cx, |this, cx| {
-                if this.hover_leave_serial != serial {
+                if this.hover_leave_serial != serial || this.pointer_on.holds(&key) {
                     return;
                 }
                 if this.hovered_message.as_deref() == Some(key.as_str()) {
@@ -3125,6 +3158,7 @@ impl ConversationView {
     }
 
     fn suppress_toolbar(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.pointer_on.toolbar = None;
         if self.toolbar_hovered.as_deref() == Some(key) {
             self.toolbar_hovered = None;
         }
@@ -3786,6 +3820,7 @@ impl ConversationView {
         })) = &result
         {
             self.keep_sent_previews(key, message_id);
+            crate::views::jumbo_emoji::hand_over_sent(key, message_id, cx);
         }
         let failure = match result {
             Ok(Ok(_)) => None,
@@ -4015,6 +4050,7 @@ impl ConversationView {
         let mut stack: Option<AnyElement> = None;
         let mut rename: Option<AnyElement> = None;
         let mut names_title: Option<Div> = None;
+        let mut external: Option<Div> = None;
         let mut header_title = current.title.clone();
         match &current.selection {
             Selection::Chat(chat_id) => {
@@ -4049,6 +4085,9 @@ impl ConversationView {
                         };
                         if is_one_on_one(chat) && !is_notes_chat(chat_id) {
                             stack = Some(add_people_button(&self.app, chat_id));
+                        }
+                        if user_id.is_some_and(|id| directory.is_external(id)) {
+                            external = Some(chat_header_actions::external_badge());
                         }
                     } else {
                         if chat.kind == GROUP_KIND
@@ -4198,6 +4237,7 @@ impl ConversationView {
                                         None => title.child(header_title),
                                     }),
                             )
+                            .children(external)
                             .children(rename),
                     )
                     .when(!subline.is_empty(), |column| {
@@ -4317,10 +4357,13 @@ impl Render for ConversationView {
         let typing_offset = {
             let scroller = self.scroller.read(cx);
             let last_row = scroller.item_count().checked_sub(1);
-            typing_bottom_offset(
+            let offset = typing_bottom_offset(
                 self.timeline_bounds.get(),
                 last_row.and_then(|index| scroller.item_bounds(index)),
-            )
+                self.typing_offset.get(),
+            );
+            self.typing_offset.set(offset);
+            offset
         };
         let scroller = MessageScroller::new(
             "messages",
@@ -4639,9 +4682,14 @@ impl Render for ConversationView {
 }
 
 /// Right under the last row like one more message; once that row scrolls below the view it sticks above the composer.
-fn typing_bottom_offset(timeline: Option<Bounds<Pixels>>, last_row: Option<Bounds<Pixels>>) -> f32 {
+/// A row added or replaced since the last frame has no bounds yet, so the bubble keeps its previous place.
+fn typing_bottom_offset(
+    timeline: Option<Bounds<Pixels>>,
+    last_row: Option<Bounds<Pixels>>,
+    previous: f32,
+) -> f32 {
     let (Some(timeline), Some(last_row)) = (timeline, last_row) else {
-        return TYPING_BOTTOM_GAP;
+        return previous;
     };
     let under_last_row =
         f32::from(timeline.bottom() - last_row.bottom()) - TYPING_TOP_GAP - TYPING_BUBBLE_HEIGHT;
@@ -4821,6 +4869,11 @@ mod tests {
         assert_eq!(shown(cx).0.as_deref(), Some("b"));
         cx.executor().advance_clock(HOVER_LEAVE_GRACE * 2);
         assert_eq!(shown(cx).0.as_deref(), Some("b"));
+        hover(cx, HoverSlot::Row, "c", true);
+        hover(cx, HoverSlot::Toolbar, "c", true);
+        hover(cx, HoverSlot::Row, "c", false);
+        cx.executor().advance_clock(HOVER_LEAVE_GRACE * 2);
+        assert_eq!(shown(cx).1.as_deref(), Some("c"));
     }
 
     #[gpui_kit::test]
@@ -4930,14 +4983,14 @@ mod tests {
             ))
         };
         assert_eq!(
-            typing_bottom_offset(Some(timeline), row_ending_at(400.)),
+            typing_bottom_offset(Some(timeline), row_ending_at(400.), 8.),
             256.
         );
         assert_eq!(
-            typing_bottom_offset(Some(timeline), row_ending_at(900.)),
+            typing_bottom_offset(Some(timeline), row_ending_at(900.), 8.),
             8.
         );
-        assert_eq!(typing_bottom_offset(Some(timeline), None), 8.);
+        assert_eq!(typing_bottom_offset(Some(timeline), None, 13.), 13.);
     }
 
     #[test]

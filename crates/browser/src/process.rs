@@ -1,4 +1,3 @@
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::config::Platform;
@@ -38,7 +37,7 @@ pub(crate) fn parse_lsof_pid(output: &str) -> Option<u32> {
 }
 
 fn run(program: &str, arguments: &[&str]) -> Result<String, BrowserError> {
-    let output = Command::new(program).args(arguments).output()?;
+    let output = crate::host::command(program).args(arguments).output()?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -67,6 +66,11 @@ pub(crate) fn is_chrome_image(image_name: &str) -> bool {
     lowered.starts_with("chrome")
         || lowered.starts_with("google chrome")
         || lowered.starts_with("chromium")
+        || lowered.starts_with("microsoft edge")
+        || lowered.starts_with("msedge")
+        || lowered.starts_with("brave")
+        || lowered.starts_with("helium")
+        || lowered.starts_with("vivaldi")
 }
 
 pub(crate) fn is_firefox_image(image_name: &str) -> bool {
@@ -80,6 +84,9 @@ fn process_image_name(platform: Platform, pid: &str) -> Result<String, BrowserEr
     let filter = format!("PID eq {pid}");
     let csv_arguments = ["/FI", filter.as_str(), "/FO", "CSV", "/NH"];
     let output = match platform {
+        Platform::Linux if crate::host::in_flatpak() => {
+            run("cat", &[&format!("/proc/{pid}/comm")])?
+        }
         Platform::Linux => std::fs::read_to_string(format!("/proc/{pid}/comm"))?,
         Platform::Macos => run("ps", &["-p", pid, "-o", "comm="])?,
         Platform::Windows => run("tasklist", &csv_arguments)?,
@@ -98,10 +105,12 @@ pub(crate) fn terminate_listener(platform: Platform, port: u16) -> Result<(), Br
     if !platform.uses_unix_paths() {
         return kill_pid(platform, &pid);
     }
-    Command::new("kill").args(["-TERM", &pid]).output()?;
+    crate::host::command("kill")
+        .args(["-TERM", &pid])
+        .output()?;
     let deadline = Instant::now() + EXIT_WAIT;
     while Instant::now() < deadline {
-        let alive = Command::new("kill")
+        let alive = crate::host::command("kill")
             .args(["-0", &pid])
             .output()?
             .status
@@ -139,7 +148,10 @@ fn kill_pid(platform: Platform, pid: &str) -> Result<(), BrowserError> {
         Platform::Windows => ("taskkill", vec!["/PID", pid, "/T", "/F"]),
         Platform::Wsl => ("taskkill.exe", vec!["/PID", pid, "/T", "/F"]),
     };
-    let status = Command::new(program).args(arguments).output()?.status;
+    let status = crate::host::command(program)
+        .args(arguments)
+        .output()?
+        .status;
     if status.success() {
         Ok(())
     } else {
@@ -168,6 +180,16 @@ mod tests {
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         ));
         assert!(is_chrome_image("/usr/bin/chromium"));
+        assert!(is_chrome_image(
+            "/Applications/Helium.app/Contents/MacOS/Helium"
+        ));
+        assert!(is_chrome_image(
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        ));
+        assert!(is_chrome_image(
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+        ));
+        assert!(is_chrome_image("Vivaldi"));
         assert!(!is_chrome_image("\"wslrelay.exe\""));
         assert!(!is_chrome_image(
             "/Applications/Firefox.app/Contents/MacOS/firefox"

@@ -37,6 +37,20 @@ use app_ui_kit::layout::{COMFY_RUNWAY_WIDTH, ROW_PADDING};
 pub type RowAction = Option<Box<dyn Fn(&mut App)>>;
 pub type SharedRowAction = Option<std::rc::Rc<dyn Fn(&mut App)>>;
 
+pub const BUBBLE_META_TAGS: [&str; 12] = [
+    "message-bubble/0/meta",
+    "message-bubble/1/meta",
+    "message-bubble/2/meta",
+    "message-bubble/3/meta",
+    "message-bubble/4/meta",
+    "message-bubble/5/meta",
+    "message-bubble/6/meta",
+    "message-bubble/7/meta",
+    "message-bubble/8/meta",
+    "message-bubble/9/meta",
+    "message-bubble/10/meta",
+    "message-bubble/11/meta",
+];
 pub const BUBBLE_TAGS: [&str; 12] = [
     "message-bubble/0",
     "message-bubble/1",
@@ -64,6 +78,7 @@ const MAX_WIDTH_RATIO: f32 = 0.7;
 const NARROW_BUBBLE_WIDTH: f32 = 300.;
 const BUBBLE_PADDING_Y: f32 = 8.;
 const META_BOTTOM_INSET: f32 = 4.;
+const META_RIGHT_INSET: f32 = 8.;
 const META_SIZE: f32 = 11.;
 const META_CHECK_SIZE: f32 = 15.;
 const SAVED_MARK_SIZE: f32 = 12.;
@@ -321,7 +336,7 @@ fn bubble(
     };
     let meta_inline = has_text(row) && padded_blocks.is_some();
     if let Some(jumbo) = jumbo {
-        content = content.child(jumbo_row(&row.key, jumbo, own));
+        content = content.child(jumbo_row(&row.key, jumbo, own, cx));
     } else if has_text(row) {
         content = content.children(message_body(
             padded_blocks.as_deref().unwrap_or(&row.blocks),
@@ -370,24 +385,30 @@ fn bubble(
                 } else {
                     pills.flex_auto()
                 })
-                .child(
+                .child(shifted_right(
                     h_flex()
                         .flex_none()
                         .mb(px(META_BOTTOM_INSET - bubble_padding_y(extras.compact)))
-                        .child(bubble_meta(row, own, saved)),
-                ),
+                        .child(bubble_meta(row, index, own, saved)),
+                    jumbo.is_some(),
+                )),
         );
     } else if !meta_inline {
-        content = content.child(h_flex().justify_end().child(bubble_meta(row, own, saved)));
+        content = content.child(shifted_right(
+            h_flex()
+                .justify_end()
+                .child(bubble_meta(row, index, own, saved)),
+            jumbo.is_some(),
+        ));
     }
     element = element.child(content);
     if meta_inline {
         element = element.child(
             div()
                 .absolute()
-                .right(px(8.))
+                .right(px(META_RIGHT_INSET))
                 .bottom(px(META_BOTTOM_INSET))
-                .child(bubble_meta(row, own, saved)),
+                .child(bubble_meta(row, index, own, saved)),
         );
     }
     if let Some(menu) = extras.menu {
@@ -458,13 +479,36 @@ pub(super) fn forwarded_header() -> Div {
         .child("Forwarded")
 }
 
-fn bubble_meta(row: &MessageRow, own: bool, saved: bool) -> Div {
+/// Every time and tick ends `META_RIGHT_INSET` from the bubble edge, inside a padded bubble or under a big emoji.
+fn meta_right_shift(jumbo: bool) -> f32 {
+    if jumbo {
+        META_RIGHT_INSET
+    } else {
+        META_RIGHT_INSET - BUBBLE_PADDING_X
+    }
+}
+
+/// A negative margin drops the whole row from taffy's max-content width, so the meta moves into the padding by offset.
+fn shifted_right(meta: Div, jumbo: bool) -> Div {
+    let shift = meta_right_shift(jumbo);
+    if shift < 0. {
+        let into_padding = shift.abs();
+        meta.relative().left(px(into_padding))
+    } else {
+        meta.mr(px(shift))
+    }
+}
+
+fn bubble_meta(row: &MessageRow, index: usize, own: bool, saved: bool) -> Div {
     let tint = if own {
         theme::own_meta()
     } else {
         theme::text_muted()
     };
     h_flex()
+        .when_some(BUBBLE_META_TAGS.get(index).copied(), |meta, tag| {
+            meta.debug_selector(|| tag.into())
+        })
         .gap(px(4.))
         .items_center()
         .text_size(px(META_SIZE))

@@ -5,6 +5,7 @@ mod calendar_accounts;
 mod chats;
 mod drafts;
 mod error;
+mod external_people;
 mod folders;
 mod image_files;
 mod images;
@@ -26,9 +27,9 @@ mod text;
 mod time;
 
 pub use calendar_accounts::{
-    CALENDAR_ACCOUNTS_KEY, CalendarAccounts, CalendarProvider, CalendarRef, GoogleAccount,
-    GoogleCalendarInfo, GoogleTokenSet, load_calendar_accounts, merge_google_tokens,
-    save_calendar_accounts,
+    CALENDAR_ACCOUNTS_KEY, CalDavAccount, CalDavCalendarInfo, CalendarAccounts, CalendarProvider,
+    CalendarRef, GoogleAccount, GoogleCalendarInfo, GoogleTokenSet, IcsSubscription,
+    load_calendar_accounts, merge_caldav_metadata, merge_google_tokens, save_calendar_accounts,
 };
 pub use error::{Error, Result};
 pub use image_files::ImageFileCache;

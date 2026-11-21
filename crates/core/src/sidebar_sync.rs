@@ -85,6 +85,7 @@ impl<R: Remote> SyncEngine<R> {
             let (records, hidden) = self.split_page(&page, &my_user_id)?;
             let any_changed = self.any_chat_changed(&records)?;
             self.store.upsert_chats(&records)?;
+            self.store_external_people().await?;
             self.fill_kept_previews(&records)?;
             let _ = self.events.send(CoreEvent::SidebarChanged);
             kept_ids.extend(records.iter().map(|record| record.id.clone()));
@@ -293,6 +294,7 @@ impl<R: Remote> SyncEngine<R> {
         }
         let page = self.remote.chats_at(link).await?;
         self.resolve_bot_partners(&page.items, &my_user_id).await;
+        self.store_external_people().await?;
         Ok((my_user_id, page))
     }
 
@@ -335,6 +337,13 @@ impl<R: Remote> SyncEngine<R> {
                 self.update_chat_preview(&recent)?;
             }
         }
+        Ok(())
+    }
+
+    async fn store_external_people(&self) -> Result<()> {
+        let home_tenant = self.my_tenant_id_from_any_chat().await.ok();
+        self.store
+            .upsert_external_people(&crate::native::external_people(home_tenant.as_deref()))?;
         Ok(())
     }
 
