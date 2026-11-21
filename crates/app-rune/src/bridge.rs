@@ -1644,6 +1644,7 @@ fn status_text(state: &ConnectionState) -> String {
         ConnectionState::NoBrowser => "No browser found".into(),
         ConnectionState::NoAppTab => "Open Teams in a browser tab".into(),
         ConnectionState::LoginRequired => "Sign in in the browser window".into(),
+        ConnectionState::SessionExpired => "Session expired".into(),
         ConnectionState::Failed(error) => format!("Failed: {error}"),
     }
 }

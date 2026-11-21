@@ -62,7 +62,10 @@ pub fn phase(facts: &StartupFacts) -> Phase {
     if facts.elapsed >= MIN_VISIBLE && content_ready && facts.opening.is_none() {
         return Phase::Ready;
     }
-    let signing_in = matches!(facts.connection, ConnectionState::LoginRequired);
+    let signing_in = matches!(
+        facts.connection,
+        ConnectionState::LoginRequired | ConnectionState::SessionExpired
+    );
     if facts.elapsed >= GIVE_UP_AFTER && !(signing_in && !content_ready) {
         return Phase::Ready;
     }
@@ -73,7 +76,10 @@ pub fn phase(facts: &StartupFacts) -> Phase {
         running: true,
         hint: late_hint.clone(),
     };
-    if matches!(facts.connection, ConnectionState::LoginRequired) {
+    if matches!(
+        facts.connection,
+        ConnectionState::LoginRequired | ConnectionState::SessionExpired
+    ) {
         return Phase::Loading {
             status: tr("auth.splash.awaiting_browser"),
             running: false,

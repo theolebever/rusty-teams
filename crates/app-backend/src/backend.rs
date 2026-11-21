@@ -46,6 +46,7 @@ pub enum ConnectionState {
     NoBrowser,
     NoAppTab,
     LoginRequired,
+    SessionExpired,
     Failed(String),
 }
 
@@ -114,6 +115,7 @@ pub fn classify_session_error(error: &session::Error) -> ConnectionState {
         session::Error::LoginRequired(_) | session::Error::NoFreshToken { .. } => {
             ConnectionState::LoginRequired
         }
+        session::Error::SessionExpired => ConnectionState::SessionExpired,
         other => ConnectionState::Failed(shorten(&other.to_string())),
     }
 }
@@ -717,6 +719,10 @@ mod tests {
         assert_eq!(
             classify_session_error(&session::Error::LoginRequired("x".into())),
             ConnectionState::LoginRequired
+        );
+        assert_eq!(
+            classify_session_error(&session::Error::SessionExpired),
+            ConnectionState::SessionExpired
         );
         assert_eq!(live_state_for(StatusKind::Connected), LiveState::Live);
     }

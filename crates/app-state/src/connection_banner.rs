@@ -45,7 +45,9 @@ pub fn banner_kind(
     }
     match connection {
         ConnectionState::Connecting => return Some(BannerKind::Connecting),
-        ConnectionState::LoginRequired => return Some(BannerKind::SignIn),
+        ConnectionState::LoginRequired | ConnectionState::SessionExpired => {
+            return Some(BannerKind::SignIn);
+        }
         ConnectionState::NoBrowser | ConnectionState::NoAppTab | ConnectionState::Failed(_) => {
             return Some(BannerKind::Offline);
         }
