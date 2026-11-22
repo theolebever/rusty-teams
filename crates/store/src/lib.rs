@@ -33,6 +33,7 @@ pub use calendar_accounts::{
 };
 pub use error::{Error, Result};
 pub use image_files::ImageFileCache;
+pub use meta::read_identity;
 pub use migrations::latest_version;
 pub use models::{
     ActivityRecord, AgentMeetingRecord, AgentProposalMention, AgentProposalRecord,

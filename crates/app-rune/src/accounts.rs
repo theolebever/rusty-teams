@@ -57,6 +57,15 @@ impl Accounts {
             list.insert(0, blank(root.to_path_buf(), 0));
         }
         list.retain(|account| account.folder == root || account.folder.exists());
+        for account in &mut list {
+            if account.email.is_empty()
+                && let Some((email, name)) =
+                    store::read_identity(&account.folder.join("cache.sqlite3"))
+            {
+                account.email = email;
+                account.name = name;
+            }
+        }
         Accounts { list, keep_file }
     }
 
@@ -308,6 +317,33 @@ mod tests {
             .map(|account| account.folder)
             .collect();
         assert_eq!(folders, vec![root, secondary]);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn load_fills_identity_from_cache() {
+        let (base, root) = layout();
+        let secondary = base.join("Local").join("rusty-teams-secondary");
+        fs::create_dir_all(&secondary).unwrap();
+        let store = store::Store::open(&secondary.join("cache.sqlite3")).unwrap();
+        store.set_meta("me_email", "ada@example.com").unwrap();
+        store.set_meta("me_display_name", "Ada").unwrap();
+        drop(store);
+        let listed = vec![Account {
+            folder: secondary.clone(),
+            email: String::new(),
+            name: String::new(),
+            last_used: 1,
+        }];
+        fs::write(root.join(FILE), serde_json::to_string(&listed).unwrap()).unwrap();
+        let loaded = Accounts::load(&root);
+        let account = loaded
+            .list
+            .iter()
+            .find(|account| account.folder == secondary)
+            .unwrap();
+        assert_eq!(account.email, "ada@example.com");
+        assert_eq!(account.name, "Ada");
         fs::remove_dir_all(&base).unwrap();
     }
 }
