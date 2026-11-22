@@ -747,7 +747,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
     if s.toast.reconnecting {
         return zoomed(cx, zoom, col().key("root").fill(c(WHITE))
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
-            .child(crate::toast::reconnect(s, cx.is_reduced_motion())));
+            .child(crate::toast::reconnect(s)));
     }
     let root = col().key("root");
     // The window's content fades up once, as it replaces the splash.

@@ -51,28 +51,37 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
     let add = row()
         .grow(1.0)
-        .gap(10.0)
+        .gap(12.0)
         .center_y()
-        .child(sym("person_add", 16.0).color(rgb(palette.foreground)))
+        .child(
+            col()
+                .size(32.0, 32.0)
+                .radius(16.0)
+                .center()
+                .fill(rgb(palette.accent).alpha(0.12))
+                .child(sym("person_add", 16.0).color(rgb(palette.accent))),
+        )
         .child(
             text("Add an account")
                 .font(ts(14.0, 400.0))
                 .color(rgb(palette.foreground)),
         );
-    let panel = col()
-        .w(420.0)
-        .gap(12.0)
-        .child(
-            text("Choose an account")
-                .font(ts(20.0, 600.0))
-                .color(rgb(palette.foreground)),
-        )
+    let heading = col()
+        .w_full()
+        .center()
+        .child(crate::splash::mark(0.6))
+        .child(crate::splash::title("account-title", "Choose an account").mt(4.0))
         .children(picker.expired.then(|| {
             text("Your session expired. Choose an account.")
                 .font(ts(14.0, 400.0))
                 .color(muted)
                 .wrap()
-        }))
+                .mt(8.0)
+        }));
+    let panel = col()
+        .w(420.0)
+        .gap(12.0)
+        .child(heading.mb(8.0))
         .child(list)
         .child(choice(
             "account-add",
@@ -121,7 +130,7 @@ fn account_row<A: Actions + 'static>(
         .grow(1.0)
         .min_w(0.0)
         .child(
-            text(name)
+            text(name.clone())
                 .font(ts(14.0, 600.0))
                 .color(rgb(palette.foreground))
                 .truncate(),
@@ -136,8 +145,9 @@ fn account_row<A: Actions + 'static>(
     let content = row()
         .grow(1.0)
         .min_w(0.0)
-        .gap(10.0)
+        .gap(12.0)
         .center_y()
+        .child(crate::avatar::avatar(&name, 32.0, None))
         .child(details)
         .children(expired.then(|| {
             text("Expired")

@@ -112,18 +112,17 @@ impl State {
     }
 }
 
-/// The icon holds still. On Windows a moving icon redraws the window as fast as present
-/// returns, hundreds of frames a second, for as long as the connection takes; the status line
-/// under it already shows progress.
-pub fn reconnect<A: Actions + 'static>(s: &UiState<A>, _reduced_motion: bool) -> El {
+/// The splash's brand mark over the connection status. Its loops are capped opacity `Cycle`s
+/// (`splash::mark`), so they don't redraw the window every frame.
+pub fn reconnect<A: Actions + 'static>(s: &UiState<A>) -> El {
     let palette = active_palette();
-    let indicator = sym("smart_toy", 42.0).color(rgb(palette.accent));
-    col().key("reconnecting").w_full().grow(1.0).min_h(0.0).center().gap(18.0).padding(24.0)
-        .child(indicator)
-        .child(text("Connecting to Teams").font(ts(20.0, 600.0)).color(rgb(palette.foreground)))
-        .child(text(s.toast.connection_status.clone()).font(ts(14.0, 400.0)).color(rgb(palette.text_muted)).wrap())
+    col().key("reconnecting").w_full().grow(1.0).min_h(0.0).center().padding(24.0)
+        .child(crate::splash::mark(1.0))
+        .child(crate::splash::title("reconnect-title", "Connecting to Teams").mt(8.0))
+        .child(crate::splash::fading_line("reconnect-status", &s.toast.connection_status).wrap().mt(10.0))
+        .child(crate::splash::dots().mt(22.0))
         .children(s.toast.last_sync.map(|at| text(format!("Last synced {}", at.with_timezone(&Local).format("%H:%M")))
-            .font(ts(12.0, 400.0)).color(rgb(palette.text_muted))))
+            .font(ts(12.0, 400.0)).color(rgb(palette.text_faint)).mt(18.0)))
 }
 
 /// The amber strip for a bad connection, in the flow under the title bar.

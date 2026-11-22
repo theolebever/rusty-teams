@@ -2,7 +2,7 @@
 //!
 //! Entrance is finite `Sequence`s; the only thing that keeps moving is opacity `Cycle`s, which
 //! wake the window at `FPS` instead of every frame (an unbounded loop on Windows redraws as fast
-//! as present returns, see `toast::reconnect`).
+//! as present returns).
 
 use std::time::Duration;
 
@@ -59,34 +59,54 @@ pub fn tick<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) -> bool {
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let palette = active_palette();
-    let accent = rgb(palette.accent);
-    // One loop per element: the halo breathes on a wrapper around its entrance.
-    let logo = el().key("splash-logo").size(180.0, 180.0)
-        .child(el().key("halo").size(180.0, 180.0).absolute(0.0, 0.0).cycle(BREATH)
-            .child(el().size(180.0, 180.0).radius(90.0).fill(accent.alpha(0.07)).sequence(Sequence::new(HALO_IN))))
-        .child(el().key("ring").size(124.0, 124.0).absolute(28.0, 28.0).radius(62.0).fill(accent.alpha(0.09))
-            .sequence(Sequence::new(HALO_IN).delay(0.08)))
-        .child(col().key("tile").size(84.0, 84.0).absolute(48.0, 48.0).radius(24.0).center().fill(accent)
-            .shadow(10.0, 28.0, accent.alpha(0.35))
-            .motion_intent(MotionIntent::OVERSHOOT)
-            .sequence(Sequence::new(LOGO_IN))
-            .child(sym("chat_bubble", 42.0).color(rgb(palette.on_accent))));
-    let dots = row().key("splash-dots").gap(8.0).h(8.0).sequence(Sequence::new(FADE).delay(0.5))
-        .children((0..3).map(|i| el().key(format!("dot{i}")).size(8.0, 8.0).radius(4.0).fill(accent)
-            .cycle(Cycle { period: 1.2, phase: -(i as f32) * 0.14, stops: DOT, still: 0.6, fps: FPS })));
     col().key("splash-body").grow(1.0).w_full().center()
-        .child(logo)
-        .child(text("Rusty Teams").key("splash-title").font(ts(28.0, 700.0)).color(rgb(palette.foreground))
-            .mt(8.0).sequence(Sequence::new(RISE).delay(0.2)))
-        // Keyed by its text, so each new status fades in.
-        .child(text(s.status.clone()).key(format!("splash-status:{}", s.status)).font(ts(14.0, 400.0))
-            .color(rgb(palette.text_muted)).mt(10.0).sequence(Sequence::new(FADE).delay(if s.status.is_empty() { 0.0 } else { 0.35 })))
-        .child(dots.mt(22.0))
+        .child(mark(1.0))
+        .child(title("splash-title", "Rusty Teams").mt(8.0))
+        .child(fading_line("splash-status", &s.status).mt(10.0))
+        .child(dots().mt(22.0))
         .children((s.splash_stage >= 2).then(|| text("The first start downloads your chats, it can take a minute.")
             .key("splash-hint").font(ts(12.0, 400.0)).color(rgb(palette.text_faint)).mt(18.0)
             .sequence(Sequence::new(FADE))))
         .children((s.splash_stage >= 1).then(|| crate::screens::button("Open app", "startup-open", |s: &mut UiState<A>, _| s.starting = false)
             .mt(18.0).sequence(Sequence::new(FADE))))
+}
+
+/// The brand mark: the accent tile popping in, with a breathing halo. `k` scales its 180 px box.
+/// Also drawn by `toast::reconnect` and `account_picker::view`.
+pub(crate) fn mark(k: f32) -> El {
+    let palette = active_palette();
+    let accent = rgb(palette.accent);
+    // One loop per element: the halo breathes on a wrapper around its entrance.
+    el().key("brand-mark").size(180.0 * k, 180.0 * k)
+        .child(el().key("halo").size(180.0 * k, 180.0 * k).absolute(0.0, 0.0).cycle(BREATH)
+            .child(el().size(180.0 * k, 180.0 * k).radius(90.0 * k).fill(accent.alpha(0.07)).sequence(Sequence::new(HALO_IN))))
+        .child(el().key("ring").size(124.0 * k, 124.0 * k).absolute(28.0 * k, 28.0 * k).radius(62.0 * k).fill(accent.alpha(0.09))
+            .sequence(Sequence::new(HALO_IN).delay(0.08)))
+        .child(col().key("tile").size(84.0 * k, 84.0 * k).absolute(48.0 * k, 48.0 * k).radius(24.0 * k).center().fill(accent)
+            .shadow(10.0 * k, 28.0 * k, accent.alpha(0.35))
+            .motion_intent(MotionIntent::OVERSHOOT)
+            .sequence(Sequence::new(LOGO_IN))
+            .child(sym("chat_bubble", 42.0 * k).color(rgb(palette.on_accent))))
+}
+
+/// Three accent dots pulsing in turn.
+pub(crate) fn dots() -> El {
+    let accent = rgb(active_palette().accent);
+    row().key("progress-dots").gap(8.0).h(8.0).sequence(Sequence::new(FADE).delay(0.5))
+        .children((0..3).map(|i| el().key(format!("dot{i}")).size(8.0, 8.0).radius(4.0).fill(accent)
+            .cycle(Cycle { period: 1.2, phase: -(i as f32) * 0.14, stops: DOT, still: 0.6, fps: FPS })))
+}
+
+/// A line that fades in each time its text changes, keyed by it.
+pub(crate) fn fading_line(key: &str, line: &str) -> El {
+    text(line.to_owned()).key(format!("{key}:{line}")).font(ts(14.0, 400.0))
+        .color(rgb(active_palette().text_muted)).sequence(Sequence::new(FADE).delay(if line.is_empty() { 0.0 } else { 0.35 }))
+}
+
+/// The title under the mark, rising in.
+pub(crate) fn title(key: &'static str, line: &'static str) -> El {
+    text(line).key(key).font(ts(28.0, 700.0)).color(rgb(active_palette().foreground))
+        .sequence(Sequence::new(RISE).delay(0.2))
 }
 
 #[cfg(test)]
