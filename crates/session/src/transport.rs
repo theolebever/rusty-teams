@@ -4,7 +4,7 @@ use std::pin::Pin;
 use serde_json::json;
 
 use crate::app::{App, find_app_tab, has_login_tab};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::{TabControl, TabEvents, open};
 use crate::http::list_targets;
 
@@ -33,7 +33,11 @@ pub trait Transport: Send + Sync {
     fn hold(&self, _app: App, _held: bool) {}
 
     fn sign_in(&self, _app: App, _login_hint: &str) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async {
+            Err(Error::Cdp(
+                "sign-in is not available with this browser connection".into(),
+            ))
+        })
     }
 }
 

@@ -54,7 +54,9 @@
       try { entry = JSON.parse(localStorage.getItem(key)); } catch (error) { continue; }
       if (!entry || typeof entry !== 'object') continue;
       if (key.startsWith('tmp.auth.v1.') && entry.item?.error?.errorCode === 'InteractionRequired') {
-        interactionResources.add(key.slice(key.indexOf('.Token.') + 7).toLowerCase().replace(/\/+$/, ''));
+        const at = key.indexOf('.Token.');
+        if (at === -1) continue;
+        interactionResources.add(key.slice(at + 7).toLowerCase().replace(/\/+$/, ''));
       }
       if (entry.id && entry.nonce && entry.data) sealed.push([key, entry]);
       else take(key, entry);

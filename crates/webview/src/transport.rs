@@ -9,7 +9,7 @@ use session::{
 };
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    watch,
+    oneshot, watch,
 };
 
 use crate::dialog::{DialogCommand, DialogEvent, DialogHandle, DialogSpec};
@@ -32,6 +32,7 @@ pub(crate) enum UiRequest {
     SignIn {
         app: App,
         login_hint: String,
+        reply: oneshot::Sender<Result<()>>,
     },
     Hold {
         app: App,
@@ -157,7 +158,17 @@ impl Transport for WebViewTransport {
 
     fn sign_in(&self, app: App, login_hint: &str) -> BoxFuture<'_, Result<()>> {
         let login_hint = login_hint.to_owned();
-        Box::pin(async move { self.send(UiRequest::SignIn { app, login_hint }) })
+        Box::pin(async move {
+            let (reply, answer) = oneshot::channel();
+            self.send(UiRequest::SignIn {
+                app,
+                login_hint,
+                reply,
+            })?;
+            answer
+                .await
+                .unwrap_or_else(|_| Err(no_browser("the webview thread stopped".into())))
+        })
     }
 
     fn hold(&self, app: App, held: bool) {
@@ -261,6 +272,27 @@ mod tests {
         let result: Value = control.call("Page.reload", json!({})).await.unwrap();
         answer.await.unwrap();
         assert_eq!(result, json!({"done": true}));
+    }
+
+    #[tokio::test]
+    async fn sign_in_failure_from_the_ui_thread_reaches_the_caller() {
+        let ui = fake_ui();
+        ui.state.send_replace(ready(&[]));
+        let requests = ui.requests;
+        let answer = tokio::task::spawn_blocking(move || match requests.recv().unwrap() {
+            UiRequest::SignIn { app, reply, .. } => {
+                assert_eq!(app, App::Teams);
+                let _ = reply.send(Err(Error::Cdp("webview is restarting".into())));
+            }
+            _ => panic!("expected a sign-in"),
+        });
+        let error = ui
+            .transport
+            .sign_in(App::Teams, "ada@x.com")
+            .await
+            .unwrap_err();
+        answer.await.unwrap();
+        assert!(matches!(error, Error::Cdp(_)), "{error}");
     }
 
     #[tokio::test]

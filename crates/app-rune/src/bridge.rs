@@ -1472,9 +1472,6 @@ impl Bridge {
 
 }
 
-/// Publishes the signed-in user and photo, and refreshes their own presence (answered by a
-/// `PresenceStatusChanged` event).
-/// Writes the signed-in identity into the account registry, once per run.
 /// Makes `folder` the most recent account, then starts this exe on it. The caller quits.
 fn switch_to(folder: &Path) -> Result<(), String> {
     let root = accounts::default_root();
@@ -1491,6 +1488,7 @@ fn switch_to(folder: &Path) -> Result<(), String> {
     })
 }
 
+/// Writes the signed-in identity into the account registry, once per run.
 fn remember_account(shared: &Shared) {
     if shared.identity_saved.swap(true, Ordering::Relaxed) {
         return;
@@ -1507,6 +1505,8 @@ fn remember_account(shared: &Shared) {
     }
 }
 
+/// Publishes the signed-in user and photo, and refreshes their own presence (answered by a
+/// `PresenceStatusChanged` event).
 fn refresh_me(shared: &Arc<Shared>, engine: &Arc<Engine>) {
     let (shared, engine) = (shared.clone(), engine.clone());
     app_backend::runtime::handle().spawn(async move {

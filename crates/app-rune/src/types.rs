@@ -260,9 +260,11 @@ pub trait Actions {
     /// Opens the sign-in window for the account with this email.
     fn sign_in(&self, _email: &str) {}
     /// Makes `folder` the account to start with and restarts on it; the caller quits on `Ok`.
-    fn switch_account(&self, _folder: &std::path::Path) -> Result<(), String> { Ok(()) }
+    fn switch_account(&self, _folder: &std::path::Path) -> Result<(), String> {
+        Err("Not available in this mode".into())
+    }
     /// Adds an account in a new folder and restarts on it; the caller quits on `Ok`.
-    fn add_account(&self) -> Result<(), String> { Ok(()) }
+    fn add_account(&self) -> Result<(), String> { Err("Not available in this mode".into()) }
     fn pop_out_chat(&self, _id: &str) {}
     fn create_meeting(&self, _request: u64, _draft: app_backend::schedule::MeetingDraft) {}
     fn load_inline_file(&self, _target: SendTarget, _marker: String, _path: std::path::PathBuf) {}

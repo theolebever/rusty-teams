@@ -10,7 +10,7 @@ use serde_json::Value;
 use session::{
     App, Error, TabCommand, TabEvent, is_login_url, should_return_to_start, sign_in_url,
 };
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
@@ -534,7 +534,11 @@ fn drain(shared: &Rc<Shared>) {
             UiRequest::Call { app, command } => call(shared, app, command),
             UiRequest::Subscribe { app, sink } => shared.subscribers.borrow_mut().add(app, sink),
             UiRequest::Wake { app } => wake(shared, app),
-            UiRequest::SignIn { app, login_hint } => sign_in(shared, app, &login_hint),
+            UiRequest::SignIn {
+                app,
+                login_hint,
+                reply,
+            } => sign_in(shared, app, &login_hint, reply),
             UiRequest::Hold { app, held } => hold(shared, app, held),
             UiRequest::Retry => {
                 if !shared.state.borrow().ready && !shared.restarting.replace(true) {
@@ -652,13 +656,21 @@ fn wake(shared: &Rc<Shared>, app: App) {
     }
 }
 
-fn sign_in(shared: &Shared, app: App, login_hint: &str) {
-    if let Some(webview) = webview_of(shared, app) {
-        shared.sign_in_requested.borrow_mut().insert(app);
-        unsafe {
-            let _ = webview.Navigate(&HSTRING::from(sign_in_url(login_hint).as_str()));
-        }
+fn sign_in(
+    shared: &Shared,
+    app: App,
+    login_hint: &str,
+    reply: oneshot::Sender<session::Result<()>>,
+) {
+    let Some(webview) = webview_of(shared, app) else {
+        let _ = reply.send(Err(Error::Cdp("webview is restarting".into())));
+        return;
+    };
+    shared.sign_in_requested.borrow_mut().insert(app);
+    unsafe {
+        let _ = webview.Navigate(&HSTRING::from(sign_in_url(login_hint).as_str()));
     }
+    let _ = reply.send(Ok(()));
 }
 
 fn prompt_login(shared: &Shared, app: App) {

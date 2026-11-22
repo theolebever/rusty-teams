@@ -62,7 +62,9 @@ impl Accounts {
 
     pub(crate) fn save(&self, root: &Path) -> io::Result<()> {
         if self.keep_file {
-            return Ok(());
+            return Err(io::Error::other(
+                "accounts.json is unreadable and could not be set aside",
+            ));
         }
         let tmp = root.join(format!("{FILE}.tmp"));
         let json = serde_json::to_string_pretty(&self.list).map_err(io::Error::other)?;
@@ -273,7 +275,7 @@ mod tests {
         fs::create_dir_all(root.join("accounts.json.bak")).unwrap();
         fs::write(root.join(FILE), "{").unwrap();
         let accounts = Accounts::load(&root);
-        accounts.save(&root).unwrap();
+        assert!(accounts.save(&root).is_err());
         assert_eq!(fs::read_to_string(root.join(FILE)).unwrap(), "{");
         fs::remove_dir_all(&base).unwrap();
     }

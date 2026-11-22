@@ -49,7 +49,10 @@ fn banner_text(status: &str) -> Option<&'static str> {
 }
 
 fn is_connection_line(status: &str) -> bool {
-    status.is_empty() || status.starts_with("Online") || banner_text(status).is_some()
+    status.is_empty()
+        || status.starts_with("Online")
+        || status.starts_with("Session expired")
+        || banner_text(status).is_some()
 }
 
 impl State {
@@ -221,6 +224,13 @@ mod tests {
         assert!(state.reconnecting);
         state.observe("Online");
         assert!(!state.reconnecting);
+    }
+
+    #[test]
+    fn session_expired_is_a_connection_line_not_a_notice() {
+        let mut state = State::default();
+        assert!(!state.observe("Session expired"));
+        assert!(state.notice.is_none());
     }
 
     #[test]
