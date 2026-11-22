@@ -417,10 +417,10 @@ impl Bridge {
 impl Actions for Bridge {
     fn accounts(&self) -> Vec<accounts::Account> { accounts::Accounts::load(&accounts::default_root()).list }
     fn current_folder(&self) -> Option<PathBuf> { Some(self.shared.folder.clone()) }
-    fn sign_in(&self, email: &str) {
-        let (shared, email) = (self.shared.clone(), email.to_owned());
+    fn sign_in(&self) {
+        let shared = self.shared.clone();
         app_backend::runtime::handle().spawn(async move {
-            if let Err(error) = shared.transport.sign_in(session::App::Teams, &email).await {
+            if let Err(error) = shared.transport.sign_in(session::App::Teams).await {
                 let message = format!("Could not open the sign-in window: {error}");
                 app_backend::diagnostics::record(format!("Rune: {message}"));
                 shared.publish(Update::SignInFailed(message));

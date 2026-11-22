@@ -257,8 +257,8 @@ pub trait Actions {
     fn accounts(&self) -> Vec<crate::accounts::Account> { Vec::new() }
     /// The account folder this run uses.
     fn current_folder(&self) -> Option<std::path::PathBuf> { None }
-    /// Opens the sign-in window for the account with this email.
-    fn sign_in(&self, _email: &str) {}
+    /// Opens the sign-in window of the current account.
+    fn sign_in(&self) {}
     /// Makes `folder` the account to start with and restarts on it; the caller quits on `Ok`.
     fn switch_account(&self, _folder: &std::path::Path) -> Result<(), String> {
         Err("Not available in this mode".into())

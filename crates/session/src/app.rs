@@ -73,32 +73,6 @@ pub fn is_login_url(url: &str) -> bool {
     LOGIN_ORIGINS.iter().any(|origin| url.starts_with(origin))
 }
 
-// Form encoding writes spaces as `+`; a literal `+` is always `%2B`, so the replace only touches spaces.
-pub fn sign_in_url(login_hint: &str) -> String {
-    let hint = url::form_urlencoded::byte_serialize(login_hint.as_bytes()).collect::<String>();
-    format!(
-        "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=5e3ce6c0-2b1f-4285-8d4b-75ee78787346&response_type=code&redirect_uri=https%3A%2F%2Fteams.cloud.microsoft%2Fv2&scope=openid%20profile%20offline_access&login_hint={}&prompt=login&response_mode=fragment",
-        hint.replace('+', "%20")
-    )
-}
-
-/// True when a navigation on the app origin carries an authorization `code` in its query or fragment.
-pub fn returned_from_sign_in(app: App, url: &str) -> bool {
-    app.origins().iter().any(|origin| {
-        url.strip_prefix(origin)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
-    }) && url
-        .split(['?', '#'])
-        .skip(1)
-        .flat_map(|part| part.split('&'))
-        .any(|pair| pair.starts_with("code="))
-}
-
-/// Only Rune's own sign-in returns to the start page; Teams' MSAL redirect with a `code` must be left alone.
-pub fn should_return_to_start(requested: bool, app: App, url: &str) -> bool {
-    requested && returned_from_sign_in(app, url)
-}
-
 pub fn has_login_tab(targets: &[Target]) -> bool {
     targets
         .iter()
@@ -149,54 +123,6 @@ mod tests {
         let teams = find_app_tab(&parked, App::Teams).unwrap();
         assert!(App::Teams.is_park_url(&teams.url));
         assert!(!App::Teams.is_park_url("https://teams.cloud.microsoft/v2/"));
-    }
-
-    #[test]
-    fn sign_in_url_encodes_the_hint() {
-        let url = sign_in_url("a+b@x.fr");
-        assert!(url.starts_with("https://login.microsoftonline.com/"));
-        assert!(url.contains("login_hint=a%2Bb%40x.fr&"));
-        assert!(url.contains("prompt=login"));
-    }
-
-    #[test]
-    fn returning_with_a_code_is_detected_on_the_app_origin_only() {
-        assert!(returned_from_sign_in(
-            App::Teams,
-            "https://teams.cloud.microsoft/v2/#code=0.AAA&state=x"
-        ));
-        assert!(returned_from_sign_in(
-            App::Teams,
-            "https://teams.cloud.microsoft/v2/?code=abc"
-        ));
-        assert!(!returned_from_sign_in(
-            App::Teams,
-            "https://teams.cloud.microsoft/v2/#xcode=1"
-        ));
-        assert!(!returned_from_sign_in(
-            App::Teams,
-            "https://teams.cloud.microsoft/v2/"
-        ));
-        assert!(!returned_from_sign_in(
-            App::Teams,
-            "https://login.microsoftonline.com/?code=1"
-        ));
-        assert!(!returned_from_sign_in(
-            App::Teams,
-            "https://teams.cloud.microsoft.evil/#code=1"
-        ));
-    }
-
-    #[test]
-    fn returns_to_start_only_after_rune_requested_the_sign_in() {
-        let code = "https://teams.cloud.microsoft/v2/#code=0.AAA";
-        assert!(should_return_to_start(true, App::Teams, code));
-        assert!(!should_return_to_start(false, App::Teams, code));
-        assert!(!should_return_to_start(
-            true,
-            App::Teams,
-            "https://teams.cloud.microsoft/v2/"
-        ));
     }
 
     #[test]

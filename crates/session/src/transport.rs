@@ -32,7 +32,7 @@ pub trait Transport: Send + Sync {
     /// While held the host must not navigate the app on its own (no parking).
     fn hold(&self, _app: App, _held: bool) {}
 
-    fn sign_in(&self, _app: App, _login_hint: &str) -> BoxFuture<'_, Result<()>> {
+    fn sign_in(&self, _app: App) -> BoxFuture<'_, Result<()>> {
         Box::pin(async {
             Err(Error::Cdp(
                 "sign-in is not available with this browser connection".into(),

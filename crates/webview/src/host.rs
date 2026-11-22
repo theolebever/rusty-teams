@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,16 +7,15 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use serde_json::Value;
-use session::{
-    App, Error, TabCommand, TabEvent, is_login_url, should_return_to_start, sign_in_url,
-};
+use session::{App, Error, TabCommand, TabEvent, is_login_url};
 use tokio::sync::{oneshot, watch};
 use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
     CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DevToolsProtocolEventReceivedEventHandler, NavigationCompletedEventHandler,
-    ProcessFailedEventHandler, SourceChangedEventHandler, take_pwstr,
+    DevToolsProtocolEventReceivedEventHandler, ExecuteScriptCompletedHandler,
+    NavigationCompletedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    take_pwstr,
 };
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -70,7 +69,6 @@ pub(crate) struct Shared {
     requests: mpsc::Receiver<UiRequest>,
     restarting: Cell<bool>,
     login_prompt: RefCell<LoginPrompt>,
-    sign_in_requested: RefCell<HashSet<App>>,
     sleep: RefCell<Sleep<TabCommand>>,
     sleep_blocker: Cell<Option<&'static str>>,
     calls: RefCell<CallTally>,
@@ -136,7 +134,6 @@ fn run(
         requests,
         restarting: Cell::new(false),
         login_prompt: RefCell::new(LoginPrompt::default()),
-        sign_in_requested: RefCell::new(HashSet::new()),
         sleep: RefCell::new(Sleep::default()),
         sleep_blocker: Cell::new(None),
         calls: RefCell::new(CallTally::default()),
@@ -350,14 +347,6 @@ fn watch_loads(webview: &ICoreWebView2, app: App) -> windows::core::Result<()> {
         for command in waiting {
             call(&shared, app, command);
         }
-        let requested = shared.sign_in_requested.borrow().contains(&app);
-        if should_return_to_start(requested, app, &url) {
-            shared.sign_in_requested.borrow_mut().remove(&app);
-            unsafe {
-                let _ = sender.Navigate(&HSTRING::from(app.start_url()));
-            }
-            return Ok(());
-        }
         if is_running_app(app, &url) {
             unsafe { SetTimer(Some(shared.windows[&app]), PARK_TIMER, PARK_DELAY_MS, None) };
             if shared.park_gate.borrow().held(app) {
@@ -534,11 +523,7 @@ fn drain(shared: &Rc<Shared>) {
             UiRequest::Call { app, command } => call(shared, app, command),
             UiRequest::Subscribe { app, sink } => shared.subscribers.borrow_mut().add(app, sink),
             UiRequest::Wake { app } => wake(shared, app),
-            UiRequest::SignIn {
-                app,
-                login_hint,
-                reply,
-            } => sign_in(shared, app, &login_hint, reply),
+            UiRequest::SignIn { app, reply } => sign_in(shared, app, reply),
             UiRequest::Hold { app, held } => hold(shared, app, held),
             UiRequest::Retry => {
                 if !shared.state.borrow().ready && !shared.restarting.replace(true) {
@@ -656,21 +641,32 @@ fn wake(shared: &Rc<Shared>, app: App) {
     }
 }
 
-fn sign_in(
-    shared: &Shared,
-    app: App,
-    login_hint: &str,
-    reply: oneshot::Sender<session::Result<()>>,
-) {
+// Teams memoizes a failed silent sign-in in these keys and never retries it; clearing them makes it sign in again.
+const RESET_AUTH_SCRIPT: &str = "Object.keys(localStorage).filter(k => k.startsWith('msal.') || k.startsWith('tmp.auth.')).forEach(k => localStorage.removeItem(k))";
+
+fn sign_in(shared: &Shared, app: App, reply: oneshot::Sender<session::Result<()>>) {
     let Some(webview) = webview_of(shared, app) else {
         let _ = reply.send(Err(Error::Cdp("webview is restarting".into())));
         return;
     };
-    shared.sign_in_requested.borrow_mut().insert(app);
-    unsafe {
-        let _ = webview.Navigate(&HSTRING::from(sign_in_url(login_hint).as_str()));
+    let pending = Rc::new(RefCell::new(Some(reply)));
+    let answered = pending.clone();
+    let navigate = webview.clone();
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(move |_, _| {
+        unsafe {
+            let _ = navigate.Navigate(&HSTRING::from(app.start_url()));
+        }
+        if let Some(reply) = answered.borrow_mut().take() {
+            let _ = reply.send(Ok(()));
+        }
+        Ok(())
+    }));
+    if let Err(error) =
+        unsafe { webview.ExecuteScript(&HSTRING::from(RESET_AUTH_SCRIPT), &handler) }
+        && let Some(reply) = pending.borrow_mut().take()
+    {
+        let _ = reply.send(Err(Error::Cdp(error.to_string())));
     }
-    let _ = reply.send(Ok(()));
 }
 
 fn prompt_login(shared: &Shared, app: App) {

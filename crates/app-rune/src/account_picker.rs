@@ -146,13 +146,12 @@ fn account_row<A: Actions + 'static>(
                 .color(rgb(palette.amber))
         }));
     let folder = account.folder;
-    let email = account.email;
     choice(
         &format!("account-{index}"),
         content,
         move |s: &mut UiState<A>, tx: &mut Tx| {
             if is_current {
-                s.actions.sign_in(&email);
+                s.actions.sign_in();
                 if let Some(picker) = &mut s.account_picker {
                     picker.signing_in = true;
                 }
@@ -211,8 +210,8 @@ mod tests {
         fn current_folder(&self) -> Option<PathBuf> {
             self.current.clone()
         }
-        fn sign_in(&self, email: &str) {
-            self.calls.borrow_mut().push(format!("sign_in {email}"));
+        fn sign_in(&self) {
+            self.calls.borrow_mut().push("sign_in".into());
         }
         fn switch_account(&self, folder: &Path) -> Result<(), String> {
             self.calls
@@ -322,7 +321,7 @@ mod tests {
         ]);
         open(&mut rt, true);
         click(&mut rt, "account-0");
-        assert_eq!(calls(&rt), ["sign_in ada@x.com"]);
+        assert_eq!(calls(&rt), ["sign_in"]);
         assert_eq!(flags(&rt), Some((true, true)));
     }
 

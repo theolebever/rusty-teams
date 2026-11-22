@@ -31,7 +31,6 @@ pub(crate) enum UiRequest {
     },
     SignIn {
         app: App,
-        login_hint: String,
         reply: oneshot::Sender<Result<()>>,
     },
     Hold {
@@ -156,15 +155,10 @@ impl Transport for WebViewTransport {
         Box::pin(async move { self.send(UiRequest::Wake { app }) })
     }
 
-    fn sign_in(&self, app: App, login_hint: &str) -> BoxFuture<'_, Result<()>> {
-        let login_hint = login_hint.to_owned();
+    fn sign_in(&self, app: App) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             let (reply, answer) = oneshot::channel();
-            self.send(UiRequest::SignIn {
-                app,
-                login_hint,
-                reply,
-            })?;
+            self.send(UiRequest::SignIn { app, reply })?;
             answer
                 .await
                 .unwrap_or_else(|_| Err(no_browser("the webview thread stopped".into())))
@@ -280,17 +274,13 @@ mod tests {
         ui.state.send_replace(ready(&[]));
         let requests = ui.requests;
         let answer = tokio::task::spawn_blocking(move || match requests.recv().unwrap() {
-            UiRequest::SignIn { app, reply, .. } => {
+            UiRequest::SignIn { app, reply } => {
                 assert_eq!(app, App::Teams);
                 let _ = reply.send(Err(Error::Cdp("webview is restarting".into())));
             }
             _ => panic!("expected a sign-in"),
         });
-        let error = ui
-            .transport
-            .sign_in(App::Teams, "ada@x.com")
-            .await
-            .unwrap_err();
+        let error = ui.transport.sign_in(App::Teams).await.unwrap_err();
         answer.await.unwrap();
         assert!(matches!(error, Error::Cdp(_)), "{error}");
     }
