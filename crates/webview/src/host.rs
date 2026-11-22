@@ -17,7 +17,11 @@ use webview2_com::{
     NavigationCompletedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
     take_pwstr,
 };
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    MonitorFromPoint, MonitorFromWindow,
+};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -649,6 +653,8 @@ fn sign_in(shared: &Shared, app: App, reply: oneshot::Sender<session::Result<()>
         let _ = reply.send(Err(Error::Cdp("webview is restarting".into())));
         return;
     };
+    // The user asked for this login, so it must not wait out the prompt throttle.
+    shared.login_prompt.borrow_mut().completed();
     let pending = Rc::new(RefCell::new(Some(reply)));
     let answered = pending.clone();
     let navigate = webview.clone();
@@ -680,12 +686,49 @@ fn prompt_login(shared: &Shared, app: App) {
 fn show(shared: &Shared, app: App) {
     let window = shared.windows[&app];
     unsafe {
+        if MonitorFromWindow(window, MONITOR_DEFAULTTONULL).0.is_null() {
+            move_to_primary(window);
+        }
         let _ = ShowWindow(window, SW_SHOW);
         let _ = SetForegroundWindow(window);
     }
     if let Some(view) = shared.views.borrow().get(&app) {
         fit(window, &view.controller);
     }
+}
+
+/// Moves a window whose monitor is gone onto the primary monitor's work area, keeping its size.
+fn move_to_primary(window: HWND) {
+    unsafe {
+        let mut bounds = RECT::default();
+        let _ = GetWindowRect(window, &mut bounds);
+        let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(primary, &mut info).as_bool() {
+            return;
+        }
+        let size = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+        let (x, y) = centered(size, info.rcWork);
+        let _ = SetWindowPos(
+            window,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Top-left corner that centers a window of `size` on `work`, pinned to its top-left edge when larger.
+fn centered((width, height): (i32, i32), work: RECT) -> (i32, i32) {
+    let x = work.left + ((work.right - work.left - width) / 2).max(0);
+    let y = work.top + ((work.bottom - work.top - height) / 2).max(0);
+    (x, y)
 }
 
 fn restart(shared: &Rc<Shared>) {
@@ -865,4 +908,33 @@ extern "system" fn window_procedure(
         _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
     LRESULT(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RECT, centered};
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn centers_a_window_on_the_work_area() {
+        assert_eq!(centered((800, 600), rect(0, 0, 1920, 1040)), (560, 220));
+    }
+
+    #[test]
+    fn centers_within_a_work_area_that_does_not_start_at_the_origin() {
+        assert_eq!(centered((800, 600), rect(0, 40, 1920, 1040)), (560, 240));
+    }
+
+    #[test]
+    fn an_oversized_window_pins_to_the_work_area_corner() {
+        assert_eq!(centered((2000, 1200), rect(0, 0, 1920, 1040)), (0, 0));
+    }
 }

@@ -305,19 +305,23 @@ async fn refresh_loop(
     let mut interval = tokio::time::interval(REFRESH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut forwards_healing = false;
+    let mut failing = false;
     loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            nudge = nudges.recv() => {
-                if nudge.is_none() {
-                    return;
+        if !failing {
+            tokio::select! {
+                _ = interval.tick() => {}
+                nudge = nudges.recv() => {
+                    if nudge.is_none() {
+                        return;
+                    }
+                    tokio::time::sleep(REFRESH_SETTLE).await;
+                    while nudges.try_recv().is_ok() {}
                 }
-                tokio::time::sleep(REFRESH_SETTLE).await;
-                while nudges.try_recv().is_ok() {}
             }
         }
         match engine.refresh_sidebar().await {
             Ok(_) => {
+                failing = false;
                 if !std::mem::replace(&mut forwards_healing, true) {
                     let engine = engine.clone();
                     tokio::spawn(async move { engine.heal_all_forwards(FORWARD_HEAL_PAUSE).await });
@@ -332,6 +336,7 @@ async fn refresh_loop(
             }
             Err(error) => {
                 let _ = events.send(BackendEvent::Connection(classify_core_error(&error)));
+                failing = true;
                 tokio::time::sleep(CONNECT_RETRY).await;
             }
         }
