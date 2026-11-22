@@ -36,6 +36,8 @@ pub struct UiState<A: Actions> {
     pub read_only: bool,
     pub(crate) window_focused: bool,
     pub(crate) starting: bool,
+    /// Set once the connection reached Online this run; before that an expired session opens the picker.
+    pub(crate) online_once: bool,
     pub(crate) started_at: std::time::Instant,
     pub(crate) splash_stage: u8,
     /// Launched behind the splash, so the content fades up when it goes.
@@ -159,6 +161,7 @@ impl<A: Actions> UiState<A> {
             read_only,
             window_focused: false,
             starting: false,
+            online_once: false,
             started_at: std::time::Instant::now(),
             splash_stage: 0,
             from_splash: false,
@@ -415,7 +418,12 @@ impl<A: Actions> UiState<A> {
                 self.chatlist.manage.new_chat.creating = false;
                 self.chatlist.manage.new_chat.error = Some(error);
             }
-            Update::Status(s) => { self.toast.observe(&s); self.status = s; }
+            // Prefix match as in `toast::State::observe`: read-only sessions append " · Read-only".
+            Update::Status(s) => {
+                self.online_once |= s.starts_with("Online");
+                self.toast.observe(&s);
+                self.status = s;
+            }
             Update::Me { user_id, name, email } => self.own.me = Some(crate::status_menu::Me { user_id, name, email }),
             Update::OwnStatus(status) => self.own.status = status,
             Update::Profile { user_id, result } => self.profile.loaded(user_id, result),
@@ -427,7 +435,7 @@ impl<A: Actions> UiState<A> {
                 if self.account_picker.as_ref().is_some_and(|picker| picker.signing_in) { self.account_picker = None; }
             }
             Update::SessionExpired => {
-                if self.starting { crate::account_picker::open_picker(self, true) } else { self.toast.session_expired = true }
+                if self.online_once { self.toast.session_expired = true } else { crate::account_picker::open_picker(self, true) }
             }
             Update::SignInFailed(error) => {
                 if let Some(picker) = &mut self.account_picker { picker.signing_in = false; }

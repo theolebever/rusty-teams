@@ -377,8 +377,35 @@ mod tests {
     }
 
     #[test]
+    fn expired_after_cached_chats_opens_picker() {
+        let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        apply(
+            &mut rt,
+            Update::Chats(vec![crate::types::ChatRow {
+                id: "a".into(),
+                title: "Ada".into(),
+                preview: String::new(),
+                unread: false,
+                when: String::new(),
+            }]),
+        );
+        apply(&mut rt, Update::SessionExpired);
+        assert_eq!(flags(&rt), Some((true, false)));
+    }
+
+    #[test]
+    fn expired_after_online_shows_banner() {
+        let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        apply(&mut rt, Update::Status("Online".into()));
+        apply(&mut rt, Update::SessionExpired);
+        assert_eq!(flags(&rt), None, "the banner waits for a click");
+        assert!(rt.state.toast.session_expired);
+    }
+
+    #[test]
     fn session_banner_opens_the_expired_picker() {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        apply(&mut rt, Update::Status("Online".into()));
         apply(&mut rt, Update::SessionExpired);
         assert_eq!(flags(&rt), None, "the banner waits for a click");
         click(&mut rt, "session-sign-in");
@@ -392,7 +419,10 @@ mod tests {
     #[test]
     fn online_clears_the_session_banner() {
         let mut rt = rt(vec![account("C:/a", "ada@x.com")]);
+        apply(&mut rt, Update::Status("Online".into()));
         apply(&mut rt, Update::SessionExpired);
+        assert!(rt.find("session-expired-banner").is_some());
+        apply(&mut rt, Update::Status("Connecting…".into()));
         apply(&mut rt, Update::Status("Online".into()));
         assert!(rt.find("session-expired-banner").is_none());
     }
