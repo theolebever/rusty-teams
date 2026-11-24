@@ -33,7 +33,7 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         .w(320.0)
         .padding(12.0)
         .gap(8.0)
-        .radius(10.0)
+        .radius(8.0)
         .fill(tone(p.surface))
         .border(1.0, tone(p.border_strong))
         .child(

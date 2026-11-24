@@ -112,13 +112,13 @@ pub fn trigger<A: Actions + 'static>(message: &MessageRow) -> El {
 pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> El {
     let palette = active_palette();
     let conversation_id = s.selected.clone().unwrap_or_default();
-    let mut bar = row().key(format!("menu-react-{}", message.id)).h(36.0).px(3.0).gap(1.0).center_y().radius(10.0)
+    let mut bar = row().key(format!("menu-react-{}", message.id)).h(36.0).px(3.0).gap(1.0).center_y().radius(8.0)
         .fill(rgb(palette.popup)).border(1.0, rgb(palette.border_strong));
     for glyph in preferred_glyphs(s) {
         let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
         let mine = is_mine(message, &glyph);
         let label = glyph.clone();
-        let mut button = row().key(format!("menu-pick-{}-{glyph}", message.id)).size(30.0, 30.0).radius(7.0).center()
+        let mut button = row().key(format!("menu-pick-{}-{glyph}", message.id)).size(30.0, 30.0).radius(6.0).center()
             .hover(rgb(palette.popup_hover))
             .on_press_tx(move |s: &mut UiState<A>, _| {
                 crate::message_menu::close(s);

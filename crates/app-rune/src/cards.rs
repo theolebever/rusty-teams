@@ -175,7 +175,7 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>, banner: &AnnouncementBanner,
         frame = frame.child(col().absolute(0.0, 0.0).w_full().h_full().pixels_fit(loaded.pixels(), SurfaceFit::Fill))
             .child(col().absolute(0.0, 0.0).w_full().h_full().fill(rgb(0).alpha(BANNER_SHADE)));
     }
-    let frame = frame.child(text(banner.title.clone()).font(ts(24.0, 700.0)).color(rgb(0xFFFFFF)).wrap().max_lines(2));
+    let frame = frame.child(text(banner.title.clone()).font(ts(24.0, 600.0)).color(rgb(0xFFFFFF)).wrap().max_lines(2));
     crate::media::watch(s, key, banner.image().into_iter().collect(), frame)
 }
 

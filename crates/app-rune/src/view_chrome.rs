@@ -187,7 +187,7 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
             .radius(8.0)
             .center()
             .fill(tone(palette.accent))
-            .child(text(count).font(ts(10.0, 700.0)).color(tone(palette.on_accent)));
+            .child(text(count).font(ts(10.0, 600.0)).color(tone(palette.on_accent)));
         button = button.child(badge.absolute(28.0, 5.0));
     }
     button

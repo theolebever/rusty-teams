@@ -399,7 +399,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
     for (label, density) in [("Comfy", teams_core::MessageDensity::Comfy), ("Compact", teams_core::MessageDensity::Compact)] {
         pane = pane.child(choice(format!("settings-density-{density:?}"), label, account.message_density == density, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::MessageDensity(density)))));
     }
-    pane = pane.child(caption(&REACTIONS.to_uppercase()));
+    pane = pane.child(caption(REACTIONS));
     let mut reactions = row().w_full().wrap().gap(6.0).px(12.0);
     for id in REACTION_CHOICES {
         let on = prefs.reactions.iter().any(|chosen| chosen == id);
@@ -413,7 +413,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
             .child(text(glyph).font(ts(16.0, 400.0)));
         reactions = reactions.child(if on { chip.fill(color("#E8EBFA")).border(1.0, color("#5B5FC7")) } else { chip.fill(color("#F5F5F5")).hover(color("#EBEBEB")) });
     }
-    pane = pane.child(reactions).child(caption(&SKIN_TONE.to_uppercase()));
+    pane = pane.child(reactions).child(caption(SKIN_TONE));
     let mut tones = row().w_full().gap(6.0).px(12.0);
     for tone in 0..=5u8 {
         let glyph = chatsvc::reaction_glyph_for_key(&if tone == 0 { "like".to_owned() } else { format!("like-tone{tone}") }).unwrap_or_else(|| tone.to_string());
@@ -433,7 +433,7 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
         (Device::Microphone, "Microphone", s.calls.devices.input_entries(), &prefs.microphone),
         (Device::Camera, "Camera", calling::camera_entries(&s.calls.cameras), &prefs.camera),
     ] {
-        pane = pane.child(caption(&title.to_uppercase()));
+        pane = pane.child(caption(title));
         for entry in entries {
             let pick = entry.choice.clone();
             pane = pane.child(choice(format!("settings-{title}-{}", entry.label), &entry.label, &entry.choice == selected, move |s: &mut UiState<A>| {

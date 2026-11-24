@@ -86,7 +86,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if toast.phase == ReminderPhase::Soon {
         actions = actions.child(button::<A>("Snooze", "reminder-snooze", |s, _| snooze(s)));
     }
-    let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(10.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
+    let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(8.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
         .role("alert").label(toast.subject.clone())
         .child(text(toast.subject.clone()).font(style(15.0, 600.0)).color(color("#242424")).truncate())
         .child(text(card_subtitle(toast)).font(style(13.0, 400.0)).color(color("#616161")))

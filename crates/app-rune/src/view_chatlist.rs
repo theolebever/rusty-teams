@@ -223,7 +223,7 @@ fn header<A: Actions + 'static>() -> El {
         .center_y()
         .child(
             text("Chat")
-                .font(ts(16.0, 700.0))
+                .font(ts(16.0, 600.0))
                 .color(tone(p.foreground))
                 .grow(1.0)
                 .min_w(0.0),
@@ -669,7 +669,7 @@ pub(crate) fn chat_row<A: Actions + 'static>(s: &UiState<A>, i: usize) -> El {
         .center_y()
         .child(
             text(preview_text(s, &ch.id, &ch.preview))
-                .font(ts(12.5, 400.0))
+                .font(ts(12.0, 400.0))
                 .color(tone(preview_color))
                 .truncate()
                 .grow(1.0)

@@ -175,7 +175,7 @@ pub fn results_list<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .center_y()
                         .child(
                             text(title_of(s, &hit.conversation_id))
-                                .font(ts(13.0, 700.0))
+                                .font(ts(13.0, 600.0))
                                 .color(c(INK))
                                 .truncate()
                                 .grow(1.0)
@@ -196,7 +196,7 @@ pub fn results_list<A: Actions + 'static>(s: &UiState<A>) -> El {
 
 fn heading(label: &str) -> El {
     row().w_full().h(28.0).px(10.0).center_y().child(
-        text(label.to_owned()).font(ts(12.0, 700.0)).color(c(MUTED)),
+        text(label.to_owned()).font(ts(12.0, 600.0)).color(c(MUTED)),
     )
 }
 

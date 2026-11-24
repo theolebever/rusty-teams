@@ -125,7 +125,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>, draft: &Draft, key: &'static
                         .grow(1.0)
                         .min_w(0.0)
                         .child(text(person.name.clone()).font(ts(13.0, 400.0)).color(tone(p.foreground)).truncate())
-                        .children(person.mail.clone().map(|mail| text(mail).font(ts(11.5, 400.0)).color(tone(p.text_muted)).truncate())),
+                        .children(person.mail.clone().map(|mail| text(mail).font(ts(12.0, 400.0)).color(tone(p.text_muted)).truncate())),
                 ),
         );
     }
@@ -141,7 +141,7 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>) -> El {
         .w(320.0)
         .padding(12.0)
         .gap(10.0)
-        .radius(10.0)
+        .radius(8.0)
         .fill(tone(p.surface))
         .border(1.0, tone(p.border_strong))
         .child(text("New chat").font(ts(14.0, 600.0)).color(tone(p.foreground)))

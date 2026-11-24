@@ -22,11 +22,6 @@ const LOGO_IN: &[Beat] = &[
     Beat::new(0.0).opacity(0.0).scale(0.55),
     Beat::new(0.55).scale(1.0).easing(Easing::OVERSHOOT),
 ];
-const HALO_IN: &[Beat] = &[
-    Beat::new(0.0).opacity(0.0).scale(0.6),
-    Beat::new(0.25).opacity(0.0).scale(0.6),
-    Beat::new(1.1).scale(1.0).easing(Easing::ENTER),
-];
 const RISE: &[Beat] = &[
     Beat::new(0.0).opacity(0.0).scale(0.96),
     Beat::new(0.45).easing(Easing::ENTER),
@@ -41,7 +36,6 @@ pub const REVEAL: &[Beat] = &[
     Beat::new(0.32).easing(Easing::ENTER),
 ];
 
-const BREATH: Cycle = Cycle { period: 2.8, phase: 0.0, stops: &[(0.0, 0.55), (0.5, 1.0), (1.0, 0.55)], still: 0.8, fps: FPS };
 const DOT: &[(f32, f32)] = &[(0.0, 0.25), (0.2, 1.0), (0.45, 0.25), (1.0, 0.25)];
 
 /// Moves the splash to its next stage; true when the view must redraw.
@@ -71,19 +65,13 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             .mt(18.0).sequence(Sequence::new(FADE))))
 }
 
-/// The brand mark: the accent tile popping in, with a breathing halo. `k` scales its 180 px box.
-/// Also drawn by `toast::reconnect` and `account_picker::view`.
+/// The brand mark: the accent tile popping in. `k` scales its 180 px box, which stays the
+/// layout footprint. Also drawn by `toast::reconnect` and `account_picker::view`.
 pub(crate) fn mark(k: f32) -> El {
     let palette = active_palette();
     let accent = rgb(palette.accent);
-    // One loop per element: the halo breathes on a wrapper around its entrance.
     el().key("brand-mark").size(180.0 * k, 180.0 * k)
-        .child(el().key("halo").size(180.0 * k, 180.0 * k).absolute(0.0, 0.0).cycle(BREATH)
-            .child(el().size(180.0 * k, 180.0 * k).radius(90.0 * k).fill(accent.alpha(0.07)).sequence(Sequence::new(HALO_IN))))
-        .child(el().key("ring").size(124.0 * k, 124.0 * k).absolute(28.0 * k, 28.0 * k).radius(62.0 * k).fill(accent.alpha(0.09))
-            .sequence(Sequence::new(HALO_IN).delay(0.08)))
         .child(col().key("tile").size(84.0 * k, 84.0 * k).absolute(48.0 * k, 48.0 * k).radius(24.0 * k).center().fill(accent)
-            .shadow(10.0 * k, 28.0 * k, accent.alpha(0.35))
             .motion_intent(MotionIntent::OVERSHOOT)
             .sequence(Sequence::new(LOGO_IN))
             .child(sym("chat_bubble", 42.0 * k).color(rgb(palette.on_accent))))
@@ -105,7 +93,7 @@ pub(crate) fn fading_line(key: &str, line: &str) -> El {
 
 /// The title under the mark, rising in.
 pub(crate) fn title(key: &'static str, line: &'static str) -> El {
-    text(line).key(key).font(ts(28.0, 700.0)).color(rgb(active_palette().foreground))
+    text(line).key(key).font(ts(28.0, 600.0)).color(rgb(active_palette().foreground))
         .sequence(Sequence::new(RISE).delay(0.2))
 }
 

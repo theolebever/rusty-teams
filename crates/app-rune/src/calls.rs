@@ -1364,7 +1364,7 @@ fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
         (Device::Speaker, "output", "Speaker", call.devices.output_entries(), &call.selected_output),
         (Device::Camera, "camera", "Camera", calling::camera_entries(&call.cameras), &call.selected_camera),
     ] {
-        panel = panel.child(text(title).font(style(13.0, 700.0)).color(color("#242424")));
+        panel = panel.child(text(title).font(style(13.0, 600.0)).color(color("#242424")));
         for entry in entries {
             let choice = entry.choice;
             let label = format!(
@@ -1493,7 +1493,7 @@ fn participant_tile<A: Actions + 'static>(
         .size(width, height)
         .min_w(0.0)
         .min_h(0.0)
-        .radius(10.0)
+        .radius(8.0)
         .fill(color("#333333"))
         .border(2.0, color(if speaking { "#9299F7" } else { "#333333" }));
     let picture = if let Some(surface) = surface {
@@ -1677,7 +1677,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         .fill(color("#FFFFFF"))
         .child(
             text("Calls")
-                .font(style(20.0, 700.0))
+                .font(style(20.0, 600.0))
                 .color(color("#242424")),
         );
     if let Some(notice) = &call.notice {
@@ -2111,7 +2111,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         if call.show_shares && call.local_share.is_none() {
             let mut shares = col().gap(4.0).child(
                 text("Choose what to share")
-                    .font(style(13.0, 700.0))
+                    .font(style(13.0, 600.0))
                     .color(color("#242424")),
             );
             for source in &call.shares {

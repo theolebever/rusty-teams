@@ -372,7 +372,7 @@ pub(crate) fn action_button<A: Actions + 'static>(key: String, glyph: &str, on_p
         .key(key)
         .w(ACTION)
         .h(ACTION)
-        .radius(7.0)
+        .radius(6.0)
         .center()
         .hover(rgb(palette.popup_hover))
         .on_press_tx(on_press)
@@ -390,7 +390,7 @@ fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
         .px(3.0)
         .h(ACTION + 4.0)
         .center_y()
-        .radius(10.0)
+        .radius(8.0)
         .fill(rgb(active_palette().popup))
         .group_opacity(0.0, 1.0)
         .child(crate::reactions::trigger::<A>(m));

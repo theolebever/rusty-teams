@@ -171,7 +171,7 @@ fn create_dialog<A: Actions + 'static>(s: &UiState<A>, team: &str) -> El {
     let p = active_palette();
     let state = &s.chatlist.team_menu;
     let target = team.to_owned();
-    let mut dialog = col().key("create-channel-dialog").w(420.0).padding(20.0).gap(12.0).radius(10.0)
+    let mut dialog = col().key("create-channel-dialog").w(420.0).padding(20.0).gap(12.0).radius(8.0)
         .role("dialog").label("Create channel").fill(tone(p.popup))
         .modal(true, |s: &mut UiState<A>| s.chatlist.team_menu.create_team = None)
         .child(text("Create channel").font(ts(18.0, 600.0)).color(tone(p.foreground)))

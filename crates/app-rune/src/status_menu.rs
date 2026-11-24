@@ -339,7 +339,7 @@ fn dialog<A: Actions + 'static>(s: &UiState<A>) -> El {
         .w(420.0)
         .padding(20.0)
         .gap(12.0)
-        .radius(10.0)
+        .radius(8.0)
         .fill(rgb(palette.popup))
         .role("dialog")
         .label("Status message")

@@ -260,7 +260,7 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
         .center_y()
         .child(
             text("Calendar")
-                .font(style(18.0, 700.0))
+                .font(style(18.0, 600.0))
                 .color(color("#242424")),
         )
         .child(button::<A>("Today", "calendar-today", |s, _| {
@@ -438,7 +438,7 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
     let palette = app_backend::schemes::active_palette();
     let mut header = row().w_full().h(56.0).px(20.0).gap(8.0).center_y().child(
         text("Activity")
-            .font(style(18.0, 700.0))
+            .font(style(18.0, 600.0))
             .color(rgb(palette.foreground)).grow(1.0),
     );
     if !s.read_only {
@@ -591,7 +591,7 @@ pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
     if s.screens.join_id_open {
         let input = |edit: &TextEdit, key: &str, label: &str| text_input(edit, style(14.0, 400.0)).key(key.to_owned()).w_full().label(label.to_owned())
             .placeholder(label.to_owned(), color("#616161")).color(color("#242424"));
-        let dialog = col().key("join-id-dialog").w(380.0).padding(20.0).gap(14.0).radius(10.0).fill(color("#FFFFFF"))
+        let dialog = col().key("join-id-dialog").w(380.0).padding(20.0).gap(14.0).radius(8.0).fill(color("#FFFFFF"))
             .role("dialog").label("Join with an ID").modal(true, |s: &mut UiState<A>| s.screens.join_id_open = false)
             .child(text("Join with an ID").font(style(18.0, 600.0)).color(color("#242424")))
             .child(input(&s.screens.meeting_id, "meeting-id", "Meeting ID").on_edit(|s: &mut UiState<A>| &mut s.screens.meeting_id))

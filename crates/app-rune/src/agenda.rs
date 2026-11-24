@@ -47,7 +47,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     for day in days {
         rows = rows.child(
             text(day.label)
-                .font(style(14.0, 700.0))
+                .font(style(14.0, 600.0))
                 .color(color("#242424")),
         );
         for meeting in &day.rows {
@@ -62,7 +62,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .center_y()
         .child(
             text("Agenda")
-                .font(style(18.0, 700.0))
+                .font(style(18.0, 600.0))
                 .color(color("#242424")),
         )
         .child(button::<A>("Refresh", "agenda-refresh", |s, _| s.actions.load_agenda()))

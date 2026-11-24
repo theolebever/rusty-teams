@@ -333,7 +333,7 @@ pub(crate) fn card<A: Actions + 'static>(key: &str, width: f32, body: El, close:
 fn dialog<A: Actions + 'static>() -> El {
     let mut list = col().w_full().px(16.0).pb(12.0).gap(2.0);
     for group in Group::ALL {
-        list = list.child(text(group.title()).font(ts(12.0, 700.0)).color(c(MUTED)).pt(10.0).pb(4.0));
+        list = list.child(text(group.title()).font(ts(12.0, 600.0)).color(c(MUTED)).pt(10.0).pb(4.0));
         for shortcut in SHORTCUTS.iter().filter(|shortcut| shortcut.group == group) {
             list = list.child(
                 row()

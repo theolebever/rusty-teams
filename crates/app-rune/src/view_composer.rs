@@ -204,7 +204,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
                 crate::gif_picker::toggle(s);
                 if s.compose.gif.open { tx.focus("gif-search", false); }
             })
-            .child(text("GIF").font(ts(12.0, 700.0)).color(c(MUTED))))
+            .child(text("GIF").font(ts(12.0, 600.0)).color(c(MUTED))))
         .children(attach)
         .child(tool("auto_fix_high", "composer-ai").on_press(|s: &mut UiState<A>| {
             s.agent.prompt = TextEdit::new(&s.composer.text);
