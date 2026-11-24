@@ -16,6 +16,16 @@ pub(crate) fn demo_anchor() -> DateTime<Utc> {
 }
 
 impl AppState {
+    /// The calendar event behind a meeting thread, if one of the windows we already loaded
+    /// (agenda poll or visible week) has it. No extra fetch: `Meeting info` degrades to just
+    /// the join link when nothing matches (e.g. a Meet Now with no invite).
+    pub(crate) fn calendar_event_for_thread(&self, thread_id: &str) -> Option<&CalendarEvent> {
+        self.calendar_events
+            .iter()
+            .chain(self.calendar_week.events.iter())
+            .find(|event| event.thread_id.as_deref() == Some(thread_id))
+    }
+
     pub fn apply_calendar(&mut self, events: Vec<CalendarEvent>, cx: &mut dyn Host) {
         // Agenda / reminders poll — must not replace calendar_week.events.
         // That window is only ~today+7d; overwriting wiped earlier days in the

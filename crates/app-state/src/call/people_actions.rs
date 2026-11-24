@@ -2,6 +2,7 @@ use calling::{CallCommand, Callee, MeetingOptions, MeetingRole, Modality};
 
 use super::actions::NOT_CONNECTED_NOTICE;
 use super::features::TransferCandidate;
+use super::meeting_info_dialog::MeetingInfoDialog;
 use super::model::{CallKind, Tile, TileState};
 use super::options_dialog::OptionsDialog;
 use crate::Host;
@@ -10,6 +11,12 @@ use crate::runtime;
 
 const INVITE_FAILED_NOTICE: &str = "Could not add that person";
 const NO_PEER_NOTICE: &str = "This call cannot be extended";
+
+/// Whether `open_meeting_info` should start a Graph fetch for the join link: only when the
+/// calendar lookup had none, there's an engine to ask, and a thread to ask about.
+fn should_fetch_meeting_join_url(needs_fetch: bool, has_engine: bool, has_thread_id: bool) -> bool {
+    needs_fetch && has_engine && has_thread_id
+}
 
 impl AppState {
     pub fn toggle_call_people(&mut self, cx: &mut dyn Host) {
@@ -135,6 +142,65 @@ impl AppState {
         }
     }
 
+    /// Opens "Meeting info": the join link and dial-in from the calendar event behind this
+    /// meeting. Available to everyone in the call, unlike organizer-only "Meeting options...".
+    pub fn open_meeting_info(&mut self, cx: &mut dyn Host) {
+        let Some(call) = self.call.as_ref() else {
+            return;
+        };
+        let call_id = call.id;
+        let thread_id = call.chat_thread().map(str::to_owned);
+        let (join_url, dial_in) = thread_id
+            .as_deref()
+            .and_then(|id| self.calendar_event_for_thread(id))
+            .map_or((None, None), |event| {
+                (event.join_url.clone(), event.dial_in.clone())
+            });
+        let needs_fetch = join_url.is_none();
+        let Some(call) = self.call.as_mut() else {
+            return;
+        };
+        call.meeting_info = Some(MeetingInfoDialog::from_calendar(join_url, dial_in));
+        cx.notify();
+        let has_engine = self.engine.is_some();
+        if !should_fetch_meeting_join_url(needs_fetch, has_engine, thread_id.is_some()) {
+            return;
+        }
+        let (Some(engine), Some(thread_id)) = (self.engine.clone(), thread_id) else {
+            return;
+        };
+        let receiver = runtime::spawn(async move { engine.meeting_join_url(&thread_id).await });
+        let this = cx.handle();
+        cx.spawn(Box::pin(async move {
+            let url = receiver.await.ok().and_then(Result::ok).flatten();
+            this.update(move |state, cx| state.apply_meeting_join_url(call_id, url, cx))
+                .await;
+        }));
+    }
+
+    /// Applies a join-link fetch started by `open_meeting_info`, unless the user has since
+    /// left this call or opened a different one (`call_id` is stale).
+    fn apply_meeting_join_url(&mut self, call_id: u64, url: Option<String>, cx: &mut dyn Host) {
+        if let Some(dialog) = self
+            .call
+            .as_mut()
+            .filter(|call| call.id == call_id)
+            .and_then(|call| call.meeting_info.as_mut())
+        {
+            dialog.join_url_loaded(url);
+            cx.notify();
+        }
+    }
+
+    /// Closes "Meeting info", opened by `open_meeting_info`.
+    pub fn close_meeting_info(&mut self, cx: &mut dyn Host) {
+        if let Some(call) = self.call.as_mut() {
+            if call.meeting_info.take().is_some() {
+                cx.notify();
+            }
+        }
+    }
+
     pub fn invite_candidates(&self) -> Vec<TransferCandidate> {
         let present: Vec<&str> = self
             .call
@@ -256,6 +322,7 @@ mod tests {
     use serde_json::json;
     use store::Store;
 
+    use super::should_fetch_meeting_join_url;
     use crate::app_state::{AppState, Mode};
     use crate::call::{ActiveCall, CallModel, TransferCandidate};
 
@@ -487,5 +554,110 @@ mod tests {
                 .any(|tile| tile.mri == "8:orgid:bo" && tile.invited)
         });
         assert!(ringing);
+    }
+
+    fn calendar_event_with_dial_in() -> chatsvc::CalendarEvent {
+        chatsvc::CalendarEvent {
+            thread_id: Some("19:meeting_x@thread.v2".into()),
+            join_url: Some("https://teams.microsoft.com/l/meetup-join/x".into()),
+            dial_in: Some(chatsvc::DialIn {
+                toll_number: "+49 30 123456".into(),
+                conference_id: "987654321".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn meeting_info_uses_the_matching_calendar_event_with_no_fetch(cx: &mut TestAppContext) {
+        let (app, _control) = app_with_meeting(cx, false);
+        cx.update(|cx| {
+            app.update(cx, |state, _| {
+                state.calendar_events = vec![calendar_event_with_dial_in()];
+            })
+        });
+        cx.update(|cx| app.update(cx, |state, cx| state.open_meeting_info(cx)));
+        let dialog = cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.clone());
+        let dialog = dialog.expect("meeting info open");
+        assert!(!dialog.loading);
+        assert_eq!(
+            dialog.join_url.as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/x")
+        );
+        assert_eq!(
+            dialog.copy_text().as_deref(),
+            Some(
+                "Microsoft Teams meeting\nJoin: https://teams.microsoft.com/l/meetup-join/x\n\nDial in by phone\n+49 30 123456,,987654321#\nPhone conference ID: 987654321#"
+            )
+        );
+    }
+
+    #[gpui_kit::test]
+    fn meeting_info_without_a_matching_event_has_no_dial_in(cx: &mut TestAppContext) {
+        let (app, _control) = app_with_meeting(cx, false);
+        cx.update(|cx| app.update(cx, |state, cx| state.open_meeting_info(cx)));
+        let dialog = cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.clone());
+        let dialog = dialog.expect("meeting info open");
+        // No calendar match and no engine in this test harness: stays loading, like a Meet
+        // Now with no invite until a join-link fetch lands (or never does).
+        assert!(dialog.loading);
+        assert_eq!(dialog.join_url, None);
+        assert_eq!(dialog.dial_in, None);
+    }
+
+    #[gpui_kit::test]
+    fn close_meeting_info_clears_the_dialog(cx: &mut TestAppContext) {
+        let (app, _control) = app_with_meeting(cx, false);
+        cx.update(|cx| app.update(cx, |state, cx| state.open_meeting_info(cx)));
+        assert!(cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.is_some()));
+        cx.update(|cx| app.update(cx, |state, cx| state.close_meeting_info(cx)));
+        assert!(cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn apply_meeting_join_url_ignores_a_stale_call_id(cx: &mut TestAppContext) {
+        let (app, _control) = app_with_meeting(cx, false);
+        cx.update(|cx| {
+            app.update(cx, |state, cx| {
+                state.open_meeting_info(cx);
+                state.apply_meeting_join_url(
+                    999,
+                    Some("https://teams.microsoft.com/l/meetup-join/stale".into()),
+                    cx,
+                );
+            })
+        });
+        let dialog = cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.clone());
+        assert_eq!(dialog.unwrap().join_url, None);
+    }
+
+    #[gpui_kit::test]
+    fn apply_meeting_join_url_updates_the_matching_call(cx: &mut TestAppContext) {
+        let (app, _control) = app_with_meeting(cx, false);
+        cx.update(|cx| {
+            app.update(cx, |state, cx| {
+                state.open_meeting_info(cx);
+                state.apply_meeting_join_url(
+                    7,
+                    Some("https://teams.microsoft.com/l/meetup-join/late".into()),
+                    cx,
+                );
+            })
+        });
+        let dialog = cx.update(|cx| app.read(cx).call.as_ref().unwrap().meeting_info.clone());
+        let dialog = dialog.unwrap();
+        assert_eq!(
+            dialog.join_url.as_deref(),
+            Some("https://teams.microsoft.com/l/meetup-join/late")
+        );
+        assert!(!dialog.loading);
+    }
+
+    #[test]
+    fn should_fetch_meeting_join_url_needs_all_three_conditions() {
+        assert!(should_fetch_meeting_join_url(true, true, true));
+        assert!(!should_fetch_meeting_join_url(false, true, true));
+        assert!(!should_fetch_meeting_join_url(true, false, true));
+        assert!(!should_fetch_meeting_join_url(true, true, false));
     }
 }

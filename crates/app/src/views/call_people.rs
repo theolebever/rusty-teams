@@ -21,7 +21,8 @@ use super::scroll_edge::with_top_edge;
 use super::widgets::{Corner, corner_badge, count_badge, icon};
 use crate::app_state::AppState;
 use crate::call::{
-    ActiveCall, CallModel, OptionsDialog, PeopleSections, PersonRow, people_sections,
+    ActiveCall, CallModel, MeetingInfoDialog, OptionsDialog, PeopleSections, PersonRow,
+    people_sections,
 };
 use crate::notice::truncated;
 use crate::theme::{self, ElevatedSurface as _};
@@ -114,9 +115,9 @@ pub fn lock_banner(app: &Entity<AppState>, model: &CallModel) -> Option<AnyEleme
 }
 
 fn people_menu(popup: PopupMenu, app: &Entity<AppState>, model: &CallModel) -> PopupMenu {
-    let popup = popup.min_w(px(MENU_WIDTH));
+    let mut popup = popup.min_w(px(MENU_WIDTH));
     if !model.organizes_meeting() {
-        return popup;
+        return people_info_item(popup, app);
     }
     let capability = model.capability;
     let (mute_app, lock_app, mic_app, camera_app, options_app) = (
@@ -126,7 +127,7 @@ fn people_menu(popup: PopupMenu, app: &Entity<AppState>, model: &CallModel) -> P
         app.clone(),
         app.clone(),
     );
-    popup
+    popup = popup
         .item(
             PopupMenuItem::new("Mute all")
                 .icon(IconName::MicOff)
@@ -188,11 +189,19 @@ fn people_menu(popup: PopupMenu, app: &Entity<AppState>, model: &CallModel) -> P
                 .on_click(move |_, _, cx| {
                     options_app.update(cx, |state, cx| state.open_meeting_options(cx))
                 }),
-        )
+        );
+    people_info_item(popup, app)
 }
 
-fn has_people_menu(model: &CallModel) -> bool {
-    model.organizes_meeting()
+/// "Meeting info": the join link and dial-in, same as Teams shows to every participant
+/// (unlike organizer-only "Meeting options...").
+fn people_info_item(popup: PopupMenu, app: &Entity<AppState>) -> PopupMenu {
+    let info_app = app.clone();
+    popup.separator().item(
+        PopupMenuItem::new("Meeting info")
+            .icon(IconName::Info)
+            .on_click(move |_, _, cx| info_app.update(cx, |state, cx| state.open_meeting_info(cx))),
+    )
 }
 
 fn panel_header(app: &Entity<AppState>, model: &CallModel, count: usize) -> Div {
@@ -224,18 +233,16 @@ fn panel_header(app: &Entity<AppState>, model: &CallModel, count: usize) -> Div 
                     .on_click(move |_, window, cx| open_invite_picker(&invite_app, window, cx)),
             )
         })
-        .when(has_people_menu(model), |header| {
-            header.child(
-                Button::new("call-people-more")
-                    .icon(IconName::Ellipsis)
-                    .ghost()
-                    .xsmall()
-                    .tooltip("More")
-                    .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, _, _| {
-                        people_menu(popup, &menu_app, &menu_model)
-                    }),
-            )
-        })
+        .child(
+            Button::new("call-people-more")
+                .icon(IconName::Ellipsis)
+                .ghost()
+                .xsmall()
+                .tooltip("More")
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |popup, _, _| {
+                    people_menu(popup, &menu_app, &menu_model)
+                }),
+        )
         .child(
             div()
                 .id("call-people-close")
@@ -797,6 +804,108 @@ pub fn options_dialog(app: &Entity<AppState>, call: &ActiveCall) -> Option<AnyEl
                                     }),
                             )
                             .child(save),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+fn meeting_info_body(dialog: &MeetingInfoDialog) -> Div {
+    let body = v_flex().w_full().gap(px(4.));
+    match dialog.copy_text() {
+        Some(text) => body.children(text.lines().map(|line| {
+            div()
+                .text_size(px(13.))
+                .text_color(theme::text())
+                .child(line.to_owned())
+        })),
+        None if dialog.loading => body.child(
+            div()
+                .text_size(px(13.))
+                .text_color(theme::text_muted())
+                .child("Loading the meeting info..."),
+        ),
+        None => body.child(
+            div()
+                .text_size(px(13.))
+                .text_color(theme::text_muted())
+                .child("No join link is available for this meeting."),
+        ),
+    }
+}
+
+/// Teams' in-call "Meeting info": the join link and dial-in next to "Meeting options...",
+/// with its own "Copy join info" button. Open to everyone in the call.
+pub fn meeting_info_dialog(app: &Entity<AppState>, call: &ActiveCall) -> Option<AnyElement> {
+    let dialog = call.meeting_info.as_ref()?;
+    let (backdrop_app, close_app) = (app.clone(), app.clone());
+    let copy_text = dialog.copy_text();
+    Some(
+        div()
+            .id("meeting-info-layer")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("meeting-info-backdrop")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(black().opacity(DIALOG_BACKDROP))
+                    .occlude()
+                    .on_click(move |_, _, cx| {
+                        backdrop_app.update(cx, |state, cx| state.close_meeting_info(cx))
+                    }),
+            )
+            .child(
+                v_flex()
+                    .id("meeting-info-card")
+                    .w(px(DIALOG_WIDTH))
+                    .max_w(relative(1.))
+                    .p(px(16.))
+                    .gap(px(12.))
+                    .rounded(px(12.))
+                    .dialog_surface()
+                    .text_color(theme::text())
+                    .occlude()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Meeting info"),
+                    )
+                    .child(meeting_info_body(dialog))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap(px(8.))
+                            .children(copy_text.map(|info| {
+                                Button::new("meeting-info-copy")
+                                    .label("Copy join info")
+                                    .icon(IconName::Copy)
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            info.clone(),
+                                        ))
+                                    })
+                                    .into_any_element()
+                            }))
+                            .child(
+                                Button::new("meeting-info-close")
+                                    .label("Close")
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        close_app
+                                            .update(cx, |state, cx| state.close_meeting_info(cx))
+                                    }),
+                            ),
                     ),
             )
             .into_any_element(),

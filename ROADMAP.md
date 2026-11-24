@@ -211,7 +211,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Give and take control | Missing | Protocol known (main-channel data channel, action codes 0-11); needs a second person and a security review |
 | Breakout rooms (organizer) | Missing | Create, assign, open, close rooms; needs a second person |
 | Merge calls | Missing | Needs two live callers |
-| Dial-in numbers in meeting info | Missing | Numbers from the invite, Copy join info |
+| Dial-in numbers in meeting info | Partial | In a call: GPUI's "..." (People panel, everyone) and Rune's "More" overflow get a "Meeting info" entry next to Meeting options, showing the join link and, from the matching calendar event, "Dial in by phone" and the phone conference ID, with its own Copy join info. GPUI also fetches the join link from Graph when no calendar event matches (e.g. Meet now); Rune just says no join link is available there. Unit tested only, not run against a live call |
 | Hide my name in captions | Missing | Setting not found in the captures |
 | End-to-end encrypted 1:1 calls | Missing | Key exchange lives in the native desktop media stack, not in the web bundle; tenant policy is Disabled, so not testable here. The call health popover shows the transport encryption instead |
 

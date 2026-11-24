@@ -519,6 +519,7 @@ pub struct CallView {
     invite_open: bool,
     confirm: Option<CallCommand>,
     show_reactions: bool,
+    show_meeting_info: bool,
     show_devices: bool,
     show_shares: bool,
     hand: bool,
@@ -601,6 +602,7 @@ impl Default for CallView {
             invite_open: false,
             confirm: None,
             show_reactions: false,
+            show_meeting_info: false,
             show_devices: false,
             show_shares: false,
             hand: false,
@@ -1261,6 +1263,68 @@ fn button<A: Actions + 'static>(
         )
 }
 
+/// GPUI's `MeetingInfoDialog::copy_text`: the join link + dial-in from the calendar event
+/// behind this call's meeting thread, in Teams' "Copy join info" text. `None` when nothing
+/// in the already-loaded calendar/agenda windows matches (e.g. a Meet Now with no invite) —
+/// Rune has no in-call join-link fetch yet, so it has nothing to fall back to there.
+fn meeting_info_text<A: Actions + 'static>(s: &UiState<A>) -> Option<String> {
+    let thread_id = s.calls.chat_thread()?;
+    let (join_url, dial_in) = s
+        .screens
+        .calendar
+        .iter()
+        .find(|row| row.thread_id.as_deref() == Some(thread_id))
+        .map(|row| (row.join_url.clone(), row.dial_in.clone()))
+        .or_else(|| {
+            s.screens
+                .agenda
+                .iter()
+                .find(|event| event.thread_id.as_deref() == Some(thread_id))
+                .map(|event| (event.join_url.clone(), event.dial_in.clone()))
+        })?;
+    Some(chatsvc::join_info_text(join_url.as_deref()?, dial_in.as_ref()))
+}
+
+/// The "Meeting info" side panel: join link, dial-in and "Copy join info", next to the
+/// "Meeting options"-style overflow buttons. Open to everyone in the call.
+fn meeting_info_panel<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let mut panel = col().key("call-meeting-info").gap(8.0).child(
+        text("Meeting info")
+            .font(style(16.0, 600.0))
+            .color(color("#242424")),
+    );
+    match meeting_info_text(s) {
+        Some(info) => {
+            for (index, line) in info.lines().enumerate() {
+                panel = panel.child(
+                    text(line.to_owned())
+                        .key(format!("call-meeting-info-line-{index}"))
+                        .font(style(13.0, 400.0))
+                        .color(color("#242424"))
+                        .wrap(),
+                );
+            }
+            panel = panel.child(button::<A>(
+                "Copy join info",
+                "call-meeting-info-copy",
+                move |s, tx| {
+                    tx.copy(info.clone());
+                    s.toast.show("Join info copied");
+                },
+            ));
+        }
+        None => {
+            panel = panel.child(
+                text("No join link is available for this meeting.")
+                    .font(style(13.0, 400.0))
+                    .color(color("#616161"))
+                    .wrap(),
+            );
+        }
+    }
+    panel
+}
+
 fn health_indicator<A: Actions + 'static>(call: &CallView) -> El {
     let Some(health) = &call.health else {
         return el();
@@ -1726,6 +1790,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             s.calls.show_people = false;
             s.calls.show_shares = false;
             s.calls.show_captions = false;
+            s.calls.show_meeting_info = false;
             if s.calls.show_devices {
                 s.actions.call_command(CallCommand::RefreshDevices);
             }
@@ -1740,6 +1805,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 s.calls.show_people = false;
                 s.calls.show_devices = false;
                 s.calls.show_captions = false;
+                s.calls.show_meeting_info = false;
                 if s.calls.show_shares {
                     s.actions.call_command(CallCommand::RefreshShareSources);
                 }
@@ -1751,6 +1817,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 s.calls.show_devices = false;
                 s.calls.show_shares = false;
                 s.calls.show_captions = false;
+                s.calls.show_meeting_info = false;
             }))
             .child(button::<A>("More", "call-more", |s, _| {
                 s.calls.show_reactions = !s.calls.show_reactions;
@@ -1892,11 +1959,20 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             body = body.child(incoming);
         }
         let hand = call.hand;
-        let mut features = row().gap(8.0).child(button::<A>(
-            if hand { "Lower hand" } else { "Raise hand" },
-            "call-hand",
-            move |s, _| s.actions.call_command(CallCommand::SetHand(!hand)),
-        ));
+        let mut features = row()
+            .gap(8.0)
+            .child(button::<A>("Meeting info", "call-meeting-info", |s, _| {
+                s.calls.show_meeting_info = !s.calls.show_meeting_info;
+                s.calls.show_people = false;
+                s.calls.show_devices = false;
+                s.calls.show_shares = false;
+                s.calls.show_captions = false;
+            }))
+            .child(button::<A>(
+                if hand { "Lower hand" } else { "Raise hand" },
+                "call-hand",
+                move |s, _| s.actions.call_command(CallCommand::SetHand(!hand)),
+            ));
         if !matches!(call.captions, calling::CaptionState::Starting) {
             let enabled = matches!(call.captions, calling::CaptionState::On);
             features = features.child(button::<A>(
@@ -1985,6 +2061,9 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     .color(rgb(0xFFFFFF))
                     .wrap(),
             );
+        }
+        if call.show_meeting_info {
+            panels = panels.child(meeting_info_panel::<A>(s));
         }
         if call.show_devices {
             panels = panels
@@ -3292,6 +3371,101 @@ mod tests {
                 .last()
                 .map(String::as_str),
             Some("Hangup")
+        );
+    }
+
+    #[test]
+    fn meeting_info_text_carries_the_dial_in_from_the_matching_calendar_event() {
+        use crate::screens::CalendarRow;
+        use chrono::Utc;
+
+        let mut state = connected(1);
+        state.calls.start(CallIntro {
+            kind: CallKind::Meeting,
+            conversation: Some("19:meeting".into()),
+            name: "Meeting".into(),
+        });
+        state.screens.calendar.push(CalendarRow {
+            id: "evt".into(),
+            subject: "Standup".into(),
+            start: Utc::now(),
+            end: Utc::now(),
+            cancelled: false,
+            all_day: false,
+            organizer: None,
+            ical_uid: None,
+            join_url: Some("https://teams.microsoft.com/l/meetup-join/x".into()),
+            dial_in: Some(chatsvc::DialIn {
+                toll_number: "+49 30 123456".into(),
+                conference_id: "987654321".into(),
+            }),
+            thread_id: Some("19:meeting".into()),
+            response: chatsvc::ResponseType::default(),
+        });
+        assert_eq!(
+            meeting_info_text(&state).as_deref(),
+            Some(
+                "Microsoft Teams meeting\nJoin: https://teams.microsoft.com/l/meetup-join/x\n\nDial in by phone\n+49 30 123456,,987654321#\nPhone conference ID: 987654321#"
+            )
+        );
+    }
+
+    #[test]
+    fn meeting_info_text_is_none_for_a_meet_now_without_a_calendar_match() {
+        let mut state = connected(1);
+        state.calls.start(CallIntro {
+            kind: CallKind::Meeting,
+            conversation: Some("19:meet-now".into()),
+            name: "Meeting".into(),
+        });
+        assert_eq!(meeting_info_text(&state), None);
+    }
+
+    #[test]
+    fn meeting_info_text_falls_back_to_a_matching_agenda_event() {
+        let mut state = connected(1);
+        state.calls.start(CallIntro {
+            kind: CallKind::Meeting,
+            conversation: Some("19:meeting".into()),
+            name: "Meeting".into(),
+        });
+        state.screens.agenda.push(chatsvc::CalendarEvent {
+            thread_id: Some("19:meeting".into()),
+            join_url: Some("https://teams.microsoft.com/l/meetup-join/x".into()),
+            dial_in: Some(chatsvc::DialIn {
+                toll_number: "+49 30 123456".into(),
+                conference_id: "987654321".into(),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            meeting_info_text(&state).as_deref(),
+            Some(
+                "Microsoft Teams meeting\nJoin: https://teams.microsoft.com/l/meetup-join/x\n\nDial in by phone\n+49 30 123456,,987654321#\nPhone conference ID: 987654321#"
+            )
+        );
+    }
+
+    #[test]
+    fn the_meeting_info_panel_opens_from_the_overflow_and_closes_other_panels() {
+        let mut state = connected(1);
+        state.calls.start(CallIntro {
+            kind: CallKind::Meeting,
+            conversation: Some("19:meeting".into()),
+            name: "Meeting".into(),
+        });
+        let mut rt = runtime(state);
+        click(&mut rt, "call-more");
+        click(&mut rt, "call-meeting-info");
+        assert!(
+            rt.find("call-meeting-info-copy").is_none(),
+            "no calendar match yet"
+        );
+        assert!(rt.state.calls.show_meeting_info);
+        click(&mut rt, "call-devices");
+        assert!(
+            !rt.state.calls.show_meeting_info,
+            "switching panels closes meeting info"
         );
     }
 }

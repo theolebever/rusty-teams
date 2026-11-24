@@ -17,6 +17,7 @@ use super::background::BackgroundPick;
 use super::bubbles::ChatBubble;
 use super::fullscreen::FullscreenState;
 use super::health::{HealthBanner, HealthState};
+use super::meeting_info_dialog::MeetingInfoDialog;
 use super::options_dialog::OptionsDialog;
 use super::pictures::CallPictures;
 use super::push_to_talk::PushToTalk;
@@ -61,6 +62,7 @@ pub struct ActiveCall {
     pub transcript_open: bool,
     pub people_open: bool,
     pub options_dialog: Option<OptionsDialog>,
+    pub meeting_info: Option<MeetingInfoDialog>,
     pub meeting_target: Option<MeetingTarget>,
     pub pending_move: Option<PendingMove>,
     pub consult: Option<ConsultCall>,
@@ -144,6 +146,7 @@ impl ActiveCall {
             transcript_open: false,
             people_open: false,
             options_dialog: None,
+            meeting_info: None,
             meeting_target: None,
             pending_move: None,
             consult: None,

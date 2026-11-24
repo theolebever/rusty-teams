@@ -30,7 +30,9 @@ use super::call_organizer::{
     camera_menu_button, captions_hint_chip, captions_overlay, lobby_banner, more_button, pin_chip,
     spotlight_chip, with_tile_menu,
 };
-use super::call_people::{lock_banner, lock_chip, options_dialog, people_button, people_panel};
+use super::call_people::{
+    lock_banner, lock_chip, meeting_info_dialog, options_dialog, people_button, people_panel,
+};
 use super::call_stage::{POP_OUT_TOOLTIP, StageMode, popped_placeholder, render_stage};
 use super::call_toolbar::{
     GROUP_GAP, LEAVE_HEIGHT, SPLIT_CHEVRON_WIDTH, TOOL_GAP, group_divider, split_chevron,
@@ -1513,6 +1515,7 @@ pub fn render_call_view(
             .flatten(),
     )
     .children(options_dialog(app, call))
+    .children(meeting_info_dialog(app, call))
     .children(consent_overlay(app, model));
     let panels: Vec<AnyElement> = chat
         .map(|chat| chat_panel(app, chat))

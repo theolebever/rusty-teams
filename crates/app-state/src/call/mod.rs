@@ -26,9 +26,9 @@ pub mod week;
 
 pub use app_call_model::{
     agenda, background, bubbles, calendar_list, calendar_now, calendar_prefs, caption_style, demo,
-    end_screen, fullscreen, health, mic, model, options_dialog, people, preview, record_rights,
-    recording_menu, report, ring, share_view, stage_layout, stage_split, transcript,
-    view_settings, week_grid,
+    end_screen, fullscreen, health, meeting_info_dialog, mic, model, options_dialog, people,
+    preview, record_rights, recording_menu, report, ring, share_view, stage_layout, stage_split,
+    transcript, view_settings, week_grid,
 };
 
 pub use actions::{
@@ -48,6 +48,7 @@ pub use health::{HealthBanner, level_text, media_text, network_rows, transport_t
 pub use history::CallRow;
 pub use launcher::CallLauncher;
 pub use list::{CALL_ROW_HEIGHT, CallsList, EMPTY_HEIGHT, HistoryFilter, ListEntry};
+pub use meeting_info_dialog::MeetingInfoDialog;
 pub use mic::load_mic;
 pub use model::ConsultCall;
 pub use model::{
