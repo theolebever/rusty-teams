@@ -47,7 +47,8 @@ use crate::end::EndKind;
 use crate::engine::{CallEngine, EngineConfig, Inner};
 use crate::error::{Error, Result};
 use crate::health::{
-    CallHealth, HealthCounters, HealthSampler, QualityTracker, TransportDetails, health_from_stats,
+    CallHealth, HealthCounters, HealthOverride, HealthSampler, QualityTracker, TransportDetails,
+    health_from_stats,
 };
 use crate::hold::{
     HoldState, INACTIVE, MediaLine, accepted_modalities, direction_of, is_hold, keep_media_running,
@@ -922,6 +923,10 @@ async fn drive(
     let mut segmentation_model: Option<&'static str> = None;
     let mut health_sampler = HealthSampler::default();
     let mut quality_tracker = QualityTracker::default();
+    let health_override = HealthOverride::from_env();
+    if let Some(forced) = health_override {
+        timeline.record("health override", format!("{forced:?}"));
+    }
     let mut second = 0u32;
     let echo_thread = thread_id;
     let mut video = VideoReceive::new(own_mri.clone(), VideoRouter::default());
@@ -2815,8 +2820,12 @@ async fn drive(
                 }
                 if ticks.is_multiple_of(HEALTH_EVERY_TICKS)
                     && snapshot.selected_pair.is_some()
-                    && let Some(sample) = health_sampler.sample(std::time::Instant::now(), snapshot.health)
+                    && let Some(measured) = health_sampler.sample(std::time::Instant::now(), snapshot.health)
                 {
+                    let sample = match health_override {
+                        Some(forced) => forced.apply(measured),
+                        None => measured,
+                    };
                     let quality = quality_tracker.observe(std::time::Instant::now(), &sample);
                     if local_video.camera_on()
                         && snapshot.camera_target_bitrate > 0

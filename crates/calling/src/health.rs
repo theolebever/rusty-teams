@@ -72,6 +72,56 @@ impl HealthSample {
     }
 }
 
+/// Forces call health for testing the banners and the popover without a bad network:
+/// `poor`, `bad` or `cpu`.
+pub const HEALTH_OVERRIDE_ENV: &str = "CALLING_HEALTH";
+
+/// A fixed degradation laid over every measured sample. It goes through the same sustain and
+/// recovery timers as a real one, so the banners show after 5 s like on a live network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthOverride {
+    Poor,
+    Bad,
+    Cpu,
+}
+
+impl HealthOverride {
+    pub fn from_env() -> Option<Self> {
+        Self::parse(std::env::var(HEALTH_OVERRIDE_ENV).ok().as_deref())
+    }
+
+    pub fn parse(value: Option<&str>) -> Option<Self> {
+        match value?.trim().to_ascii_lowercase().as_str() {
+            "poor" => Some(HealthOverride::Poor),
+            "bad" => Some(HealthOverride::Bad),
+            "cpu" => Some(HealthOverride::Cpu),
+            _ => None,
+        }
+    }
+
+    /// The measured sample with the forced figures in place; bitrates stay real.
+    pub fn apply(self, sample: HealthSample) -> HealthSample {
+        match self {
+            HealthOverride::Poor => HealthSample {
+                loss_percent: sample.loss_percent.max(POOR_LOSS_PERCENT + 2.),
+                round_trip_ms: sample.round_trip_ms.max(POOR_ROUND_TRIP_MS + 50.),
+                jitter_ms: sample.jitter_ms.max(POOR_JITTER_MS + 10.),
+                ..sample
+            },
+            HealthOverride::Bad => HealthSample {
+                loss_percent: sample.loss_percent.max(BAD_LOSS_PERCENT + 5.),
+                round_trip_ms: sample.round_trip_ms.max(BAD_ROUND_TRIP_MS + 100.),
+                jitter_ms: sample.jitter_ms.max(POOR_JITTER_MS + 20.),
+                ..sample
+            },
+            HealthOverride::Cpu => HealthSample {
+                limitation: Limitation::Cpu,
+                ..sample
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransportDetails {
     pub dtls_state: String,
@@ -465,6 +515,51 @@ mod tests {
             feed(&mut tracker, start, 30, 30, &lossy(0.)).level,
             NetworkLevel::Good
         );
+    }
+
+    #[test]
+    fn the_override_reads_poor_bad_or_cpu() {
+        assert_eq!(
+            HealthOverride::parse(Some(" Poor\n")),
+            Some(HealthOverride::Poor)
+        );
+        assert_eq!(
+            HealthOverride::parse(Some("bad")),
+            Some(HealthOverride::Bad)
+        );
+        assert_eq!(
+            HealthOverride::parse(Some("CPU")),
+            Some(HealthOverride::Cpu)
+        );
+        assert_eq!(HealthOverride::parse(Some("good")), None);
+        assert_eq!(HealthOverride::parse(None), None);
+    }
+
+    #[test]
+    fn each_override_reaches_its_state_after_the_sustain_time() {
+        let clean = HealthSample {
+            round_trip_ms: 20.,
+            sent_kbps: 900.,
+            ..HealthSample::default()
+        };
+        for (forced, level, cpu_limited) in [
+            (HealthOverride::Poor, NetworkLevel::Poor, false),
+            (HealthOverride::Bad, NetworkLevel::Bad, false),
+            (HealthOverride::Cpu, NetworkLevel::Good, true),
+        ] {
+            let sample = forced.apply(clean);
+            assert_eq!(sample.sent_kbps, 900., "{forced:?} keeps the real bitrate");
+            let (mut tracker, start) = (QualityTracker::default(), Instant::now());
+            let quality = feed(&mut tracker, start, 0, 6, &sample);
+            assert_eq!(quality.level, level, "{forced:?}");
+            assert_eq!(quality.cpu_limited, cpu_limited, "{forced:?}");
+        }
+    }
+
+    #[test]
+    fn the_override_never_hides_a_worse_measurement() {
+        let worse = lossy(40.);
+        assert_eq!(HealthOverride::Poor.apply(worse).loss_percent, 40.);
     }
 
     #[test]

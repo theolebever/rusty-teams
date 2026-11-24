@@ -96,7 +96,10 @@ pub use effects::CameraEffects;
 pub use end::EndKind;
 pub use engine::{CallEngine, EngineConfig, EngineEvent, IncomingRing};
 pub use error::{Error, Result};
-pub use health::{CallHealth, HealthSample, Limitation, NetworkLevel, TransportDetails};
+pub use health::{
+    CallHealth, HEALTH_OVERRIDE_ENV, HealthOverride, HealthSample, Limitation, NetworkLevel,
+    TransportDetails,
+};
 pub use hold::HoldState;
 pub use level::SpeakingDetector;
 pub use meeting_options::{MeetingOptions, OptionWrite};
