@@ -720,6 +720,9 @@ impl AppState {
     pub fn set_call_mic(&mut self, settings: MicSettings, cx: &mut dyn Host) {
         self.call_mic = settings;
         save_mic(&self.store, settings);
+        if let Some(launcher) = &self.call_launcher {
+            launcher.set_default_mic(settings);
+        }
         self.send_call_command(CallCommand::SetMicSettings(settings));
         cx.notify();
     }
