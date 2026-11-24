@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use session::{
     App, BoxFuture, Diagnosis, Error, OpenedTab, Result, TabChannel, TabCommand, TabEvent,
-    Transport, is_login_url,
+    Transport, USER_AGENT_OVERRIDE_METHOD, is_login_url,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -197,6 +197,20 @@ async fn sink_closed(sink: &Option<mpsc::UnboundedSender<TabEvent>>) {
     }
 }
 
+/// CDP calls that need nothing from Firefox. The session sets the mobile Chrome user agent on every
+/// new tab before it fetches; Firefox keeps its own (ADR 0003), since a Chrome string over Gecko
+/// without matching client hints risks the Microsoft sign-in.
+fn answered_locally(method: &str) -> Option<Value> {
+    match method {
+        "Runtime.enable"
+        | "Runtime.disable"
+        | "Page.enable"
+        | "Page.disable"
+        | USER_AGENT_OVERRIDE_METHOD => Some(json!({})),
+        _ => None,
+    }
+}
+
 /// A function that installs `name` on the page as a binding that posts to its channel argument.
 fn binding_declaration(name: &str) -> String {
     let name = Value::from(name);
@@ -210,9 +224,11 @@ async fn translate(
     method: &str,
     params: &Value,
 ) -> Result<Value> {
+    if let Some(answer) = answered_locally(method) {
+        return Ok(answer);
+    }
     let text = |key: &str| params[key].as_str().unwrap_or_default();
     match method {
-        "Runtime.enable" | "Runtime.disable" | "Page.enable" | "Page.disable" => Ok(json!({})),
         "Runtime.evaluate" => {
             let request = json!({
                 "expression": text("expression"),
@@ -356,6 +372,17 @@ mod tests {
         assert_eq!(event.method, "Page.frameNavigated");
         assert!(event.params.pointer("/frame/parentId").is_none());
         assert!(tab_event("tab", &bindings(), &load("other")).is_none());
+    }
+
+    #[test]
+    fn the_user_agent_override_succeeds_without_firefox() {
+        // The session sends it on every new tab with `?`, so an error would fail every fetch.
+        assert_eq!(
+            answered_locally(USER_AGENT_OVERRIDE_METHOD),
+            Some(json!({}))
+        );
+        assert_eq!(answered_locally("Page.enable"), Some(json!({})));
+        assert_eq!(answered_locally("Runtime.evaluate"), None);
     }
 
     #[test]

@@ -266,6 +266,18 @@ mod tests {
     }
 
     #[test]
+    fn finds_debians_firefox_esr() {
+        let installed = installed_in(
+            Platform::Linux,
+            None,
+            &std::env::join_paths(["/usr/bin"]).unwrap(),
+            &|path| path == Path::new("/usr/bin/firefox-esr"),
+        );
+        let found = desktop_entry_match("firefox-esr.desktop", &installed).unwrap();
+        assert_eq!(found.engine, Engine::Firefox);
+    }
+
+    #[test]
     fn parses_the_saved_choice() {
         assert_eq!(SignInBrowser::parse(" \n"), SignInBrowser::Automatic);
         assert_eq!(

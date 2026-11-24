@@ -34,8 +34,15 @@ pub(crate) const MACOS_FIREFOX_APP_PATHS: [&str; 4] = [
     "LibreWolf.app/Contents/MacOS/librewolf",
     "Floorp.app/Contents/MacOS/floorp",
 ];
-pub(crate) const LINUX_FIREFOX_NAMES: [&str; 5] =
-    ["firefox", "zen-browser", "zen", "librewolf", "floorp"];
+/// `firefox-esr` is Debian's Firefox, which the Linux package accepts as its browser dependency.
+pub(crate) const LINUX_FIREFOX_NAMES: [&str; 6] = [
+    "firefox",
+    "firefox-esr",
+    "zen-browser",
+    "zen",
+    "librewolf",
+    "floorp",
+];
 
 /// The protocol family of the sign-in browser: Chromium speaks CDP, Firefox WebDriver BiDi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
