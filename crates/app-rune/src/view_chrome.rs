@@ -12,15 +12,14 @@ use crate::types::Actions;
 use crate::ui::{UiState, c, ts, INK, MUTED};
 
 /// Height of the title bar the window draws over its caption buttons (`main.rs`).
-pub const TITLE_BAR_HEIGHT: f32 = 48.0;
-const RAIL_WIDTH: f32 = 76.0;
-const RAIL_ITEM_HEIGHT: f32 = 56.0;
-const RAIL_ICON: f32 = 24.0;
-/// The active rail item's accent bar, on the rail's left edge.
-const ACCENT_BAR_W: f32 = 3.0;
-const ACCENT_BAR_H: f32 = 24.0;
-const SEARCH_WIDTH: f32 = 640.0;
-const SEARCH_HEIGHT: f32 = 32.0;
+pub const TITLE_BAR_HEIGHT: f32 = 40.0;
+const RAIL_WIDTH: f32 = 60.0;
+const RAIL_ITEM_WIDTH: f32 = 48.0;
+const RAIL_ITEM_HEIGHT: f32 = 52.0;
+const RAIL_RADIUS: f32 = 10.0;
+const RAIL_ICON: f32 = 20.0;
+const SEARCH_WIDTH: f32 = 380.0;
+const SEARCH_HEIGHT: f32 = 28.0;
 const BADGE_CAP: usize = 99;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,17 +29,18 @@ struct RailItem {
     filled: &'static str,
     screen: Screen,
     badge: usize,
+    /// Shows a plain dot instead of the count in `badge` (unread channels).
+    dot: bool,
 }
 
 fn rail_items(activity: usize, unread_chats: usize, channels: usize, agents: usize) -> Vec<RailItem> {
     vec![
-        RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0 },
-        RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: activity },
-        RailItem { label: "Chat", outline: "chat_bubble", filled: "chat_bubble_fill", screen: Screen::Chat, badge: unread_chats },
-        RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: channels },
-        RailItem { label: "Calls", outline: "call", filled: "call", screen: Screen::Calls, badge: 0 },
-        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: agents },
-        RailItem { label: "Settings", outline: "settings", filled: "settings", screen: Screen::Settings, badge: 0 },
+        RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: activity, dot: false },
+        RailItem { label: "Chat", outline: "chat_bubble", filled: "chat_bubble_fill", screen: Screen::Chat, badge: unread_chats, dot: false },
+        RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: channels, dot: true },
+        RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0, dot: false },
+        RailItem { label: "Calls", outline: "call", filled: "call", screen: Screen::Calls, badge: 0, dot: false },
+        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: agents, dot: false },
     ]
 }
 
@@ -79,6 +79,8 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
                 .pl(14.0)
                 .pr(12.0)
                 .child(el().key("title-logo").size(20.0, 20.0).pixels_fit(s.media.logo().pixels(), SurfaceFit::Fit))
+                .child(text(app_base::APP_NAME).font(ts(13.0, 600.0)).color(tone(palette.foreground)).truncate())
+                .children(s.read_only.then(|| mode_pill("Read-only")))
                 .child(el().grow(1.0))
                 .child(history_button::<A>("history-back", "keyboard_arrow_left", "Back", s.screens.can_go_back(), screens::go_back))
                 .child(history_button::<A>("history-forward", "keyboard_arrow_right", "Forward", s.screens.can_go_forward(), screens::go_forward)),
@@ -111,6 +113,19 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
         )
 }
 
+/// The amber mode pill shown after the app name ("Read-only").
+fn mode_pill(label: &str) -> El {
+    let amber = active_palette().amber;
+    row()
+        .key("title-mode")
+        .h(18.0)
+        .px(8.0)
+        .radius(9.0)
+        .center()
+        .fill(Color { a: 0.14, ..tone(amber) })
+        .child(text(label).font(ts(11.0, 600.0)).color(tone(amber)))
+}
+
 /// A back or forward button; muted and inert while `enabled` is false.
 fn history_button<A: Actions + 'static>(
     key: &str,
@@ -141,17 +156,27 @@ fn search_box<A: Actions + 'static>() -> El {
         .gap(8.0)
         .center_y()
         .radius(6.0)
-        .fill(tone(palette.surface_raised))
-        .border(1.0, tone(palette.border))
+        .fill(tone(palette.surface))
         .on_press_tx(crate::switcher::open::<A>)
         .child(sym("search", 16.0).color(muted))
         .child(
-            text("Search (Ctrl+K)")
-                .font(ts(13.0, 400.0))
+            text("Search chats, people and channels")
+                .font(ts(12.0, 400.0))
                 .color(muted)
                 .truncate()
                 .grow(1.0)
                 .min_w(0.0),
+        )
+        // ponytail: always shown; GPUI hides it below 200px, Rune's view has no width to test.
+        .child(
+            row()
+                .key("title-search-shortcut")
+                .h(18.0)
+                .px(6.0)
+                .radius(4.0)
+                .center()
+                .fill(tone(palette.surface_raised))
+                .child(text("Ctrl K").font(ts(11.0, 400.0)).color(muted)),
         )
 }
 
@@ -175,9 +200,9 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
     let glyph = if active { item.filled } else { item.outline };
     let mut button = col()
         .key(format!("nav-{}", item.label))
-        .w(RAIL_WIDTH)
+        .w(RAIL_ITEM_WIDTH)
         .h(RAIL_ITEM_HEIGHT)
-        .radius(6.0)
+        .radius(RAIL_RADIUS)
         .pt(6.0)
         .gap(4.0)
         .items_center()
@@ -188,18 +213,22 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         .child(sym(glyph, RAIL_ICON).color(ink))
         .label(item.label)
         .help(format!("{} ({})", item.label, shortcut(screen)))
-        .child(text(item.label).font(ts(11.0, if active { 600.0 } else { 400.0 })).color(ink).truncate());
+        .child(text(item.label).font(ts(9.0, 600.0)).color(ink).truncate());
     button = button.hover(tone(palette.row_hover));
     if active {
-        button = button.child(
-            el().key(format!("nav-{}-bar", item.label))
-                .size(ACCENT_BAR_W, ACCENT_BAR_H)
-                .radius(ACCENT_BAR_W / 2.0)
-                .fill(tone(palette.accent))
-                .absolute(0.0, 16.0),
-        );
+        button = button.fill(tone(palette.surface_raised));
     }
-    if let Some(count) = badge_text(item.badge) {
+    if item.dot {
+        if item.badge > 0 {
+            let dot = el()
+                .key(format!("nav-{}-dot", item.label))
+                .size(7.0, 7.0)
+                .radius(3.5)
+                .fill(tone(palette.accent))
+                .absolute(31.0, 8.0);
+            button = button.child(dot);
+        }
+    } else if let Some(count) = badge_text(item.badge) {
         let badge = row()
             .key(format!("nav-{}-badge", item.label))
             .h(16.0)
@@ -209,7 +238,7 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
             .center()
             .fill(tone(palette.accent))
             .child(text(count).font(ts(10.0, 600.0)).color(tone(palette.on_accent)));
-        button = button.child(badge.absolute(44.0, 2.0));
+        button = button.child(badge.absolute(28.0, 5.0));
     }
     button
 }
@@ -266,9 +295,10 @@ mod tests {
     fn rail_lists_the_screens_in_order_and_counts_unread_chats_on_chat() {
         let items = rail_items(2, 3, 4, 1);
         let labels: Vec<_> = items.iter().map(|item| item.label).collect();
-        assert_eq!(labels, ["Calendar", "Activity", "Chat", "Teams", "Calls", "Agents", "Settings"]);
-        assert_eq!(items[2].badge, 3);
-        assert_eq!(items.iter().map(|item| item.badge).collect::<Vec<_>>(), [0, 2, 3, 4, 0, 1, 0]);
+        assert_eq!(labels, ["Activity", "Chat", "Teams", "Calendar", "Calls", "Agents"]);
+        assert_eq!(items[1].badge, 3);
+        assert_eq!(items.iter().map(|item| item.badge).collect::<Vec<_>>(), [2, 3, 4, 0, 0, 1]);
+        assert!(items.iter().filter(|item| item.dot).map(|item| item.label).eq(["Teams"]), "only Teams shows a dot");
     }
 
     #[test]
@@ -277,9 +307,9 @@ mod tests {
         let mut rt = Runtime::new(UiState::new(Quiet), crate::ui::view::<Quiet>, (1000.0, 700.0), env);
         rt.frame(0.0);
         let nav = rt.elements().into_iter()
-            .find(|element| element.key.as_deref() == Some("nav-Settings"))
-            .expect("settings rail item");
-        assert!((nav.radius - 6.0).abs() < 0.01, "nav item is a control: radius 6");
+            .find(|element| element.key.as_deref() == Some("nav-Chat"))
+            .expect("chat rail item");
+        assert!((nav.radius - 10.0).abs() < 0.01, "nav item radius 10 as in GPUI");
     }
 
     #[test]
@@ -382,7 +412,10 @@ mod tests {
         let mut rt = Runtime::new(UiState::new(Quiet), crate::ui::view::<Quiet>, (1000.0, 700.0), env);
         rt.frame(0.0);
         assert_eq!(rt.state.screens.screen, Screen::Chat);
-        let (x, y) = rt.find("nav-Settings").expect("settings rail item");
+        // Settings left the rail; the title bar's more menu is the way in.
+        rt.update(|s, _| s.nav.settings_more = true);
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("settings-more-settings").expect("settings menu item");
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
