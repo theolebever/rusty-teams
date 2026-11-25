@@ -44,6 +44,12 @@ Les transports HTTP et Trouter natifs, la mise en veille des WebViews et de nomb
 
 Le portage comprend les fonctions suivantes ; leur présence dans le code ne garantit pas encore tous les comportements du client GPUI :
 
+**App**
+- Dark theme, opens instantly from the cache
+- Windows downloads a newer release quietly and restarts when idle. Linux under `~/.local` asks first. Other installs open the release page. Flatpak does not check.
+- Single instance: a second start brings the window to the front
+- Guest orgs: the avatar menu lists every org of your account (home and guest tenants) with unread counts; picking one restarts on it with its own cache. Messages from the other orgs show as toasts
+
 - Liste des conversations, équipes et canaux, historique paginé, fils de discussion, recherche locale et navigation rapide.
 - Composition de messages avec mise en forme, mentions, réactions, GIFs et pièces jointes. Le sélecteur OneDrive propose les fichiers récents, les dossiers et les fichiers partagés.
 - Menus contextuels, indicateurs de saisie, messages animés, images, fichiers et lecture des messages vocaux.
@@ -53,11 +59,45 @@ Le portage comprend les fonctions suivantes ; leur présence dans le code ne gar
 
 GPUI conserve une interface de réglages plus complète et l’intégration du serveur MCP avec ses permissions et ses propositions à valider. Les réglages Rune couvrent actuellement l’apparence ; le panneau d’agents CLI de Rune ne remplace pas cette intégration MCP.
 
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Support | Main target | Supported | Supported |
+| Sign-in | Embedded WebView2 | Your browser, headless | Your browser, headless |
+| Download | `.exe` | `.tar.gz`, self-installs to the app menu | Universal `.app` (arm64 + x86_64) |
+| Tray icon | Yes | StatusNotifierItem | Menu bar |
+| Updates | Quiet download, idle restart | Asks when installed under `~/.local`; otherwise opens the release page | Opens the release page |
+
 Windows est la plateforme de travail principale du fork. Les parcours Rune sous Linux et macOS restent à valider. Le client GPUI conserve les chemins de connexion et les scripts de compilation multiplateformes du projet original.
 
 ## Démarrer
 
 Les commandes suivantes se lancent à la racine du dépôt avec un outil Rust récent compatible avec l’édition 2024.
+
+</details>
+
+<details>
+<summary><b>Linux details</b></summary>
+
+- **Install:** on first start the app offers to install itself to `~/.local/share/rusty-teams/teams` and adds it to the application menu. Settings > General can install, replace or remove it.
+- **Updates:** a release build installed under `~/.local` asks, then downloads and restarts. Other copies open the release page. Flatpak does not check.
+- **Tray:** KDE Plasma natively, GNOME with the AppIndicator extension. "Show icon in the tray" plus "On close, keep the application running" keeps the app in the tray.
+- **Window id:** `rusty-teams`, for window manager rules.
+- **Emoji:** a bundled Noto Color Emoji font, so they look the same on every distro.
+
+</details>
+
+<details>
+<summary><b>macOS details</b></summary>
+
+- Screen share uses the ScreenCaptureKit system dialog.
+
+</details>
+
+The remaining gaps are planned, see [ROADMAP.md](ROADMAP.md).
+
+## Quick start
+
+Download the build for your platform from [Releases](https://github.com/danieldaeschle/rusty-teams/releases) and sign in with your work account. Or build it yourself:
 
 ```bash
 git clone https://github.com/theolebever/rusty-teams.git
