@@ -150,7 +150,7 @@ pub fn banner<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             .child(sym("status_away", 14.0).color(rgb(palette.amber)))
             .child(text(text_line).font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0).grow(1.0))
             .children((connection.is_none() && live == Some(LiveState::Failed) && s.toast.retry_ready).then(||
-                crate::screens::button("Retry", "live-retry", |s: &mut UiState<A>, _| s.actions.retry_live()))),
+                crate::controls::button::<A>("live-retry", "Retry", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| s.actions.retry_live()))),
     )
 }
 
@@ -173,7 +173,7 @@ pub fn session_expired<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             .fill(rgb(palette.amber).alpha(0.14))
             .child(sym("status_away", 14.0).color(rgb(palette.amber)))
             .child(text("Session expired").font(ts(12.0, 400.0)).color(rgb(palette.foreground)).truncate().min_w(0.0).grow(1.0))
-            .child(crate::screens::button("Sign in again", "session-sign-in", |s: &mut UiState<A>, _| crate::account_picker::open_picker(s, true))),
+            .child(crate::controls::button::<A>("session-sign-in", "Sign in again", crate::controls::Variant::Primary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| crate::account_picker::open_picker(s, true))),
     )
 }
 
@@ -194,17 +194,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             .fill(rgb(palette.popup))
             .border(1.0, rgb(palette.border))
             .child(text(message.clone()).font(ts(13.0, 400.0)).color(rgb(palette.foreground)).min_w(0.0))
-            .child(
-                row()
-                    .key("toast-close")
-                    .size(20.0, 20.0)
-                    .radius(4.0)
-                    .center()
-                    .hover(rgb(palette.popup_hover))
-                    .label("Dismiss")
-                    .on_press(|s: &mut UiState<A>| s.toast.notice = None)
-                    .child(sym("close", 12.0).color(rgb(palette.text_muted))),
-            ),
+            .child(crate::controls::icon_button::<A>("toast-close", "close", "Dismiss", false, |s: &mut UiState<A>, _| s.toast.notice = None)),
     )
 }
 

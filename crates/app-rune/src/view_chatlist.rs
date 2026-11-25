@@ -223,7 +223,7 @@ fn header<A: Actions + 'static>() -> El {
         .center_y()
         .child(
             text("Chat")
-                .font(ts(16.0, 600.0))
+                .font(ts(18.0, 700.0))
                 .color(tone(p.foreground))
                 .grow(1.0)
                 .min_w(0.0),
@@ -285,8 +285,9 @@ fn chips<A: Actions + 'static>(s: &UiState<A>, pills: &[Pill]) -> El {
                 .px(12.0)
                 .center_y()
                 .radius(999.0)
-                .fill(tone(if on { p.accent } else { p.surface_raised }))
-                .hover(tone(if on { p.accent } else { p.border_strong }))
+                .fill(if on { tone(p.accent) } else { Color::TRANSPARENT })
+                .border(1.0, tone(if on { p.accent } else { p.border_strong }))
+                .hover(tone(if on { p.accent } else { p.row_hover }))
                 .label(pill.label())
                 .on_press(move |s: &mut UiState<A>| toggle_filter(s, pill))
                 .child(
@@ -427,16 +428,16 @@ pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .anchored("chat-more", Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut UiState<A>| s.chatlist.more = false);
     if !s.read_only {
-        menu = menu.child(crate::screens::button("Mark all as read", "chats-read-all", |s: &mut UiState<A>, _| {
+        menu = menu.child(crate::controls::menu_item::<A>("chats-read-all", "Mark all as read", None, false, |s: &mut UiState<A>| {
             s.chatlist.more = false;
             for chat in s.chats.iter().filter(|chat| chat.unread) { s.actions.set_chat_read(&chat.id, true); }
         }));
-        menu = menu.child(crate::screens::button("New section", "chats-new-section", |s: &mut UiState<A>, _| s.chatlist.new_section = true));
+        menu = menu.child(crate::controls::menu_item::<A>("chats-new-section", "New section", None, false, |s: &mut UiState<A>| s.chatlist.new_section = true));
         if s.chatlist.new_section {
             menu = menu.child(text_input(&s.chatlist.section_name, ts(13.0, 400.0)).key("section-name").label("Section name")
                 .placeholder("Section name", tone(p.text_muted)).color(tone(p.foreground)).w_full()
                 .on_edit(|s: &mut UiState<A>| &mut s.chatlist.section_name))
-                .child(crate::screens::button("Create", "section-create", |s: &mut UiState<A>, _| {
+                .child(crate::controls::menu_item::<A>("section-create", "Create", None, false, |s: &mut UiState<A>| {
                     let name = s.chatlist.section_name.text.trim().to_owned();
                     if !name.is_empty() {
                         s.actions.change_folders(teams_core::FolderChange::Create { name });
@@ -447,7 +448,7 @@ pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                 }));
         }
     }
-    Some(menu.child(crate::screens::button("Collapse all", "chats-collapse-all", |s: &mut UiState<A>, _| {
+    Some(menu.child(crate::controls::menu_item::<A>("chats-collapse-all", "Collapse all", None, false, |s: &mut UiState<A>| {
         s.chatlist.more = false;
         s.chatlist.collapsed = [QUICK_VIEWS, TEAMS, CHATS].map(str::to_owned).to_vec();
         s.expanded_teams.clear();
@@ -761,6 +762,23 @@ mod tests {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn chat_more_menu_rows_are_menu_items() {
+        let mut rt = rt();
+        rt.update(|s, _| s.chatlist.more = true);
+        rt.frame(1.0 / 60.0);
+        let elements = rt.elements();
+        for key in ["chats-read-all", "chats-new-section", "chats-collapse-all"] {
+            let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert!(e.label.is_some(), "{key} has no accessible name");
+            assert!(e.focusable, "{key} is not keyboard reachable");
+            assert_eq!(e.fill.a, 0.0, "{key} is filled at rest");
+            assert!((e.rect[3] - 32.0).abs() < 0.5, "{key} height {}", e.rect[3]);
+            assert!((e.radius - 6.0).abs() < 0.5, "{key} radius {}", e.radius);
+        }
     }
 
     #[test]

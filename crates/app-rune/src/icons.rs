@@ -33,15 +33,19 @@ const SOURCES: &[(&str, &str)] = &[
     ("group_fill", include_str!("../assets/fluent/group_fill.svg")),
     ("keep", include_str!("../assets/fluent/keep.svg")),
     ("keyboard_arrow_down", include_str!("../assets/fluent/keyboard_arrow_down.svg")),
+    ("keyboard_arrow_left", include_str!("../../app/assets/symbols/keyboard_arrow_left.svg")),
     ("keyboard_arrow_right", include_str!("../assets/fluent/keyboard_arrow_right.svg")),
     ("delete", include_str!("../../app/assets/symbols/delete.svg")),
+    ("folder", include_str!("../../app/assets/symbols/folder.svg")),
     ("link", include_str!("../../app/assets/symbols/link.svg")),
     ("location_on", include_str!("../../app/assets/symbols/location_on.svg")),
+    ("lock", include_str!("../../app/assets/symbols/lock.svg")),
     ("mood", include_str!("../assets/fluent/mood.svg")),
     ("more_horiz", include_str!("../assets/fluent/more_horiz.svg")),
     ("notifications", include_str!("../assets/fluent/notifications.svg")),
     ("notifications_off", include_str!("../assets/fluent/notifications_off.svg")),
     ("person_add", include_str!("../assets/fluent/person_add.svg")),
+    ("priority_high", include_str!("../../app/assets/symbols/priority_high.svg")),
     ("reply", include_str!("../assets/fluent/reply.svg")),
     ("right_panel_open", include_str!("../assets/fluent/right_panel_open.svg")),
     ("schedule", include_str!("../assets/fluent/schedule.svg")),
@@ -112,5 +116,31 @@ mod tests {
         assert_eq!(icon.view, 24.0);
         assert!(icon.body.starts_with("<g transform=\"translate(0 0)\">"));
         assert!(!icon.body.contains("#212121"), "icons must inherit the theme color");
+    }
+
+    // Buttons call these names, so a missing SOURCES entry would panic the UI.
+    #[test]
+    fn sym_accepts_names_used_by_buttons() {
+        let _ = sym("keyboard_arrow_left", 16.0);
+        let _ = sym("folder", 16.0);
+        let _ = sym("lock", 16.0);
+        let _ = sym("priority_high", 16.0);
+    }
+
+    #[test]
+    fn button_symbols_use_their_svg_at_the_origin() {
+        let expected: &[(&'static str, &'static str)] = &[
+            ("keyboard_arrow_left", include_str!("../../app/assets/symbols/keyboard_arrow_left.svg")),
+            ("folder", include_str!("../../app/assets/symbols/folder.svg")),
+            ("lock", include_str!("../../app/assets/symbols/lock.svg")),
+            ("priority_high", include_str!("../../app/assets/symbols/priority_high.svg")),
+        ];
+        for &(name, svg) in expected {
+            let icon = lookup(name);
+            assert_eq!(icon.view, 960.0, "{name}");
+            assert!(icon.body.starts_with("<g transform=\"translate(0 960)\">"), "{name}");
+            assert!(!icon.body.contains(" fill="), "{name} must inherit the theme color");
+            assert_eq!(icon.body, build(name, svg).body, "{name} must use its own SVG");
+        }
     }
 }

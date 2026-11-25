@@ -54,13 +54,6 @@ impl Rich {
         }
     }
 
-    /// Everything the view draws from the image cache.
-    pub fn images(&self) -> Vec<ImageRef> {
-        let mut images: Vec<ImageRef> = self.preview.iter().filter_map(LinkPreview::image)
-            .chain(self.banner.iter().filter_map(AnnouncementBanner::image)).collect();
-        images.extend(self.cards.iter().flat_map(crate::cards::image_urls).map(|url| remote(&url)));
-        images
-    }
 }
 
 pub fn remote(url: &str) -> ImageRef {
@@ -80,12 +73,12 @@ pub fn open<A: Actions + 'static>(s: &mut UiState<A>, tx: &mut Tx, url: &str) {
 pub fn body<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, size: f32, color: Color) -> El {
     if let Some(translation) = crate::translation::cached(s, m) {
         let content = if translation.shown { blocks::<A>(&translation.spans, size, color, m.mine) }
-            else if m.media.rich.spans.is_empty() { crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap() }
+            else if m.media.rich.spans.is_empty() { crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap_anywhere() }
             else { blocks::<A>(&m.media.rich.spans, size, color, m.mine) };
         return col().w_full().child(content).children(crate::translation::line(s, m));
     }
     if m.media.rich.spans.is_empty() {
-        return col().child(crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap()).children(crate::translation::line(s, m));
+        return col().child(crate::ui::text(m.text.clone()).font(ts(size, 400.0)).color(color).wrap_anywhere()).children(crate::translation::line(s, m));
     }
     col().child(blocks::<A>(&m.media.rich.spans, size, color, m.mine)).children(crate::translation::line(s, m))
 }
@@ -174,7 +167,7 @@ impl Flat {
     }
 
     pub fn element<A: Actions + 'static>(self, size: f32, color: Color) -> El {
-        let mut element = rune::rich(self.text, self.spans).font(ts(size, 400.0)).color(color)
+        let mut element = rune::rich(self.text, self.spans).font(ts(size, 400.0)).color(color).wrap_anywhere()
             .strikes(self.strikes);
         if !self.links.is_empty() {
             for (range, url) in self.links { element = element.link(Link::new(range, url)); }

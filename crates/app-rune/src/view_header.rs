@@ -9,7 +9,7 @@ use crate::ui::text;
 use crate::avatar::rgb;
 use crate::icons::sym;
 use crate::types::{Actions, PinnedRow};
-use crate::ui::{c, ts, UiState, HOVER, INK, LINE, MUTED, WHITE};
+use crate::ui::{c, ts, UiState, HOVER, INK, LINE, MUTED};
 
 const HEADER_H: f32 = 60.0;
 const HEADER_PAD: f32 = 20.0;
@@ -55,8 +55,8 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
                 .min_w(0.0)
                 .gap(4.0)
                 .center_y()
-                .child(text(title.to_owned()).font(ts(15.0, 600.0)).color(c(INK)).truncate().min_w(0.0))
-                .children((channel.is_none() && !s.read_only).then(|| icon_button("rename-chat", "edit", s.rename_open)
+                .child(text(title.to_owned()).font(ts(16.0, 700.0)).color(c(INK)).truncate().min_w(0.0))
+                .children((channel.is_none() && !s.read_only).then(|| crate::controls::icon_button::<A>("rename-chat", "edit", "Rename chat", s.rename_open, |_, _| {})
                     .on_press_tx(|s: &mut UiState<A>, _| {
                         s.rename_open = !s.rename_open;
                         let title = s.chats.iter().find(|c| Some(&c.id) == s.selected.as_ref()).map(|c| c.title.as_str()).unwrap_or_default();
@@ -69,7 +69,7 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
     if channel.is_none() && !s.read_only {
         let id = id.to_owned();
         let call = if compact {
-            icon_button("meet-now", "videocam", false).label("Meet now").on_press(move |s: &mut UiState<A>| s.actions.meet_now(&id))
+            crate::controls::icon_button::<A>("meet-now", "videocam", "Meet now", false, move |s: &mut UiState<A>, _| s.actions.meet_now(&id))
         } else { meet_now::<A>(&id) };
         bar = bar.child(call);
     }
@@ -90,8 +90,8 @@ pub(crate) fn header<A: Actions + 'static>(s: &UiState<A>, id: &str, compact: bo
         bar = bar.child(el().w(1.0).h(DIVIDER_H).mx(4.0).fill(c(LINE)));
     }
     bar = bar
-        .child(icon_button("search-toggle", "search", s.search_open).on_press_tx(|s: &mut UiState<A>, _| toggle_search(s)))
-        .child(icon_button("side-panel", "right_panel_open", s.details_open).label("Conversation details").on_press(|s: &mut UiState<A>| {
+        .child(crate::controls::icon_button::<A>("search-toggle", "search", "Search", s.search_open, |s: &mut UiState<A>, _| toggle_search(s)))
+        .child(crate::controls::icon_button::<A>("side-panel", "right_panel_open", "Conversation details", s.details_open, |s: &mut UiState<A>, _| {
             s.details_open = !s.details_open;
             if s.details_open && let Some(id) = &s.selected && s.channel(id).is_some() { s.actions.load_channel_description(id); }
         }));
@@ -227,29 +227,14 @@ pub fn meet_options<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     Some(col().key("meet-options-menu").w(200.0).padding(6.0).gap(4.0).radius(8.0).fill(rgb(p.popup)).border(1.0, rgb(p.border))
         .anchored("meet-now-options", Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut UiState<A>| s.nav.meet_more = false)
-        .child(crate::screens::button("Meet now", "meet-option-start", |s: &mut UiState<A>, _| {
+        .child(crate::controls::menu_item::<A>("meet-option-start", "Meet now", None, false, |s: &mut UiState<A>| {
             s.nav.meet_more = false;
             if let Some(id) = &s.selected { s.actions.meet_now(id); }
         }))
-        .child(crate::screens::button("Join with an ID", "meet-option-join-id", |s: &mut UiState<A>, _| {
+        .child(crate::controls::menu_item::<A>("meet-option-join-id", "Join with an ID", None, false, |s: &mut UiState<A>| {
             s.nav.meet_more = false;
             s.screens.join_id_open = true;
         })))
-}
-
-/// A 32 px icon button; `active` fills it as the open search toggle does. The handler is added
-/// by the caller, so buttons without one (no action wired yet) only show their glyph.
-fn icon_button(key: &str, glyph: &str, active: bool) -> El {
-    let palette = active_palette();
-    row()
-        .key(key)
-        .w(BUTTON)
-        .h(BUTTON)
-        .radius(8.0)
-        .center()
-        .fill(c(if active { HOVER } else { WHITE }))
-        .hover(c(HOVER))
-        .child(sym(glyph, GLYPH).color(rgb(palette.text_soft)))
 }
 
 fn search_row<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -356,6 +341,35 @@ mod tests {
             s.pinned = vec![PinnedRow { message_id: "pin".into(), conversation_id: "c0".into(), sender: "Mara".into(), text: "Rollout".into() }];
         });
         rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn header_icon_buttons_are_named_and_meet_options_are_menu_items() {
+        let mut rt = runtime("c0");
+        let elements = rt.elements();
+        let by_key = |key: &str| {
+            elements
+                .iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("no element {key}"))
+        };
+        for (key, label) in [("search-toggle", "Search"), ("rename-chat", "Rename chat"), ("side-panel", "Conversation details")] {
+            let e = by_key(key);
+            assert_eq!(e.role, "button", "{key}");
+            assert_eq!(e.label.as_deref(), Some(label), "{key} has no accessible name");
+            assert!(e.focusable, "{key}");
+            assert!((e.rect[2] - 32.0).abs() < 0.5 && (e.rect[3] - 32.0).abs() < 0.5, "{key} is not 32x32");
+            assert!((e.radius - 6.0).abs() < 0.5, "{key} radius {}", e.radius);
+        }
+        rt.update(|s, _| s.nav.meet_more = true);
+        rt.frame(1.0 / 60.0);
+        let elements = rt.elements();
+        for key in ["meet-option-start", "meet-option-join-id"] {
+            let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert!(e.label.is_some() && e.focusable, "{key} is not an accessible menu row");
+            assert_eq!(e.fill.a, 0.0, "{key} is filled at rest");
+        }
     }
 
     #[test]

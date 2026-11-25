@@ -13,12 +13,14 @@ use crate::ui::{UiState, c, ts, INK, MUTED};
 
 /// Height of the title bar the window draws over its caption buttons (`main.rs`).
 pub const TITLE_BAR_HEIGHT: f32 = 48.0;
-const RAIL_WIDTH: f32 = 68.0;
-const RAIL_ITEM_WIDTH: f32 = 56.0;
-const RAIL_ITEM_HEIGHT: f32 = 64.0;
+const RAIL_WIDTH: f32 = 76.0;
+const RAIL_ITEM_HEIGHT: f32 = 56.0;
 const RAIL_ICON: f32 = 24.0;
-const SEARCH_WIDTH: f32 = 380.0;
-const SEARCH_HEIGHT: f32 = 28.0;
+/// The active rail item's accent bar, on the rail's left edge.
+const ACCENT_BAR_W: f32 = 3.0;
+const ACCENT_BAR_H: f32 = 24.0;
+const SEARCH_WIDTH: f32 = 640.0;
+const SEARCH_HEIGHT: f32 = 32.0;
 const BADGE_CAP: usize = 99;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,12 +34,12 @@ struct RailItem {
 
 fn rail_items(activity: usize, unread_chats: usize, channels: usize, agents: usize) -> Vec<RailItem> {
     vec![
+        RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0 },
         RailItem { label: "Activity", outline: "notifications", filled: "notifications", screen: Screen::Activity, badge: activity },
         RailItem { label: "Chat", outline: "chat_bubble", filled: "chat_bubble_fill", screen: Screen::Chat, badge: unread_chats },
         RailItem { label: "Teams", outline: "group", filled: "group", screen: Screen::Teams, badge: channels },
-        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: agents },
-        RailItem { label: "Calendar", outline: "calendar_month", filled: "calendar_month", screen: Screen::Calendar, badge: 0 },
         RailItem { label: "Calls", outline: "call", filled: "call", screen: Screen::Calls, badge: 0 },
+        RailItem { label: "Agents", outline: "auto_fix_high", filled: "auto_fix_high", screen: Screen::Agents, badge: agents },
         RailItem { label: "Settings", outline: "settings", filled: "settings", screen: Screen::Settings, badge: 0 },
     ]
 }
@@ -73,10 +75,13 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
                 .min_w(0.0)
                 .h_full()
                 .center_y()
-                .gap(12.0)
+                .gap(4.0)
                 .pl(14.0)
-                .child(el().key("title-logo").size(18.0, 18.0).pixels_fit(s.media.logo().pixels(), SurfaceFit::Fit))
-                .child(text(crate::TITLE).font(ts(13.0, 600.0)).color(c(INK))),
+                .pr(12.0)
+                .child(el().key("title-logo").size(20.0, 20.0).pixels_fit(s.media.logo().pixels(), SurfaceFit::Fit))
+                .child(el().grow(1.0))
+                .child(history_button::<A>("history-back", "keyboard_arrow_left", "Back", s.screens.can_go_back(), screens::go_back))
+                .child(history_button::<A>("history-forward", "keyboard_arrow_right", "Forward", s.screens.can_go_forward(), screens::go_forward)),
         )
         .child(search_box::<A>())
         .child(
@@ -106,6 +111,21 @@ pub fn title_bar<A: Actions + 'static>(s: &UiState<A>, trailing: f32) -> El {
         )
 }
 
+/// A back or forward button; muted and inert while `enabled` is false.
+fn history_button<A: Actions + 'static>(
+    key: &str,
+    glyph: &str,
+    label: &str,
+    enabled: bool,
+    go: fn(&mut UiState<A>),
+) -> El {
+    let palette = active_palette();
+    let ink = tone(if enabled { palette.foreground } else { palette.text_muted });
+    crate::controls::icon_button_with_ink::<A>(key, glyph, label, false, ink, move |s: &mut UiState<A>, _| go(s))
+        .disabled(!enabled)
+        .no_window_drag()
+}
+
 /// The global search box opens and focuses the switcher.
 fn search_box<A: Actions + 'static>() -> El {
     let palette = active_palette();
@@ -121,25 +141,17 @@ fn search_box<A: Actions + 'static>() -> El {
         .gap(8.0)
         .center_y()
         .radius(6.0)
-        .fill(tone(palette.surface))
+        .fill(tone(palette.surface_raised))
+        .border(1.0, tone(palette.border))
         .on_press_tx(crate::switcher::open::<A>)
-        .child(sym("search", 14.0).color(muted))
+        .child(sym("search", 16.0).color(muted))
         .child(
-            text("Search chats, people and channels")
-                .font(ts(12.0, 400.0))
+            text("Search (Ctrl+K)")
+                .font(ts(13.0, 400.0))
                 .color(muted)
                 .truncate()
                 .grow(1.0)
                 .min_w(0.0),
-        )
-        .child(
-            row()
-                .key("title-search-shortcut")
-                .px(6.0)
-                .py(1.0)
-                .radius(4.0)
-                .fill(tone(palette.surface_raised))
-                .child(text("Ctrl K").font(ts(11.0, 400.0)).color(c(INK))),
         )
 }
 
@@ -163,10 +175,10 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
     let glyph = if active { item.filled } else { item.outline };
     let mut button = col()
         .key(format!("nav-{}", item.label))
-        .w(RAIL_ITEM_WIDTH)
+        .w(RAIL_WIDTH)
         .h(RAIL_ITEM_HEIGHT)
-        .radius(4.0)
-        .pt(2.0)
+        .radius(6.0)
+        .pt(6.0)
         .gap(4.0)
         .items_center()
         .on_press_tx(move |s: &mut UiState<A>, tx| {
@@ -177,7 +189,16 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
         .label(item.label)
         .help(format!("{} ({})", item.label, shortcut(screen)))
         .child(text(item.label).font(ts(11.0, if active { 600.0 } else { 400.0 })).color(ink).truncate());
-    button = if active { button.fill(tone(palette.surface_raised)) } else { button.hover(tone(palette.row_hover)) };
+    button = button.hover(tone(palette.row_hover));
+    if active {
+        button = button.child(
+            el().key(format!("nav-{}-bar", item.label))
+                .size(ACCENT_BAR_W, ACCENT_BAR_H)
+                .radius(ACCENT_BAR_W / 2.0)
+                .fill(tone(palette.accent))
+                .absolute(0.0, 16.0),
+        );
+    }
     if let Some(count) = badge_text(item.badge) {
         let badge = row()
             .key(format!("nav-{}-badge", item.label))
@@ -188,7 +209,7 @@ fn rail_item<A: Actions + 'static>(item: RailItem, active: bool) -> El {
             .center()
             .fill(tone(palette.accent))
             .child(text(count).font(ts(10.0, 600.0)).color(tone(palette.on_accent)));
-        button = button.child(badge.absolute(28.0, 5.0));
+        button = button.child(badge.absolute(44.0, 2.0));
     }
     button
 }
@@ -212,19 +233,19 @@ pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .fill(tone(active_palette().popup)).border(1.0, tone(active_palette().border))
         .anchored("title-more", Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut UiState<A>| s.nav.settings_more = false)
-        .child(screens::button("Settings", "settings-more-settings", |s: &mut UiState<A>, _| {
+        .child(crate::controls::menu_item::<A>("settings-more-settings", "Settings", None, false, |s: &mut UiState<A>| {
             s.nav.settings_more = false;
             screens::navigate(s, Screen::Settings);
         }))
-        .child(screens::button("Keyboard shortcuts", "settings-more-shortcuts", |s: &mut UiState<A>, _| {
+        .child(crate::controls::menu_item::<A>("settings-more-shortcuts", "Keyboard shortcuts", None, false, |s: &mut UiState<A>| {
             s.nav.settings_more = false;
             s.nav.shortcuts_open = true;
         }))
-        .child(row().w_full().gap(6.0).center_y()
-            .child(crate::screens::button("−", "window-zoom-out", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, -1)).label("Zoom out"))
-            .child(text(format!("{}%", app_backend::appearance::zoom_percent(s.appearance.zoom))).font(ts(13.0, 400.0)).color(tone(active_palette().foreground)))
-            .child(crate::screens::button("+", "window-zoom-in", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, 1)).label("Zoom in"))
-            .child(crate::screens::button("Reset", "window-zoom-reset", |s: &mut UiState<A>, _| crate::shortcuts::zoom(s, 0)))))
+        .child(crate::controls::menu_item::<A>("window-zoom-out", "Zoom out", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, -1)))
+        .child(row().w_full().px(10.0).center_y()
+            .child(text(format!("{}%", app_backend::appearance::zoom_percent(s.appearance.zoom))).font(ts(13.0, 400.0)).color(tone(active_palette().foreground))))
+        .child(crate::controls::menu_item::<A>("window-zoom-in", "Zoom in", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, 1)))
+        .child(crate::controls::menu_item::<A>("window-zoom-reset", "Reset", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, 0))))
 }
 
 #[cfg(test)]
@@ -232,7 +253,7 @@ mod tests {
     use super::*;
     use crate::types::{Actions, SendTarget};
     use crate::ui::UiState;
-    use rune::{Env, Runtime};
+    use rune::{ElementInfo, Env, Runtime};
 
     struct Quiet;
 
@@ -245,9 +266,41 @@ mod tests {
     fn rail_lists_the_screens_in_order_and_counts_unread_chats_on_chat() {
         let items = rail_items(2, 3, 4, 1);
         let labels: Vec<_> = items.iter().map(|item| item.label).collect();
-        assert_eq!(labels, ["Activity", "Chat", "Teams", "Agents", "Calendar", "Calls", "Settings"]);
-        assert_eq!(items[1].badge, 3);
-        assert_eq!(items.iter().map(|item| item.badge).collect::<Vec<_>>(), [2, 3, 4, 1, 0, 0, 0]);
+        assert_eq!(labels, ["Calendar", "Activity", "Chat", "Teams", "Calls", "Agents", "Settings"]);
+        assert_eq!(items[2].badge, 3);
+        assert_eq!(items.iter().map(|item| item.badge).collect::<Vec<_>>(), [0, 2, 3, 4, 0, 1, 0]);
+    }
+
+    #[test]
+    fn rail_items_use_the_control_radius() {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(UiState::new(Quiet), crate::ui::view::<Quiet>, (1000.0, 700.0), env);
+        rt.frame(0.0);
+        let nav = rt.elements().into_iter()
+            .find(|element| element.key.as_deref() == Some("nav-Settings"))
+            .expect("settings rail item");
+        assert!((nav.radius - 6.0).abs() < 0.01, "nav item is a control: radius 6");
+    }
+
+    #[test]
+    fn title_bar_back_button_follows_the_rail() {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(UiState::new(Quiet), crate::ui::view::<Quiet>, (1000.0, 700.0), env);
+        rt.frame(0.0);
+        // A disabled button drops out of the tab order.
+        let disabled = |rt: &Runtime<UiState<Quiet>>, key: &str| !rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).expect("title bar button").focusable;
+        assert!(disabled(&rt, "history-back"), "nothing to go back to yet");
+        let (x, y) = rt.find("nav-Teams").expect("teams rail item");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(!disabled(&rt, "history-back"));
+        let (x, y) = rt.find("history-back").expect("back button");
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.screens.screen, Screen::Chat);
+        assert!(disabled(&rt, "history-back") && !disabled(&rt, "history-forward"));
     }
 
     #[test]
@@ -255,6 +308,72 @@ mod tests {
         assert_eq!(badge_text(0), None);
         assert_eq!(badge_text(7).as_deref(), Some("7"));
         assert_eq!(badge_text(100).as_deref(), Some("99+"));
+    }
+
+    fn menu_runtime() -> Runtime<UiState<Quiet>> {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(UiState::new(Quiet), crate::ui::view::<Quiet>, (1000.0, 700.0), env);
+        rt.update(|s, _| s.nav.settings_more = true);
+        rt.frame(0.0);
+        rt
+    }
+
+    fn by_key<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no element {key}"))
+    }
+
+    fn a11y_names(node: &serde_json::Value, out: &mut Vec<String>) {
+        if let Some(name) = node.get("name").and_then(|v| v.as_str()) {
+            out.push(name.to_owned());
+        }
+        for child in node.get("children").and_then(|c| c.as_array()).into_iter().flatten() {
+            a11y_names(child, out);
+        }
+    }
+
+    #[test]
+    fn settings_more_menu_contains_only_unfilled_menu_items() {
+        let rt = menu_runtime();
+        let elements = rt.elements();
+        let root = by_key(&elements, "settings-more-menu");
+        let prefix = format!("{}/", root.path);
+        let rows: Vec<_> = elements
+            .iter()
+            .filter(|e| e.path.starts_with(&prefix) && matches!(e.role, "button" | "menuitem"))
+            .collect();
+        assert!(!rows.is_empty(), "the menu should expose interactive rows");
+        for row in rows {
+            let key = row.key.as_deref().unwrap_or("?");
+            assert_eq!(row.role, "menuitem", "{key} is still a plain button");
+            assert!(row.label.is_some(), "{key} has no accessible name");
+            assert!(row.focusable, "{key} is not keyboard reachable");
+            assert_eq!(row.fill.a, 0.0, "{key} is filled at rest");
+            assert!((row.rect[3] - 32.0).abs() < 0.5, "{key} height {}", row.rect[3]);
+            assert!((row.radius - 6.0).abs() < 0.5, "{key} radius {}", row.radius);
+        }
+    }
+
+    #[test]
+    fn zoom_rows_name_their_actions_instead_of_bare_glyphs() {
+        let rt = menu_runtime();
+        let elements = rt.elements();
+        for (key, label) in [("window-zoom-out", "Zoom out"), ("window-zoom-in", "Zoom in"), ("window-zoom-reset", "Reset")] {
+            let e = by_key(&elements, key);
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert_eq!(e.label.as_deref(), Some(label), "{key}");
+            assert!(e.focusable, "{key}");
+        }
+        assert!(
+            elements.iter().all(|e| e.text.as_deref().map_or(true, |t| t != "−" && t != "+")),
+            "bare zoom glyphs must not be the only name in the tree"
+        );
+        let mut names = Vec::new();
+        a11y_names(&rt.accessibility_json(), &mut names);
+        assert!(names.iter().any(|name| name == "Zoom out"), "a11y names: {names:?}");
+        assert!(names.iter().any(|name| name == "Zoom in"), "a11y names: {names:?}");
     }
 
     #[test]

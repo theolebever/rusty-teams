@@ -10,15 +10,13 @@ use rune::*;
 use crate::ui::text;
 
 use crate::avatar::rgb;
-use crate::icons::sym;
+use crate::controls::{self, Size, Variant};
 use crate::media;
 use crate::types::Actions;
 use crate::ui::{INK, MUTED, UiState, active_target, c, select_thread, send, ts};
 
-const ICON: f32 = 20.0;
 const BUTTON: f32 = 32.0;
 const INSET: f32 = 6.0;
-const ACCENT: &str = "#5B5FC7";
 // Same interval as app-state::typing::OutgoingTyping.
 const TYPING_INTERVAL: Duration = Duration::from_secs(20);
 
@@ -158,7 +156,10 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
     let palette = active_palette();
     let target = active_target(s);
     let has_text = !s.composer.text.trim().is_empty();
-    let hover = rgb(palette.popup_hover);
+    // A GIF or an uploaded file is a message too: `ui::send` accepts those without typed text.
+    let can_send = has_text || !s.compose.gifs.is_empty() || target.as_ref().is_some_and(|target| {
+        !s.media.files(target).is_empty() && !s.media.is_uploading(target)
+    });
 
     let field = text_input(&s.composer, ts(14.0, 400.0))
         .key("composer")
@@ -179,54 +180,67 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .center_y()
         .child(auto_grow(field, 1, 8).grow(1.0).min_w(0.0));
 
-    let tool = |name: &'static str, key: &'static str| {
-        row()
-            .key(key)
-            .size(BUTTON, BUTTON)
-            .radius(8.0)
-            .center()
-            .hover(hover)
-            .child(sym(name, ICON).color(c(MUTED)))
-    };
-    let attach = target.as_ref().map(|_| tool("attach_file", "attach-file").on_press(|s: &mut UiState<A>| s.compose.cloud.menu = !s.compose.cloud.menu));
     let toolbar = row()
         .key("composer-tools")
         .gap(INSET)
         .center_y()
-        .children((!s.settings.prefs.markdown).then(|| tool("text_format", "composer-format").on_press(|s: &mut UiState<A>| s.format_open = !s.format_open)))
-        .child(tool("mood", "composer-emoji").on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
+        .children((!s.settings.prefs.markdown).then(|| {
+            controls::icon_button::<A>("composer-format", "text_format", "Formatting", s.format_open, |s: &mut UiState<A>, _| {
+                s.format_open = !s.format_open;
+            })
+        }))
+        .child(controls::icon_button::<A>("composer-emoji", "mood", "Emoji", s.emoji_open, |s: &mut UiState<A>, tx: &mut Tx| {
             s.emoji_open = !s.emoji_open;
             s.compose.gif.open = false;
             if s.emoji_open { tx.focus("emoji-search", false); }
         }))
-        .child(row().key("composer-gif").size(BUTTON, BUTTON).radius(8.0).center().hover(hover)
-            .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
+        // No GIF glyph exists: the shared 32x32 text button is this toolbar's coherent chip, and
+        // unlike `chip` it can still hand `Tx` to the picker to focus its search field.
+        .child(controls::button::<A>(
+            "composer-gif",
+            "GIF",
+            if s.compose.gif.open { Variant::Secondary } else { Variant::Menu },
+            Size::Icon,
+            |s: &mut UiState<A>, tx: &mut Tx| {
                 crate::gif_picker::toggle(s);
                 if s.compose.gif.open { tx.focus("gif-search", false); }
+            },
+        ))
+        .children(target.as_ref().map(|_| {
+            controls::icon_button::<A>("attach-file", "attach_file", "Attach file", s.compose.cloud.menu, |s: &mut UiState<A>, _| {
+                s.compose.cloud.menu = !s.compose.cloud.menu;
             })
-            .child(text("GIF").font(ts(12.0, 600.0)).color(c(MUTED))))
-        .children(attach)
-        .child(tool("auto_fix_high", "composer-ai").on_press(|s: &mut UiState<A>| {
+        }))
+        .child(controls::icon_button::<A>("composer-ai", "auto_fix_high", "Ask AI", false, |s: &mut UiState<A>, _| {
             s.agent.prompt = TextEdit::new(&s.composer.text);
             s.screens.screen = crate::screens::Screen::Agents;
         }))
-        .children(target.as_ref().map(|target| tool("add", "composer-add").on_press_tx(media::open_picker::<A>(target))));
+        .children(target.as_ref().map(|target| {
+            controls::icon_button::<A>("composer-add", "add", "Add attachment", false, media::open_picker::<A>(target))
+        }));
 
-    let send_button = row()
-        .key("send")
-        .size(BUTTON, BUTTON)
-        .radius(8.0)
-        .center()
-        .hover(hover)
-        .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
+    // Keep the send button in the tab order even while it is quiet: screen readers can still find
+    // it, while the dimmed, disabled look says why it cannot be pressed.
+    let mut send_button = controls::icon_button_with_ink::<A>(
+        "send",
+        "send",
+        "Send message",
+        false,
+        if can_send { rgb(palette.on_accent) } else { c(MUTED) },
+        |s: &mut UiState<A>, tx: &mut Tx| {
             send(s);
             tx.focus("composer", false);
-        })
-        .child(sym("send", ICON).color(if has_text { c(ACCENT) } else { c(MUTED) }));
+        },
+    )
+    .fill(if can_send { rgb(palette.accent) } else { Color::TRANSPARENT })
+    .hover(if can_send { rgb(palette.accent_strong) } else { rgb(palette.row_hover) });
+    if !can_send {
+        send_button = send_button.opacity(0.4).disabled(true).focusable(true).on_press(|_: &mut UiState<A>| {});
+    }
 
     let actions = row().key("composer-actions").gap(INSET).center_y()
         .child(toolbar).child(el().grow(1.0))
-        .child(crate::screens::button("Schedule", "composer-schedule", |s: &mut UiState<A>, _| crate::schedule::open(s)))
+        .child(controls::button::<A>("composer-schedule", "Schedule", Variant::Secondary, Size::Md, |s: &mut UiState<A>, _| crate::schedule::open(s)))
         .child(send_button);
     let contents = if stacked {
         col().w_full().gap(INSET).child(field).child(actions.w_full())
@@ -255,8 +269,12 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .children((s.format_open && !s.settings.prefs.markdown).then(|| {
             let mut choices = row().key("delivery-importance").gap(6.0);
             for (label, importance) in [("Standard", store::MessageImportance::Normal), ("Important", store::MessageImportance::High), ("Urgent", store::MessageImportance::Urgent)] {
-                choices = choices.child(crate::screens::button(label, &format!("importance-{label}"), move |s: &mut UiState<A>, _| s.compose.importance = importance)
-                    .opacity(if s.compose.importance == importance { 1.0 } else { 0.5 }));
+                choices = choices.child(controls::chip::<A>(
+                    &format!("importance-{label}"),
+                    label,
+                    s.compose.importance == importance,
+                    move |s: &mut UiState<A>| s.compose.importance = importance,
+                ));
             }
             choices
         }))
@@ -272,23 +290,23 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
             for (label, before, after) in [("Bold", "**", "**"), ("Italic", "*", "*"), ("Underline", "<u>", "</u>"), ("Strike", "~~", "~~"), ("Code", "`", "`"), ("List", "\n- ", ""),
                 ("Numbered list", "\n1. ", ""), ("Heading", "\n# ", ""), ("Quote", "\n> ", ""), ("Link", "[", "](https://example.com)"),
                 ("Code block", "\n```rust\n", "\n```\n"), ("Table", "\n| Column 1 | Column 2 |\n| --- | --- |\n| ", " | Value |\n")] {
-                tools = tools.child(crate::screens::button(label, &format!("format-{label}"), move |s: &mut UiState<A>, tx| {
+                tools = tools.child(controls::button::<A>(&format!("format-{label}"), label, Variant::Menu, Size::Sm, move |s: &mut UiState<A>, tx| {
                     format_selection(&mut s.composer, before, after); tx.focus("composer", false);
                 }));
             }
             for (label, before, after) in [("Superscript", "<sup>", "</sup>"), ("Subscript", "<sub>", "</sub>"), ("Small text", "<span style=\"font-size:xx-small\">", "</span>"), ("Large text", "<span style=\"font-size:x-large\">", "</span>"), ("Indent", "<div style=\"margin-left:40px\">", "</div>"), ("Horizontal rule", "\n<hr>", "\n")] {
-                tools = tools.child(crate::screens::button(label, &format!("format-{label}"), move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, before, after); tx.focus("composer", false); }));
+                tools = tools.child(controls::button::<A>(&format!("format-{label}"), label, Variant::Menu, Size::Sm, move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, before, after); tx.focus("composer", false); }));
             }
             for (name, color) in crate::formatting::COLORS {
                 for (label, property) in [("Text", "color"), ("Highlight", "background-color")] {
                     let tag = format!("<span style=\"{property}:{color}\">");
-                    tools = tools.child(crate::screens::button(&format!("{label} {name}"), &format!("format-{label}-{name}"), move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, &tag, "</span>"); tx.focus("composer", false); }));
+                    tools = tools.child(controls::button::<A>(&format!("format-{label}-{name}"), &format!("{label} {name}"), Variant::Menu, Size::Sm, move |s: &mut UiState<A>, tx| { format_selection(&mut s.composer, &tag, "</span>"); tx.focus("composer", false); }));
                 }
             }
-            tools = tools.child(crate::screens::button("Outdent", "format-outdent", |s: &mut UiState<A>, tx| { crate::formatting::outdent(&mut s.composer); tx.focus("composer", false); }))
-                .child(crate::screens::button("Clear formatting", "format-clear", |s: &mut UiState<A>, tx| { crate::formatting::clear(&mut s.composer); tx.focus("composer", false); }));
+            tools = tools.child(controls::button::<A>("format-outdent", "Outdent", Variant::Menu, Size::Sm, |s: &mut UiState<A>, tx| { crate::formatting::outdent(&mut s.composer); tx.focus("composer", false); }))
+                .child(controls::button::<A>("format-clear", "Clear formatting", Variant::Menu, Size::Sm, |s: &mut UiState<A>, tx| { crate::formatting::clear(&mut s.composer); tx.focus("composer", false); }));
             for action in teams_core::TableEdit::INSERTS.into_iter().chain(teams_core::TableEdit::DELETES) {
-                tools = tools.child(crate::screens::button(action.label(), &format!("format-table-{action:?}"), move |s: &mut UiState<A>, tx| {
+                tools = tools.child(controls::button::<A>(&format!("format-table-{action:?}"), action.label(), Variant::Menu, Size::Sm, move |s: &mut UiState<A>, tx| {
                     if !crate::formatting::table(&mut s.composer, action) { s.toast.show("Place the cursor inside a table first"); }
                     tx.focus("composer", false);
                 }));
@@ -326,7 +344,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
 mod tests {
     use super::*;
     use crate::types::{ChatRow, SendTarget, Update};
-    use rune::{Env, Runtime};
+    use rune::{Cx, ElementInfo, Env, Runtime};
 
     /// Records what the composer asks of the bridge.
     #[derive(Default)]
@@ -746,5 +764,108 @@ mod tests {
         assert_eq!(rt.state.compose.importance, store::MessageImportance::High);
         assert_eq!(rt.state.compose.subject.text, "Subject");
         assert_eq!(rt.state.compose.headline.text, "Headline");
+    }
+
+    /// A bare composer (no surrounding screen) so the buttons can be inspected without a chat list.
+    fn composer_view(s: &UiState<Quiet>, _cx: &mut Cx<UiState<Quiet>>) -> El {
+        composer::<Quiet>(s, false)
+    }
+
+    fn composer_fixture(text: &str, format_open: bool, importance: store::MessageImportance) -> Runtime<UiState<Quiet>> {
+        let mut state = UiState::new(Quiet::default());
+        state.selected = Some("b".into());
+        state.composer = TextEdit::new(text);
+        state.format_open = format_open;
+        state.compose.importance = importance;
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(
+            state,
+            composer_view as fn(&UiState<Quiet>, &mut Cx<UiState<Quiet>>) -> El,
+            (1000.0, 700.0),
+            env,
+        );
+        rt.frame(0.0);
+        rt
+    }
+
+    fn element<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no element {key}"))
+    }
+
+    #[test]
+    fn send_button_is_accessible_and_switches_from_quiet_to_accent() {
+        let empty = composer_fixture("", false, store::MessageImportance::Normal);
+        let typed = composer_fixture("hello", false, store::MessageImportance::Normal);
+        let empty_elements = empty.elements();
+        let typed_elements = typed.elements();
+        let quiet = element(&empty_elements, "send");
+        let accent = element(&typed_elements, "send");
+        for (e, state) in [(quiet, "empty"), (accent, "typed")] {
+            assert_eq!(e.role, "button", "{state}");
+            assert_eq!(e.label.as_deref(), Some("Send message"), "{state}");
+            assert!(e.focusable, "send stays in the tab order ({state})");
+        }
+        assert_eq!(accent.fill, rune::color::hex(&format!("#{:06X}", active_palette().accent)).unwrap());
+        assert_eq!(quiet.fill.a, 0.0, "no accent fill without a draft");
+        assert!(quiet.opacity < 1.0, "the empty button is dimmed");
+        assert_ne!(quiet.fill, accent.fill, "the fill changes with the draft");
+    }
+
+    #[test]
+    fn every_composer_tool_has_an_accessible_name() {
+        let rt = composer_fixture("", false, store::MessageImportance::Normal);
+        let elements = rt.elements();
+        let tools: Vec<_> = elements
+            .iter()
+            .filter(|e| e.path.contains("/composer-tools/") && e.role == "button")
+            .collect();
+        assert!(!tools.is_empty(), "the toolbar has buttons");
+        for e in &tools {
+            assert!(e.label.as_deref().is_some_and(|l| !l.is_empty()), "unnamed tool at {}", e.path);
+            assert!(e.focusable, "{} is keyboard reachable", e.path);
+        }
+        let mut names: Vec<_> = tools.iter().map(|e| e.label.as_deref().unwrap_or("")).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["Add attachment", "Ask AI", "Attach file", "Emoji", "Formatting", "GIF"],
+            "one explicit name per icon"
+        );
+    }
+
+    #[test]
+    fn importance_is_chosen_by_accent_fill_not_by_dimming_the_others() {
+        let rt = composer_fixture("", true, store::MessageImportance::High);
+        let elements = rt.elements();
+        let accent = rune::color::hex(&format!("#{:06X}", active_palette().accent)).unwrap();
+        let chosen = element(&elements, "importance-Important");
+        let others = ["importance-Standard", "importance-Urgent"].map(|key| element(&elements, key));
+        assert_eq!(chosen.label.as_deref(), Some("Important"));
+        assert_eq!(chosen.fill, accent, "the selected importance has an accent fill");
+        assert!(chosen.focusable);
+        for other in others {
+            assert_ne!(other.fill, accent, "{} is not painted as selected", other.key.as_deref().unwrap());
+            assert!((other.opacity - 1.0).abs() < 0.01, "no 0.5 opacity trick on {}", other.key.as_deref().unwrap());
+        }
+    }
+
+    #[test]
+    fn format_tools_share_the_small_menu_button_geometry() {
+        let mut rt = composer_fixture("", true, store::MessageImportance::Normal);
+        let elements = rt.elements();
+        let bold = element(&elements, "format-Bold");
+        let clear = element(&elements, "format-clear");
+        for e in [bold, clear] {
+            assert_eq!(e.role, "button");
+            assert!(e.label.as_deref().is_some_and(|l| !l.is_empty()));
+            assert!(e.focusable);
+            assert!((e.rect[3] - 24.0).abs() < 0.5, "Sm height, got {}", e.rect[3]);
+            assert_eq!(e.fill.a, 0.0, "Menu has no fill at rest");
+        }
+        click(&mut rt, "format-Bold");
+        assert_eq!(rt.state.composer.text, "**text**", "the tools still format");
     }
 }

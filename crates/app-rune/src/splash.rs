@@ -61,7 +61,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .children((s.splash_stage >= 2).then(|| text("The first start downloads your chats, it can take a minute.")
             .key("splash-hint").font(ts(12.0, 400.0)).color(rgb(palette.text_faint)).mt(18.0)
             .sequence(Sequence::new(FADE))))
-        .children((s.splash_stage >= 1).then(|| crate::screens::button("Open app", "startup-open", |s: &mut UiState<A>, _| s.starting = false)
+        .children((s.splash_stage >= 1).then(|| crate::controls::button::<A>("startup-open", "Open app", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, _| s.starting = false)
             .mt(18.0).sequence(Sequence::new(FADE))))
 }
 

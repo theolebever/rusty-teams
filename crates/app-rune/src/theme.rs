@@ -109,12 +109,63 @@ mod tests {
     fn every_light_literal_maps_to_the_palette_in_dark() {
         schemes::set_thread_scheme(Some("rusty-teams"));
         schemes::set_thread_shade(Some(Shade::Dark));
+        // UI control literals used in the views outside the deliberately dark call scene.
+        // `#FFF4CE` is the find-match highlight in `find::mark`; it used to leak a fixed light yellow.
         for hex in [
             "#FFFFFF", "#F5F5F5", "#EBEBEB", "#E0E0E0", "#242424", "#616161", "#5B5FC7", "#E8EBFA",
-            "#DADDF5", "#C4314B",
+            "#DADDF5", "#C4314B", "#FFF4CE",
         ] {
             let raw = rune::color::hex(hex).expect("valid literal");
             assert_ne!(crate::settings::color(hex), raw, "{hex} leaks the light theme");
         }
+    }
+
+    /// The find highlight is a translucent wash, not an ink colour. `palette.selection` is the
+    /// role for a highlighted row: in dark it is a 40%-alpha warm tint over the dark row surface,
+    /// in light a 25%-alpha tint over the light surface, so the existing foreground stays legible.
+    /// Its palette value is `RRGGBBAA`, which `rune::color::hex` accepts as an 8-digit hex literal.
+    #[test]
+    fn find_highlight_uses_the_palette_selection_role() {
+        schemes::set_thread_scheme(Some("rusty-teams"));
+        schemes::set_thread_shade(Some(Shade::Dark));
+        let raw = rune::color::hex("#FFF4CE").expect("valid literal");
+        let mapped = crate::settings::color("#FFF4CE");
+        assert_ne!(mapped, raw, "the find highlight leaks a fixed light yellow");
+
+        let palette = schemes::active_palette();
+        let selection = rune::color::hex(&format!("#{:06X}", palette.selection)).expect("8-digit palette literal");
+        assert_eq!(mapped, selection, "the highlight must follow the palette's selection role");
+
+        // Also check the other shades: the mapping must never fall back to the hard-coded yellow.
+        schemes::set_thread_shade(Some(Shade::Light));
+        assert_ne!(crate::settings::color("#FFF4CE"), raw);
+        schemes::set_thread_shade(Some(Shade::HighContrast));
+        assert_ne!(crate::settings::color("#FFF4CE"), raw);
+    }
+
+    /// The 8-digit palette values are `RRGGBBAA`, and `rune::color::hex` decodes them with a real
+    /// alpha channel (rather than rejecting them), which is why `selection` can be used directly.
+    #[test]
+    fn rune_hex_decodes_the_palette_selection_literal() {
+        schemes::set_thread_scheme(Some("rusty-teams"));
+        schemes::set_thread_shade(Some(Shade::Dark));
+        let literal = format!("#{:06X}", schemes::active_palette().selection);
+        let decoded = rune::color::hex(&literal).expect("rune accepts 8-digit #rrggbbaa");
+        assert!(decoded.a < 1.0, "selection is intentionally translucent");
+    }
+
+    /// A secondary button's resting fill is a background, not the colour used for its hover state.
+    /// `#F5F5F5` is the light-theme background literal; in dark it must resolve to `background`
+    /// and not to `popup_hover` (which would make the button look already hovered).
+    #[test]
+    fn secondary_button_rest_background_is_not_the_hover_colour() {
+        schemes::set_thread_scheme(Some("rusty-teams"));
+        schemes::set_thread_shade(Some(Shade::Dark));
+        let palette = schemes::active_palette();
+        let background = rune::color::hex(&format!("#{:06X}", palette.background)).expect("palette literal");
+        let hover = rune::color::hex(&format!("#{:06X}", palette.popup_hover)).expect("palette literal");
+        assert_eq!(crate::settings::color("#F5F5F5"), background);
+        assert_ne!(background, hover, "dark background and hover must be distinguishable");
+        assert_ne!(crate::settings::color("#F5F5F5"), hover);
     }
 }
