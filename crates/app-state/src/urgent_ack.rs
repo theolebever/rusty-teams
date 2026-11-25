@@ -9,6 +9,8 @@ use crate::notify::urgent_repeat::{REPEAT_INTERVAL_MINUTES, REPEAT_WINDOW_MINUTE
 use crate::runtime;
 
 const RECENT_MESSAGES: usize = 30;
+/// Only acks inside the repeat window matter; the set must not grow for the whole session.
+const MAX_ACKED_URGENT: usize = 2_000;
 
 /// Teams acknowledges an urgent message from someone else once it is shown; after the repeat window there is nothing left to stop.
 pub fn urgent_to_ack(
@@ -48,6 +50,9 @@ impl AppState {
         let message_ids = urgent_to_ack(&records, &me.user_id, Utc::now(), &self.acked_urgent);
         if message_ids.is_empty() {
             return;
+        }
+        if self.acked_urgent.len() >= MAX_ACKED_URGENT {
+            self.acked_urgent.clear();
         }
         self.acked_urgent.extend(message_ids.iter().cloned());
         let chat_id = chat_id.to_owned();

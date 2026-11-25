@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -134,6 +134,7 @@ pub struct Directory {
     pub unread_counts: HashMap<String, u32>,
     pub unread_importance: HashMap<String, MessageImportance>,
     pub avatars: HashMap<String, AvatarState>,
+    pub(crate) avatar_order: VecDeque<String>,
     pub presence: HashMap<String, (PresenceKind, Instant)>,
     pub activity: HashMap<String, Activity>,
     pub presence_cached: HashMap<String, PresenceKind>,
@@ -148,6 +149,9 @@ pub struct Directory {
 }
 
 const IMAGE_RETRY_AFTER: Duration = Duration::from_secs(60);
+/// Avatar bytes are reloaded from the disk cache on the next `request_avatars`, so the in-memory
+/// copy only needs to hold the people seen recently.
+const MAX_CACHED_AVATARS: usize = 512;
 
 impl Directory {
     pub fn is_external(&self, user_id: &str) -> bool {
@@ -220,16 +224,32 @@ impl Directory {
         }
     }
 
-    pub fn mark_avatars_pending(&mut self, user_ids: &[String]) {
-        for user_id in user_ids {
-            self.avatars
-                .entry(user_id.clone())
-                .or_insert(AvatarState::Pending);
+    fn evict_old_avatars(&mut self) {
+        while self.avatar_order.len() > MAX_CACHED_AVATARS
+            && let Some(oldest) = self.avatar_order.pop_front()
+        {
+            self.avatars.remove(&oldest);
         }
     }
 
+    pub fn mark_avatars_pending(&mut self, user_ids: &[String]) {
+        for user_id in user_ids {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.avatars.entry(user_id.clone())
+            {
+                entry.insert(AvatarState::Pending);
+                self.avatar_order.push_back(user_id.clone());
+            }
+        }
+        self.evict_old_avatars();
+    }
+
     pub fn set_avatar(&mut self, user_id: &str, state: AvatarState) {
+        if !self.avatars.contains_key(user_id) {
+            self.avatar_order.push_back(user_id.to_owned());
+        }
         self.avatars.insert(user_id.to_owned(), state);
+        self.evict_old_avatars();
     }
 
     pub fn pending_avatars(&self) -> Vec<String> {
@@ -744,6 +764,18 @@ pub fn remove_from_folder(engine: &Arc<Engine>, conversation_id: &str, folder_id
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatars_in_memory_are_bounded() {
+        let mut directory = Directory::default();
+        directory.set_avatar("first", AvatarState::Missing);
+        for index in 0..MAX_CACHED_AVATARS {
+            directory.set_avatar(&format!("user{index}"), AvatarState::Missing);
+        }
+        assert_eq!(directory.avatars.len(), MAX_CACHED_AVATARS);
+        assert!(directory.avatar("first").is_none());
+        assert!(directory.avatar("user0").is_some());
+    }
 
     #[test]
     fn out_of_office_shows_over_the_availability() {
