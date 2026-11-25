@@ -80,6 +80,14 @@ pub fn open(s: &mut UiState<Bridge>, id: String) {
     }
 }
 
+/// Drops handles of windows the user closed. A retained handle keeps the whole detached state —
+/// messages, media, drafts — alive and keeps receiving every backend update.
+pub fn prune(s: &mut UiState<Bridge>) {
+    for id in s.actions.take_closed_chat_windows() {
+        s.chat_windows.remove(&id);
+    }
+}
+
 pub fn forward(s: &UiState<Bridge>, update: &Update) {
     if matches!(
         update,

@@ -479,6 +479,12 @@ impl<A: Actions> UiState<A> {
                     }
                 }
                 if self.call_window.is_none() && matches!(&update, calling::CallUpdate::State(calling::CallState::Connecting)) { self.screens.screen = crate::screens::Screen::Calls; }
+                if let calling::CallUpdate::Roster(roster) = &update {
+                    let ids = roster.iter()
+                        .map(|person| person.mri.strip_prefix("8:orgid:").unwrap_or(&person.mri).to_owned())
+                        .collect();
+                    self.actions.warm_avatars(ids);
+                }
                 self.calls.apply(update);
             }
             Update::CallIntro(intro) => self.calls.start(intro),
@@ -490,7 +496,7 @@ impl<A: Actions> UiState<A> {
             Update::VideoReady => self.calls.apply_video(self.actions.take_video()),
             Update::Image { key, bytes } => self.media.loaded(key, bytes),
             Update::ImagePreview { key, bytes, preview } => self.media.loaded_preview(key, bytes, preview),
-            Update::ImageFailed { key, error } => { self.media.errors.insert(key, error); }
+            Update::ImageFailed { key, error } => { self.media.failed(key, error); }
             Update::Attachment { target, path, result } => {
                 if let Some(orphan) = self.media.uploaded(target, path, result) { self.actions.discard_attachment(orphan); }
             }
@@ -526,11 +532,7 @@ impl<A: Actions> UiState<A> {
                 rows,
             } => {
                 if self.selected.as_deref() == Some(conversation_id.as_str()) {
-                    for image in rows.iter().flat_map(|row| row.media.images.iter().cloned().chain(row.media.rich.images())) {
-                        if !self.media.images.contains_key(image.key()) && !self.media.errors.contains_key(image.key()) {
-                            self.actions.load_image(image.clone());
-                        }
-                    }
+                    // Images load as their message scrolls into view (`media::watch`), not all at once.
                     let rows = crate::teams::group_replies(rows);
                     self.appearing = arrived(&self.messages, &rows);
                     self.messages = rows;
@@ -749,6 +751,9 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
             .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
             .child(crate::toast::reconnect(s)));
     }
+    // The pre-join screen owns the whole window: a leftover reminder or banner from the main
+    // window would otherwise be painted over it at the top edge.
+    let prejoin = s.calls.prejoin_open && s.screens.screen == crate::screens::Screen::Calls;
     let root = col().key("root");
     // The window's content fades up once, as it replaces the splash.
     let root = if s.from_splash { root.sequence(Sequence::new(crate::splash::REVEAL)) } else { root };
@@ -758,8 +763,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .motion(Spring::NONE)
         .fill(c(WHITE))
         .child(crate::view_chrome::title_bar(s, cx.chrome_insets().trailing / zoom))
-        .children(crate::toast::banner(s))
-        .children(crate::toast::session_expired(s))
+        .children(if prejoin { None } else { crate::toast::banner(s) })
+        .children(if prejoin { None } else { crate::toast::session_expired(s) })
         .child(
             row()
                 .grow(1.0)
@@ -781,7 +786,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, cx: &mut Cx<UiState<A>>) -> El
         .children(crate::view_chrome::more_menu(s))
         .children(crate::view_chatlist::more_menu(s))
         .children(crate::team_menu::layer(s))
-        .children(crate::screens::overlays(s))
+        .children(if prejoin { Vec::new() } else { crate::screens::overlays(s) })
         .children(crate::view_header::meet_options(s))
         .children(crate::image_viewer::overlay(s))
         .child(crate::chat_menu::overlay(s))

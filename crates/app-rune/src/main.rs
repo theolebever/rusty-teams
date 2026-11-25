@@ -14,6 +14,7 @@ mod avatar;
 mod bridge;
 mod cloud_picker;
 mod composed;
+mod controls;
 mod formatting;
 mod outbox;
 mod schedule;
@@ -135,6 +136,7 @@ fn poll(s: &mut UiState<Bridge>, _now: f64, tx: &mut Tx) -> bool {
     let chat = rune_notify::app_focused().then(|| s.foreground_chat()).flatten();
     s.actions.set_foreground(chat, s.calls.state.as_ref().is_some_and(calling::CallState::is_active));
     view_composer::persist_draft(s);
+    chat_window::prune(s);
     let updates = s.actions.poll();
     // Arrivals animate in the one commit that adds them (`view_messages::snappy`).
     s.appearing.clear();

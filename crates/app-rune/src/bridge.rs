@@ -56,10 +56,15 @@ pub(crate) struct Shared {
     /// The chat shown beside the call in the call window, followed like the open one.
     call_chat: Mutex<Option<String>>,
     detached_chats: Mutex<std::collections::HashSet<String>>,
+    /// Chats whose detached window closed; the main view drops their retained handles next frame.
+    closed_chat_windows: Mutex<Vec<String>>,
     open_generation: AtomicU64,
     live_retry: Mutex<Option<Arc<tokio::sync::Notify>>>,
     calendar_nudge: Mutex<Option<tokio_mpsc::UnboundedSender<()>>>,
     updates: Sender<Update>,
+    /// The last sidebar snapshot of each kind sent, so an identical republish (presence
+    /// changes reload the whole sidebar) does not rebuild the view.
+    last_snapshots: Mutex<std::collections::HashMap<std::mem::Discriminant<Update>, Update>>,
     wake: Box<dyn Fn() + Send + Sync>,
     pub(crate) agent_stop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     pub(crate) store: Arc<Store>,
@@ -77,6 +82,12 @@ impl Shared {
             Update::Status(status) if self.read_only => Update::Status(format!("{status} · Read-only")),
             update => update,
         };
+        if is_snapshot(&update) {
+            let mut last = self.last_snapshots.lock().unwrap_or_else(PoisonError::into_inner);
+            let kind = std::mem::discriminant(&update);
+            if last.get(&kind) == Some(&update) { return; }
+            last.insert(kind, update.clone());
+        }
         let _ = self.updates.send(update);
         (self.wake)();
     }
@@ -248,11 +259,11 @@ impl Shared {
             ids.retain(|id| requested.insert(id.clone()));
         }
         if ids.is_empty() { return; }
-        for id in &ids {
-            if let Some(photo) = engine.avatar(id) {
-                self.publish(Update::Image { key: format!("avatar:{id}"), bytes: photo.bytes });
-            }
-        }
+        // Converted first, then sent together, so they land in one `poll` and one rebuild.
+        let updates: Vec<Update> = ids.iter()
+            .filter_map(|id| engine.avatar(id).map(|photo| avatar_update(format!("avatar:{id}"), photo.bytes)))
+            .collect();
+        for update in updates { self.publish(update); }
         let requested = self.avatars_requested.clone();
         if let Some(engine) = self.engine() {
             app_backend::runtime::handle().spawn(async move {
@@ -324,10 +335,12 @@ impl Bridge {
             open: Mutex::new(None),
             call_chat: Mutex::new(None),
             detached_chats: Mutex::default(),
+            closed_chat_windows: Mutex::default(),
             open_generation: AtomicU64::new(0),
             live_retry: Mutex::new(None),
             calendar_nudge: Mutex::new(None),
             updates,
+            last_snapshots: Mutex::default(),
             wake: Box::new(wake),
             store: store.clone(),
             folder,
@@ -380,7 +393,14 @@ impl Bridge {
     }
 
     pub(crate) fn close_chat_window(&self) {
-        if let Some(id) = &self.detached_chat { self.shared.detached_chats.lock().unwrap_or_else(PoisonError::into_inner).remove(id); }
+        if let Some(id) = &self.detached_chat {
+            self.shared.detached_chats.lock().unwrap_or_else(PoisonError::into_inner).remove(id);
+            self.shared.closed_chat_windows.lock().unwrap_or_else(PoisonError::into_inner).push(id.clone());
+        }
+    }
+
+    pub(crate) fn take_closed_chat_windows(&self) -> Vec<String> {
+        std::mem::take(&mut *self.shared.closed_chat_windows.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Drains pending updates without blocking. Called by the UI each frame.
@@ -418,6 +438,7 @@ impl Actions for Bridge {
     fn accounts(&self) -> Vec<accounts::Account> { accounts::Accounts::load(&accounts::default_root()).list }
     fn current_folder(&self) -> Option<PathBuf> { Some(self.shared.folder.clone()) }
     fn sign_in(&self) {
+        self.shared.last_snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
         let shared = self.shared.clone();
         app_backend::runtime::handle().spawn(async move {
             if let Err(error) = shared.transport.sign_in(session::App::Teams).await {
@@ -1137,6 +1158,11 @@ impl Actions for Bridge {
     }
     fn decline_call(&self, ring_id: u64) { self.shared.call_control.decline(ring_id); }
     fn load_image(&self, image: teams_core::ImageRef) { crate::media::load_image(self.shared.clone(), image); }
+    fn warm_avatars(&self, ids: Vec<String>) {
+        if let Some(engine) = self.shared.engine() {
+            self.shared.publish_avatars(&engine, ids);
+        }
+    }
     fn download_file(&self, url: String, path: PathBuf) { crate::media::download_file(self.shared.clone(), url, path); }
     fn join_call(&self, url: &str, video: bool) { self.shared.call_control.join(url, video); }
     fn calling_ready(&self) -> bool { self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).is_some() }
@@ -1623,9 +1649,10 @@ async fn forward(shared: Arc<Shared>, mut events: tokio_mpsc::UnboundedReceiver<
                 };
                 match event {
                     CoreEvent::AvatarsChanged { user_ids } => {
-                        for id in user_ids {
-                            if let Some(photo) = engine.avatar(&id) { shared.publish(Update::Image { key: format!("avatar:{id}"), bytes: photo.bytes }); }
-                        }
+                        let updates: Vec<Update> = user_ids.iter()
+                            .filter_map(|id| engine.avatar(id).map(|photo| avatar_update(format!("avatar:{id}"), photo.bytes)))
+                            .collect();
+                        for update in updates { shared.publish(update); }
                     }
                     CoreEvent::ImagesChanged { keys } => {
                         for key in keys {
@@ -1831,6 +1858,27 @@ pub fn format_when(at: DateTime<Utc>, now: DateTime<Local>, time_on_other_days: 
     }
 }
 
+/// Sidebar updates that replace their whole slice of the view, so an identical one changes nothing.
+fn is_snapshot(update: &Update) -> bool {
+    matches!(update, Update::Chats(_) | Update::Details(_) | Update::Teams(_) | Update::TeamMetadata { .. }
+        | Update::SectionSettings(_) | Update::Folders(_) | Update::ChatPaging { .. })
+}
+
+/// Decoding every avatar at its 240 px source with mips cost about 0.6 MB each, a gigabyte for
+/// a large tenant. 128 px keeps call tiles (up to 96 pt) acceptable at about 90 KB each.
+/// Falls back to the bytes for formats this can't decode (a bot's SVG icon).
+const AVATAR_PX: u32 = 128;
+
+fn avatar_update(key: String, bytes: Vec<u8>) -> Update {
+    let Ok(image) = ::image::load_from_memory(&bytes) else { return Update::Image { key, bytes } };
+    // The centre square: avatars draw in a circle.
+    let side = image.width().min(image.height());
+    let square = image.crop_imm((image.width() - side) / 2, (image.height() - side) / 2, side, side);
+    let small = if side > AVATAR_PX { square.thumbnail(AVATAR_PX, AVATAR_PX) } else { square }.into_rgba8();
+    let (width, height) = small.dimensions();
+    Update::ImagePreview { key, bytes: Vec::new(), preview: Some((width, height, small.into_raw())) }
+}
+
 /// HTML body to plain text: tags dropped, entities decoded, block breaks as newlines,
 /// whitespace collapsed per line, empty lines dropped.
 pub fn html_to_text(html: &str) -> String {
@@ -1964,6 +2012,16 @@ mod tests {
         let rows = message_rows(&[record], "me", Local::now());
         assert!(!rows[0].forwarded);
         assert_eq!(rows[0].importance, store::MessageImportance::Normal);
+    }
+
+    #[test]
+    fn avatars_shrink_to_a_square_of_avatar_px() {
+        let mut png = Vec::new();
+        ::image::DynamicImage::new_rgba8(300, 240).write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png).unwrap();
+        let Update::ImagePreview { preview: Some((w, h, rgba)), bytes, .. } = avatar_update("avatar:a".into(), png) else { panic!("not shrunk") };
+        assert_eq!((w, h, rgba.len()), (AVATAR_PX, AVATAR_PX, (AVATAR_PX * AVATAR_PX * 4) as usize));
+        assert!(bytes.is_empty(), "the source is not kept");
+        assert!(matches!(avatar_update("avatar:b".into(), b"<svg/>".to_vec()), Update::Image { .. }));
     }
 
     #[test]
