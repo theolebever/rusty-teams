@@ -332,6 +332,8 @@ pub trait Actions {
     fn save_agent_settings(&self, _settings: agents::AgentSettings) {}
     fn rename_chat(&self, _id: &str, _title: &str) {}
     fn meet_now(&self, _conversation_id: &str) {}
+    /// Rings a chat's members, with video or audio only (GPUI's `start_chat_call`).
+    fn start_chat_call(&self, _conversation_id: &str, _video: bool) {}
     /// Shows the cached messages at once, then fetches newer ones.
     fn open(&self, conversation_id: &str);
     fn send(&self, target: SendTarget, text: String, files: Vec<teams_core::FileReference>);

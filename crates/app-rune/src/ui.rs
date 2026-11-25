@@ -1111,6 +1111,8 @@ mod tests {
             }]),
         );
         assert!(rt.find("channel-channel").is_none());
+        // Teams live on their own rail screen, not in the chat list.
+        click(&mut rt, "nav-Teams");
         click(&mut rt, "team-team");
         click(&mut rt, "channel-channel");
         assert_eq!(rt.state.selected.as_deref(), Some("channel"));
@@ -1348,6 +1350,7 @@ mod tests {
     fn failed_thread_reply_does_not_replace_channel_post_draft() {
         let mut rt = rt();
         apply(&mut rt, Update::Teams(vec![TeamRow { id: "team".into(), name: "Team".into(), channels: vec![ChannelRow { hidden: false, id: "channel".into(), name: "General".into(), unread: false }] }]));
+        click(&mut rt, "nav-Teams");
         click(&mut rt, "team-team");
         click(&mut rt, "channel-channel");
         apply(&mut rt, Update::Messages { conversation_id: "channel".into(), rows: vec![msg("root", "Ada", "post", false)] });

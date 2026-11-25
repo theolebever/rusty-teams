@@ -66,7 +66,6 @@ enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
-    FocusSearch,
     FilterChats,
     Switcher,
     NewChat,
@@ -107,8 +106,8 @@ const SHORTCUTS: &[Shortcut] = &[
     sc(Group::General, "Zoom in", "mod+equal", Action::ZoomIn),
     sc(Group::General, "Zoom out", "mod+minus", Action::ZoomOut),
     sc(Group::General, "Reset zoom", "mod+0", Action::ZoomReset),
-    sc(Group::General, "Search chats and messages", "mod+k", Action::FocusSearch),
-    sc(Group::General, "Search chats and messages", "mod+e", Action::FocusSearch),
+    sc(Group::General, "Search chats and messages", "mod+k", Action::Switcher),
+    sc(Group::General, "Search chats and messages", "mod+e", Action::Switcher),
     sc(Group::General, "Filter chats", "mod+shift+f", Action::FilterChats),
     sc(Group::General, "New chat", "mod+n", Action::NewChat),
     sc(Group::General, "Keyboard shortcuts", "mod+.", Action::Shortcuts),
@@ -187,11 +186,6 @@ fn run<A: Actions + 'static>(s: &mut UiState<A>, action: Action, tx: &mut Tx) ->
         Action::ZoomIn => zoom(s, 1),
         Action::ZoomOut => zoom(s, -1),
         Action::ZoomReset => zoom(s, 0),
-        Action::FocusSearch => {
-            close_popups(s);
-            navigate(s, Screen::Chat);
-            tx.focus("chat-search-input", false);
-        }
         Action::Switcher => crate::switcher::open(s, tx),
         Action::FilterChats => {
             close_popups(s);
@@ -498,11 +492,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_focuses_the_search_box() {
+    fn ctrl_k_opens_the_switcher() {
         let mut rt = rt();
         press(&mut rt, Key::Command('k'), ctrl());
+        assert!(rt.state.nav.switcher.is_some());
         type_text(&mut rt, "bra");
-        assert_eq!(rt.state.global_search.edit.text, "bra");
+        assert_eq!(rt.state.nav.switcher.as_ref().map(|s| s.edit.text.as_str()), Some("bra"));
     }
 
     #[test]

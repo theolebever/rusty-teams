@@ -11,6 +11,7 @@ use crate::ui::text;
 
 use crate::avatar::rgb;
 use crate::controls::{self, Size, Variant};
+use crate::icons::sym;
 use crate::media;
 use crate::types::Actions;
 use crate::ui::{INK, MUTED, UiState, active_target, c, select_thread, send, ts};
@@ -36,6 +37,8 @@ pub struct Compose {
     pub gif: crate::gif_picker::State,
     pub gifs: Vec<chatsvc::Gif>,
     pub cloud: crate::cloud_picker::State,
+    /// The chevron beside send: schedule the draft or pick its importance.
+    pub send_menu: bool,
     /// Conversation and text last handed to `Actions::save_draft`.
     saved: Option<(String, String)>,
     save_retry: Option<Instant>,
@@ -152,6 +155,54 @@ fn format_selection(edit: &mut TextEdit, before: &str, after: &str) {
     edit.set_selection(start + before.len(), start + insertion.len() - after.len());
 }
 
+/// Emoji and GIFs share one panel; either picker flag keeps it open.
+fn fun_open<A: Actions>(s: &UiState<A>) -> bool {
+    s.emoji_open || s.compose.gif.open
+}
+
+/// The emoji/GIF panel: a tab row over whichever picker is selected.
+fn fun_panel<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let gif = s.compose.gif.open;
+    let tabs = row().key("fun-tabs").gap(6.0)
+        .child(controls::button::<A>("fun-tab-emoji", "Emoji", if gif { Variant::Menu } else { Variant::Secondary }, Size::Sm, |s: &mut UiState<A>, tx: &mut Tx| {
+            s.compose.gif.open = false;
+            s.emoji_open = true;
+            tx.focus("emoji-search", false);
+        }))
+        .child(controls::button::<A>("fun-tab-gif", "GIF", if gif { Variant::Secondary } else { Variant::Menu }, Size::Sm, |s: &mut UiState<A>, tx: &mut Tx| {
+            if !s.compose.gif.open { crate::gif_picker::toggle(s); }
+            tx.focus("gif-search", false);
+        }));
+    col().key("fun-panel").w_full().gap(6.0)
+        .child(tabs)
+        .child(if gif { crate::gif_picker::picker(s) } else { crate::emoji_picker::picker(s) })
+}
+
+/// The chevron's menu: schedule the draft, or choose its importance (the GPUI delivery menu).
+fn send_menu<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let palette = active_palette();
+    let importance = s.compose.importance;
+    let mut menu = col().key("composer-send-menu").w(220.0).padding(6.0).gap(4.0).radius(8.0)
+        .fill(rgb(palette.popup)).border(1.0, rgb(palette.border))
+        .anchored("composer-send-options", Side::Top, Align::End, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.compose.send_menu = false)
+        .child(controls::menu_item::<A>("send-option-schedule", "Schedule send", Some("schedule"), false, |s: &mut UiState<A>| {
+            s.compose.send_menu = false;
+            crate::schedule::open(s);
+        }));
+    for (key, label, glyph, option) in [
+        ("send-option-standard", "Standard", "chat_bubble", store::MessageImportance::Normal),
+        ("send-option-important", "Important", "priority_high", store::MessageImportance::High),
+        ("send-option-urgent", "Urgent", "notifications", store::MessageImportance::Urgent),
+    ] {
+        menu = menu.child(controls::menu_item::<A>(key, label, Some(glyph), importance == option, move |s: &mut UiState<A>| {
+            s.compose.importance = option;
+            s.compose.send_menu = false;
+        }));
+    }
+    menu
+}
+
 pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> El {
     let palette = active_palette();
     let target = active_target(s);
@@ -189,23 +240,12 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
                 s.format_open = !s.format_open;
             })
         }))
-        .child(controls::icon_button::<A>("composer-emoji", "mood", "Emoji", s.emoji_open, |s: &mut UiState<A>, tx: &mut Tx| {
-            s.emoji_open = !s.emoji_open;
+        .child(controls::icon_button::<A>("composer-emoji", "mood", "Emoji, GIFs and stickers", fun_open(s), |s: &mut UiState<A>, tx: &mut Tx| {
+            let open = fun_open(s);
+            s.emoji_open = !open;
             s.compose.gif.open = false;
             if s.emoji_open { tx.focus("emoji-search", false); }
-        }))
-        // No GIF glyph exists: the shared 32x32 text button is this toolbar's coherent chip, and
-        // unlike `chip` it can still hand `Tx` to the picker to focus its search field.
-        .child(controls::button::<A>(
-            "composer-gif",
-            "GIF",
-            if s.compose.gif.open { Variant::Secondary } else { Variant::Menu },
-            Size::Icon,
-            |s: &mut UiState<A>, tx: &mut Tx| {
-                crate::gif_picker::toggle(s);
-                if s.compose.gif.open { tx.focus("gif-search", false); }
-            },
-        ))
+        }).help("Emoji, GIFs and stickers".to_owned()))
         .children(target.as_ref().map(|_| {
             controls::icon_button::<A>("attach-file", "attach_file", "Attach file", s.compose.cloud.menu, |s: &mut UiState<A>, _| {
                 s.compose.cloud.menu = !s.compose.cloud.menu;
@@ -238,10 +278,19 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         send_button = send_button.opacity(0.4).disabled(true).focusable(true).on_press(|_: &mut UiState<A>| {});
     }
 
+    let send_options = row().key("composer-send-options").size(18.0, 32.0).center().radius(6.0)
+        .hover(rgb(palette.row_hover))
+        .role("button")
+        .label("More send options")
+        .focusable(true)
+        .focus_ring(2.0, 1.0, rgb(palette.accent))
+        .on_press_tx(|s: &mut UiState<A>, _| s.compose.send_menu = !s.compose.send_menu)
+        .child(sym("keyboard_arrow_down", 18.0).color(c(INK)));
+    let send_group = row().center_y().child(send_button).child(send_options);
+    let divider = el().w(1.0).h(20.0).ml(INSET).fill(rgb(palette.border));
     let actions = row().key("composer-actions").gap(INSET).center_y()
-        .child(toolbar).child(el().grow(1.0))
-        .child(controls::button::<A>("composer-schedule", "Schedule", Variant::Secondary, Size::Md, |s: &mut UiState<A>, _| crate::schedule::open(s)))
-        .child(send_button);
+        .child(toolbar).child(divider).child(el().grow(1.0))
+        .child(send_group);
     let contents = if stacked {
         col().w_full().gap(INSET).child(field).child(actions.w_full())
     } else {
@@ -255,9 +304,9 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .py(INSET)
         .gap(INSET)
         .center_y()
-        .radius(6.0)
-        .border(1.0, rgb(palette.border_strong))
-        .fill(rgb(palette.surface))
+        .radius(12.0)
+        .border(1.0, Color::TRANSPARENT)
+        .fill(rgb(palette.surface_raised))
         .child(contents);
     let bar = bar.on_drop_files(|s: &mut UiState<A>, paths, _| crate::inline_compose::drop_files(s, paths));
 
@@ -313,8 +362,7 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
             }
             tools
         }))
-        .children(s.emoji_open.then(|| crate::emoji_picker::picker(s)))
-        .children(s.compose.gif.open.then(|| crate::gif_picker::picker(s)))
+        .children(fun_open(s).then(|| fun_panel(s)))
         .children(target.as_ref().filter(|_| s.compose.cloud.menu).map(|target| crate::cloud_picker::menu::<A>(target)))
         .children((target.is_some() && s.compose.cloud.open == target).then(|| crate::cloud_picker::picker(s)))
         .children(crate::gif_picker::chips(s))
@@ -338,6 +386,8 @@ pub(crate) fn composer<A: Actions + 'static>(s: &UiState<A>, stacked: bool) -> E
         .children(crate::schedule::view(s))
         .children(crate::slash::view(s))
         .child(bar)
+        // Last, so it paints over the bar it anchors to.
+        .children(s.compose.send_menu.then(|| send_menu(s)))
 }
 
 #[cfg(test)]
@@ -713,7 +763,9 @@ mod tests {
     #[test]
     fn a_picked_gif_waits_as_a_chip_and_goes_out_with_the_message() {
         let mut rt = rt();
-        click(&mut rt, "composer-gif");
+        click(&mut rt, "composer-emoji");
+        click(&mut rt, "fun-tab-gif");
+        assert!(rt.find("gif-search").is_some(), "the GIF tab shows the GIF picker");
         assert_eq!(calls(&rt), ["gifs []"]);
         let gif = chatsvc::Gif { url: "https://g.test/a.gif".into(), preview_url: String::new(), title: "wave".into(), width: 10, height: 10, preview_width: 10, preview_height: 10 };
         rt.update(|s, _| s.apply(Update::Gifs { query: "old".into(), result: Ok(vec![]) }));
@@ -831,9 +883,31 @@ mod tests {
         names.sort_unstable();
         assert_eq!(
             names,
-            ["Add attachment", "Ask AI", "Attach file", "Emoji", "Formatting", "GIF"],
+            ["Add attachment", "Ask AI", "Attach file", "Emoji, GIFs and stickers", "Formatting"],
             "one explicit name per icon"
         );
+    }
+
+    #[test]
+    fn schedule_and_gifs_live_behind_the_emoji_button_and_the_send_chevron() {
+        let mut rt = rt();
+        assert!(rt.find("composer-gif").is_none() && rt.find("composer-schedule").is_none());
+        click(&mut rt, "composer-send-options");
+        assert!(rt.find("send-option-schedule").is_some() && rt.find("send-option-urgent").is_some());
+        click(&mut rt, "send-option-schedule");
+        assert!(rt.find("schedule-picker").is_some(), "Schedule send opens the scheduler");
+        assert!(rt.find("composer-send-menu").is_none(), "the menu closes after a choice");
+    }
+
+    #[test]
+    fn the_send_menu_sets_the_importance_without_sending() {
+        let mut rt = rt();
+        click(&mut rt, "composer");
+        press(&mut rt, Key::Text("urgent?".into()));
+        click(&mut rt, "composer-send-options");
+        click(&mut rt, "send-option-urgent");
+        assert_eq!(rt.state.compose.importance, store::MessageImportance::Urgent);
+        assert!(calls(&rt).iter().all(|c| !c.starts_with("send")), "choosing did not send");
     }
 
     #[test]

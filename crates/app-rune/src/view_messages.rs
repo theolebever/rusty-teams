@@ -41,6 +41,8 @@ const JUMBO: f32 = 40.0;
 const META: f32 = 11.0;
 const CHECK: f32 = 15.0;
 const ACTION: f32 = 30.0;
+const TOOLBAR_H: f32 = 36.0;
+const BAR_ICON: f32 = 16.0;
 const COMPOSER_GAP: f32 = 16.0;
 
 /// Whether row `i` continues the run of the same sender above it, and whether the next row does.
@@ -367,7 +369,7 @@ fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_p
 
 /// One icon button of the hover toolbar. Its press goes to `on_press`.
 ///
-/// Callers in `calls.rs` and `reactions.rs` keep the old `(key, glyph, press)` signature; the
+/// Callers in `calls.rs` keep the old `(key, glyph, press)` signature; the
 /// accessible name is derived from what the key (or glyph) says the button does, so every call
 /// site gets a role, a name and a Tab stop from the shared primitive without touching its file.
 pub(crate) fn action_button<A: Actions + 'static>(key: String, glyph: &str, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
@@ -380,30 +382,53 @@ pub(crate) fn action_button<A: Actions + 'static>(key: String, glyph: &str, on_p
     controls::icon_button::<A>(&key, glyph, label, false, on_press)
 }
 
-/// React, reply and more, shown while the pointer is over the message. Read-only views have none.
+/// One square button of the hover toolbar, named for assistive tech and reachable by Tab.
+pub(crate) fn toolbar_button<A: Actions + 'static>(key: String, label: &str, icon: El, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
+    let palette = active_palette();
+    row().key(key).size(ACTION, ACTION).radius(7.0).center().hover(rgb(palette.popup_hover))
+        .role("button").label(label.to_owned()).focusable(true).focus_ring(2.0, 1.0, rgb(palette.accent))
+        .on_press_tx(on_press)
+        .child(icon)
+}
+
+/// The hover toolbar: the quick reactions, add reaction, a separator, reply and more. Replies go
+/// to the thread on a channel root and quote into the composer in a chat. Read-only views and
+/// deleted posts have none.
 fn toolbar<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> Option<El> {
     if s.read_only || m.deleted || s.settings.prefs.actions_on_right_click {
         return None;
     }
+    let palette = active_palette();
+    let channel = active_target(s).is_some_and(|target| target.channel);
     let mut bar = row()
         .key(format!("toolbar-{}", m.id))
         .gap(1.0)
         .px(3.0)
-        .h(ACTION + 4.0)
+        .h(TOOLBAR_H)
         .center_y()
-        .radius(8.0)
-        .fill(rgb(active_palette().popup))
+        .radius(10.0)
+        .fill(rgb(palette.popup))
         .group_opacity(0.0, 1.0)
-        .child(crate::reactions::trigger::<A>(m));
-    if m.reply_to_id.is_none() && active_target(s).is_some_and(|target| target.channel) {
+        .children(crate::reactions::quick_buttons(s, m))
+        .child(crate::reactions::add_button::<A>(m))
+        .child(el().w(1.0).h(TOOLBAR_H).mx(4.0).fill(rgb(palette.popup_hover)));
+    let reply_icon = || sym("reply", BAR_ICON).color(rgb(palette.text_soft));
+    if !channel {
+        let reply = crate::types::ReplyReference { message_id: m.id.clone(), sender: m.sender.clone(), text: m.text.clone() };
+        bar = bar.child(toolbar_button(format!("reply-{}", m.id), "Reply", reply_icon(), move |s: &mut UiState<A>, tx: &mut Tx| {
+            s.compose.reply = Some(reply.clone());
+            tx.focus("composer", false);
+        }));
+    } else if m.reply_to_id.is_none() {
         let root = m.id.clone();
-        bar = bar.child(action_button(format!("reply-{}", m.id), "reply", move |s: &mut UiState<A>, tx: &mut Tx| {
+        bar = bar.child(toolbar_button(format!("reply-{}", m.id), "Reply", reply_icon(), move |s: &mut UiState<A>, tx: &mut Tx| {
             select_thread(s, Some(root.clone()));
             tx.focus("composer", false);
         }));
     }
     let id = m.id.clone();
-    bar = bar.child(action_button(format!("more-{}", m.id), "more_horiz", move |s: &mut UiState<A>, _| {
+    let more = sym("more_horiz", BAR_ICON).color(rgb(palette.text_soft));
+    bar = bar.child(toolbar_button(format!("more-{}", m.id), "More actions", more, move |s: &mut UiState<A>, _| {
         let open = s.more_open.as_deref() != Some(id.as_str());
         crate::message_menu::close(s);
         if open { s.more_open = Some(id.clone()); }
@@ -737,14 +762,32 @@ mod tests {
             .iter()
             .filter(|e| e.path.starts_with("toolbar-m1/") && e.role == "button")
             .collect();
-        assert_eq!(buttons.len(), 2, "react and more");
+        assert_eq!(buttons.len(), 7, "four quick reactions, add reaction, reply and more");
         for e in &buttons {
             assert_eq!(e.role, "button");
             assert!(e.label.as_deref().is_some_and(|l| !l.is_empty()), "unnamed button {}", e.path);
             assert!(e.focusable, "{} is keyboard reachable", e.path);
         }
-        assert_eq!(element(&elements, "react-m1").label.as_deref(), Some("React"));
+        assert_eq!(element(&elements, "add-reaction-m1").label.as_deref(), Some("Add reaction"));
+        assert_eq!(element(&elements, "reply-m1").label.as_deref(), Some("Reply"));
         assert_eq!(element(&elements, "more-m1").label.as_deref(), Some("More actions"));
+    }
+
+    #[test]
+    fn the_toolbar_sits_on_the_outer_side_of_the_bubble() {
+        let rt = show(vec![msg("mine", "Me", true, "hi"), msg("theirs", "Ada", false, "hey")]);
+        let (mine, theirs) = (rt.presented("toolbar-mine").expect("toolbar").0, rt.presented("toolbar-theirs").expect("toolbar").0);
+        assert!(mine[0] < rt.presented("bubble-mine").unwrap().0[0], "own posts: the bar is left of the bubble");
+        assert!(theirs[0] > rt.presented("bubble-theirs").unwrap().0[0], "others': the bar is right of the bubble");
+        assert!((mine[3] - TOOLBAR_H).abs() < 1.0, "36 points tall: {mine:?}");
+    }
+
+    #[test]
+    fn a_chat_message_is_quoted_into_the_composer_by_reply() {
+        let mut rt = show(vec![msg("m1", "Ada", false, "hi")]);
+        click(&mut rt, "reply-m1");
+        let reply = rt.state.compose.reply.as_ref().expect("quoted");
+        assert_eq!((reply.message_id.as_str(), reply.sender.as_str()), ("m1", "Ada"));
     }
 
     #[test]

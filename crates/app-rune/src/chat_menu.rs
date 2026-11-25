@@ -97,7 +97,7 @@ pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
 }
 
-fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
+pub(crate) fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
     s.details.get(id).is_some_and(|d| d.members.iter().filter(|m| !m.is_bot()).count() > 2)
 }
 
@@ -462,7 +462,7 @@ mod tests {
         // 1:1 members cannot be removed.
         click(&mut rt, "overlay-backdrop");
         click(&mut rt, "chat-duo");
-        click(&mut rt, "participants");
+        click(&mut rt, "add-people"); // a 1:1 has no participant count; its add button opens the panel
         assert!(rt.find("member-0").is_some() && rt.find("member-remove-0").is_none());
     }
 }
