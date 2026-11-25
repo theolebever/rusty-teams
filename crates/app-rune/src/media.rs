@@ -15,9 +15,10 @@ use crate::ui::UiState;
 use crate::bridge::Shared;
 use crate::types::Update;
 
-const IMAGE_BUDGET: usize = 48 * 1024 * 1024;
 const KEEP_RECENT: Duration = Duration::from_secs(10);
 const PREVIEW_EDGE: u32 = 720;
+/// Failed image keys only suppress another request until the next load; they need no history.
+const MAX_IMAGE_ERRORS: usize = 256;
 pub type Preview = (u32, u32, Vec<u8>);
 
 fn preview(bytes: &[u8]) -> Option<Preview> {
@@ -177,6 +178,8 @@ pub struct MediaState {
     watched: RefCell<HashMap<String, Watched>>,
     render: Cell<u64>,
     evicted: HashSet<String>,
+    /// Asked of the bridge and not answered yet, so a view shown again does not ask twice.
+    requested: HashSet<String>,
     pub errors: HashMap<String, String>,
     /// Cache key and alt text of the image open in the full-window viewer.
     pub viewer: Option<(String, String)>,
@@ -203,6 +206,7 @@ impl Default for MediaState {
             watched: RefCell::new(HashMap::new()),
             render: Cell::new(0),
             evicted: HashSet::new(),
+            requested: HashSet::new(),
             errors: HashMap::new(),
             viewer: None,
             viewer_state: Default::default(),
@@ -225,6 +229,7 @@ impl MediaState {
     pub fn loaded_preview(&mut self, key: String, bytes: Vec<u8>, preview: Option<Preview>) {
         self.evicted.remove(&key);
         self.errors.remove(&key);
+        self.requested.remove(&key);
         let (image, size) = if let Some((width, height, rgba)) = preview {
             let size = rgba.len().saturating_mul(4) / 3 + bytes.len();
             self.originals.insert(key.clone(), bytes);
@@ -244,6 +249,14 @@ impl MediaState {
         self.trim(Instant::now());
     }
 
+    pub fn failed(&mut self, key: String, error: String) {
+        self.requested.remove(&key);
+        if !self.errors.contains_key(&key) && self.errors.len() >= MAX_IMAGE_ERRORS {
+            self.errors.clear();
+        }
+        self.errors.insert(key, error);
+    }
+
     pub fn image(&self, key: &str) -> Option<&Image> {
         self.images.get(key)
     }
@@ -257,7 +270,9 @@ impl MediaState {
         watched.visible = on;
         for image in &watched.images {
             if let Some(shown) = self.shown.get_mut().get_mut(image.key()) { *shown = Instant::now(); }
-            if on && self.evicted.remove(image.key()) && !self.errors.contains_key(image.key()) {
+            let key = image.key();
+            if on && !self.images.contains_key(key) && !self.errors.contains_key(key) && self.requested.insert(key.to_owned()) {
+                self.evicted.remove(key);
                 actions.load_image(image.clone());
             }
         }
@@ -276,18 +291,17 @@ impl MediaState {
     pub fn trim(&mut self, now: Instant) {
         if self.viewer.is_none() { self.viewer_image = None; }
         self.watched.get_mut().retain(|_, watched| watched.render == self.render.get());
-        let mut total = self.sizes.values().fold(0usize, |total, size| total.saturating_add(*size));
-        if total <= IMAGE_BUDGET { return; }
+        // Anything off screen for `KEEP_RECENT` is dropped; scrolling back reloads it from the
+        // disk cache. `sizes` lists the evictable keys (avatars are never evicted).
+        if self.sizes.is_empty() { return; }
         let visible: HashSet<_> = self.watched.get_mut().values().filter(|watched| watched.visible)
             .flat_map(|watched| watched.images.iter().map(|image| image.key().to_owned())).collect();
-        let mut candidates: Vec<_> = self.shown.get_mut().iter()
+        let candidates: Vec<_> = self.shown.get_mut().iter()
             .filter(|(key, shown)| self.sizes.contains_key(*key) && !visible.contains(*key) && self.viewer.as_ref().is_none_or(|(viewed, _)| viewed != *key)
                 && now.saturating_duration_since(**shown) >= KEEP_RECENT)
-            .map(|(key, shown)| (key.clone(), *shown)).collect();
-        candidates.sort_by_key(|(_, shown)| *shown);
-        for (key, _) in candidates {
-            if total <= IMAGE_BUDGET { break; }
-            total = total.saturating_sub(self.sizes.remove(&key).unwrap_or(0));
+            .map(|(key, _)| key.clone()).collect();
+        for key in candidates {
+            self.sizes.remove(&key);
             self.images.remove(&key);
             self.originals.remove(&key);
             self.shown.get_mut().remove(&key);
@@ -432,17 +446,27 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         let name = file.name.clone();
         let download_url = url.clone();
         let can_open = is_web_url(&url);
-        let mut card = row().key(format!("file-{message_id}-{index}")).w_full().gap(8.0).center_y()
-            .child(text(name.clone()).wrap().grow(1.0).min_w(0.0));
+        let palette = app_backend::schemes::active_palette();
+        let (badge, tint, kind_label) = file_badge(file.kind);
+        let details = match file.size {
+            Some(size) => format!("{kind_label} · {}", app_backend::format::file_size_label(size)),
+            None => kind_label.to_owned(),
+        };
+        let mut line = row().w_full().gap(10.0).padding(8.0).center_y()
+            .child(row().size(36.0, 36.0).radius(6.0).center().fill(crate::avatar::rgb(tint))
+                .child(text(badge).font(crate::ui::ts(if badge.len() > 2 { 10.0 } else { 14.0 }, 700.0)).color(crate::avatar::rgb(0xFFFFFF))))
+            .child(col().grow(1.0).min_w(0.0).gap(2.0)
+                .child(text(name.clone()).font(crate::ui::ts(13.0, 600.0)).color(crate::avatar::rgb(palette.foreground)).truncate())
+                .child(text(details).font(crate::ui::ts(11.0, 400.0)).color(crate::avatar::rgb(palette.text_muted)).truncate()));
         if can_open {
-            card = card.child(row().key(format!("file-open-{message_id}-{index}")).padding(6.0)
-                .on_press_tx(move |s: &mut UiState<A>, tx| {
+            line = line.child(crate::controls::button::<A>(&format!("file-open-{message_id}-{index}"), "Open", crate::controls::Variant::Secondary, crate::controls::Size::Sm,
+                move |s: &mut UiState<A>, tx: &mut Tx| {
                     if let Err(error) = tx.open_url(&url) { s.status = error.to_string(); }
-                }).child(text("Open")));
+                }));
             // Loop components open in their web app and are not downloadable files.
             if file.kind != teams_core::FileKind::Loop {
-                card = card.child(row().key(format!("file-save-{message_id}-{index}")).padding(6.0)
-                    .on_press_tx(move |_: &mut UiState<A>, tx| {
+                line = line.child(crate::controls::button::<A>(&format!("file-save-{message_id}-{index}"), "Save as", crate::controls::Variant::Secondary, crate::controls::Size::Sm,
+                    move |_: &mut UiState<A>, tx: &mut Tx| {
                         let url = download_url.clone();
                         let file_name = PathBuf::from(&name).file_name().map(|value| value.to_string_lossy().into_owned());
                         tx.save_file(FileDialogOptions { file_name, ..Default::default() }, move |s: &mut UiState<A>, result, _| {
@@ -452,10 +476,21 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
                                 Err(error) => s.status = error.to_string(),
                             }
                         });
-                    }).child(text("Save as")));
+                    }));
             }
         }
-        body = body.child(card);
+        let mut card = col().key(format!("file-{message_id}-{index}")).w_full().max_w(420.0).radius(6.0)
+            .fill(crate::avatar::rgb(palette.surface_raised)).clip_soft(0.0);
+        // SharePoint renders a thumbnail for documents, images and videos; others keep the badge only.
+        let preview = file.preview().filter(|_| file.kind != teams_core::FileKind::Video);
+        if let Some(thumbnail) = preview.as_ref().and_then(|preview| s.media.image(preview.key())).filter(|image| image.is_ready() && image.error().is_none()) {
+            card = card.child(el().key(format!("file-preview-{message_id}-{index}")).w_full().h(160.0).pixels_fit(thumbnail.pixels(), SurfaceFit::Fill));
+        }
+        card = card.child(line);
+        body = body.child(match preview {
+            Some(preview) => watch(s, &format!("file-{message_id}-{index}"), vec![preview], card),
+            None => card,
+        });
     }
     let rich = &content.rich;
     if let Some(banner) = &rich.banner {
@@ -468,6 +503,22 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, content: &Content, message_id:
         body = body.child(crate::link_preview::view(s, preview, message_id));
     }
     body
+}
+
+/// The badge text, its colour and the type's name for a file card.
+fn file_badge(kind: teams_core::FileKind) -> (&'static str, u32, &'static str) {
+    use teams_core::FileKind;
+    match kind {
+        FileKind::Word => ("W", 0x185ABD, "Word"),
+        FileKind::Excel => ("X", 0x107C41, "Excel"),
+        FileKind::PowerPoint => ("P", 0xC43E1C, "PowerPoint"),
+        FileKind::Pdf => ("PDF", 0xD13438, "PDF"),
+        FileKind::Image => ("IMG", 0x8764B8, "Image"),
+        FileKind::Video => ("VID", 0x5C2D91, "Video"),
+        FileKind::Archive => ("ZIP", 0x8A6D3B, "Archive"),
+        FileKind::Loop => ("L", 0x4F52B2, "Loop"),
+        FileKind::Other => ("FILE", 0x616161, "File"),
+    }
 }
 
 fn is_web_url(value: &str) -> bool {
@@ -510,7 +561,7 @@ mod tests {
         for key in ["old", "visible", "viewer", "avatar:user"] {
             state.shown.get_mut().insert(key.into(), now - KEEP_RECENT);
         }
-        state.sizes.insert("old".into(), IMAGE_BUDGET);
+        state.sizes.insert("old".into(), 1);
         state.watched.get_mut().insert("visible-owner".into(), Watched {
             images: vec![crate::rich_text::remote("visible")], visible: true, render: 0,
         });
@@ -530,7 +581,7 @@ mod tests {
         state.messages.push(message("m", Content { images: vec![image.clone()], ..Default::default() }));
         state.media.loaded(image.key().into(), png(1, 1));
         state.media.shown.get_mut().insert(image.key().into(), Instant::now() - KEEP_RECENT);
-        state.media.sizes.insert(image.key().into(), IMAGE_BUDGET + 1);
+        state.media.sizes.insert(image.key().into(), 1);
         state.media.trim(Instant::now());
         state.media.watched.get_mut().insert("owner".into(), Watched { images: vec![image], visible: false, render: 0 });
         state.media.visibility("owner", true, &state.actions);
@@ -544,7 +595,7 @@ mod tests {
         state.selected = Some("chat".into());
         let image = crate::rich_text::remote("https://example.com/a.png");
         state.media.loaded(image.key().into(), png(1, 1));
-        state.media.sizes.insert(image.key().into(), IMAGE_BUDGET + 1);
+        state.media.sizes.insert(image.key().into(), 1);
         state.media.shown.get_mut().insert(image.key().into(), Instant::now() - KEEP_RECENT);
         state.media.begin_render();
         let _ = watch(&state, "first", vec![image.clone()], col());
@@ -585,7 +636,7 @@ mod tests {
             rt.frame(3.0);
             rt.update(|s, _| {
                 for shown in s.media.shown.get_mut().values_mut() { *shown = Instant::now() - KEEP_RECENT; }
-                for size in s.media.sizes.values_mut() { *size = IMAGE_BUDGET; }
+                for size in s.media.sizes.values_mut() { *size = 1; }
                 s.media.trim(Instant::now());
                 s.actions.calls.borrow_mut().clear();
             });
@@ -689,10 +740,12 @@ mod tests {
             s.apply(Update::Messages { conversation_id: "chat".into(), rows: vec![row] });
         });
         rt.frame(1.0 / 60.0);
+        // Images load once layout reports them visible, which lands on the next frame.
+        rt.frame(2.0 / 60.0);
     }
 
     #[test]
-    fn images_load_when_their_chat_opens_and_a_failed_one_retries_on_click() {
+    fn images_load_once_visible_and_a_failed_one_retries_on_click() {
         let mut rt = rt();
         let image = ImageRef { id: "i".into(), url: "https://example.com/a.png".into(), width: None, height: None, alt: None };
         show(&mut rt, message("m", Content { images: vec![image.clone()], files: vec![], ..Default::default() }));

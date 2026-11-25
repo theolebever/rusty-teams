@@ -477,6 +477,7 @@ pub struct CallView {
     pub history_error: Option<String>,
     pub history_filter: HistoryFilter,
     pub contact_search: TextEdit,
+    people_search: TextEdit,
     pub link: TextEdit,
     pub video: bool,
     pub pending: bool,
@@ -560,6 +561,7 @@ impl Default for CallView {
             history_error: None,
             history_filter: HistoryFilter::All,
             contact_search: TextEdit::default(),
+            people_search: TextEdit::default(),
             link: TextEdit::new(""),
             video: false,
             pending: false,
@@ -1207,60 +1209,36 @@ fn button<A: Actions + 'static>(
     key: &str,
     action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
 ) -> El {
-    let symbol = match key {
-        "call-mute" => Some(if label == "Unmute" { "mic_off" } else { "mic" }),
-        "call-camera" => Some("videocam"),
-        "call-devices" => Some("settings"),
-        "call-share" | "stop-share" => Some("share"),
-        "call-people" => Some("group"),
-        "call-more" => Some("more_horiz"),
-        "call-chat" => Some("chat_bubble"),
-        _ => None,
+    use crate::controls::{self, Size, Variant};
+
+    // Icon controls keep their keys so call sites and tests keep addressing them, but their
+    // accessible name is now explicit rather than borrowed from a 22px glyph.
+    let (glyph, accessible) = match key {
+        "call-mute" => (Some(if label == "Unmute" { "mic_off" } else { "mic" }), "Mute"),
+        "call-camera" => (Some("videocam"), label),
+        "call-devices" => (Some("settings"), "Devices"),
+        "call-share" => (Some("share"), "Share screen"),
+        "stop-share" => (Some("share"), "Stop sharing screen"),
+        "call-people" => (Some("group"), "People"),
+        "call-more" => (Some("more_horiz"), "More"),
+        "call-chat" => (Some("chat_bubble"), "Chat"),
+        _ => (None, label),
     };
-    if let Some(symbol) = symbol {
-        return col()
-            .key(key.to_owned())
-            .label(label.to_owned())
-            .w(64.0)
-            .h(60.0)
-            .gap(4.0)
-            .radius(4.0)
-            .center()
-            .hover(color("#424242"))
-            .on_press_tx(action)
-            .child(crate::icons::sym(symbol, 22.0).color(rgb(0xFFFFFF)))
-            .child(
-                text(label.to_owned())
-                    .font(style(11.0, 400.0))
-                    .color(rgb(0xFFFFFF)),
-            );
+    if let Some(glyph) = glyph {
+        let active = match key {
+            "call-mute" => label == "Unmute",
+            "call-camera" => label == "Camera on",
+            "stop-share" => true,
+            _ => false,
+        };
+        return controls::icon_button_on_dark::<A>(key, glyph, accessible, active, action);
     }
-    row()
-        .key(key.to_owned())
-        .h(36.0)
-        .px(16.0)
-        .radius(6.0)
-        .center()
-        .fill(color(if key == "call-leave" {
-            "#C4314B"
-        } else {
-            "#E8EBFA"
-        }))
-        .hover(color(if key == "call-leave" {
-            "#A4262C"
-        } else {
-            "#DADDF5"
-        }))
-        .on_press_tx(action)
-        .child(
-            text(label.to_owned())
-                .font(style(13.0, 600.0))
-                .color(if key == "call-leave" {
-                    rgb(0xFFFFFF)
-                } else {
-                    color("#242424")
-                }),
-        )
+    let variant = match key {
+        "call-leave" | "call-decline" => Variant::Danger,
+        "call-answer" | "call-answer-video" | "call-end-rejoin" => Variant::Primary,
+        _ => Variant::Secondary,
+    };
+    controls::button::<A>(key, label, variant, Size::Md, action)
 }
 
 /// GPUI's `MeetingInfoDialog::copy_text`: the join link + dial-in from the calendar event
@@ -1360,22 +1338,19 @@ fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
     let mut panel = col().key("call-device-list").gap(4.0);
     use crate::settings::Device;
     for (device, kind, title, entries, selected) in [
-        (Device::Microphone, "input", "Microphone", call.devices.input_entries(), &call.selected_input),
-        (Device::Speaker, "output", "Speaker", call.devices.output_entries(), &call.selected_output),
-        (Device::Camera, "camera", "Camera", calling::camera_entries(&call.cameras), &call.selected_camera),
+        (Device::Microphone, "input", "Microphone", call.devices.input_entries_for(&call.selected_input), &call.selected_input),
+        (Device::Speaker, "output", "Speaker", call.devices.output_entries_for(&call.selected_output), &call.selected_output),
+        (Device::Camera, "camera", "Camera", calling::camera_entries_for(&call.cameras, &call.selected_camera), &call.selected_camera),
     ] {
         panel = panel.child(text(title).font(style(13.0, 600.0)).color(color("#242424")));
         for entry in entries {
             let choice = entry.choice;
-            let label = format!(
-                "{}{}",
-                if &choice == selected { "✓ " } else { "" },
-                entry.label
-            );
-            panel = panel.child(button::<A>(
-                &label,
-                &format!("{kind}-{}", entry.label),
-                move |s, _| {
+            let key = format!("{kind}-{}", entry.label);
+            panel = panel.child(crate::controls::radio_item::<A>(
+                &key,
+                &entry.label,
+                &choice == selected,
+                move |s| {
                     let command = match device {
                         Device::Microphone => CallCommand::SelectInput(choice.clone()),
                         Device::Speaker => CallCommand::SelectOutput(choice.clone()),
@@ -1402,14 +1377,12 @@ fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
 }
 
 fn effects_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
-    let mut panel = col().key("call-effects").gap(4.0).child(button::<A>(
-        if call.background_blur {
-            "Background blur on"
-        } else {
-            "Background blur off"
-        },
+    let mut panel = col().key("call-effects").gap(4.0).child(crate::controls::switch_item::<A>(
         "call-blur",
-        move |s, _| {
+        "Background blur",
+        call.background_blur,
+        true,
+        move |s| {
             s.calls.background_blur = !s.calls.background_blur;
             if !prejoin {
                 s.actions
@@ -1429,10 +1402,12 @@ fn effects_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
         ("soft-focus", "Soft focus", call.effects.soft_focus, |e| &mut e.soft_focus),
     ];
     for (key, label, enabled, field) in effects {
-        panel = panel.child(button::<A>(
-            &format!("{} {label}", if enabled { "✓" } else { "" }),
+        panel = panel.child(crate::controls::switch_item::<A>(
             &format!("effect-{key}"),
-            move |s, _| {
+            label,
+            enabled,
+            true,
+            move |s| {
                 *field(&mut s.calls.effects) = !enabled;
                 if !prejoin {
                     s.actions
@@ -1457,6 +1432,7 @@ fn reaction_glyph(reaction: &calling::Reaction) -> String {
 }
 
 fn participant_tile<A: Actions + 'static>(
+    s: &UiState<A>,
     call: &CallView,
     person: &RosterEntry,
     (width, height): (f32, f32),
@@ -1502,24 +1478,14 @@ fn participant_tile<A: Actions + 'static>(
             .min_h(0.0)
             .native_surface(surface, SurfaceFit::Fit)
     } else {
-        col().w_full().grow(1.0).center().child(
-            row()
-                .w(72.0)
-                .h(72.0)
-                .radius(36.0)
-                .center()
-                .fill(color("#5B5FC7"))
-                .child(
-                    text(
-                        name.split_whitespace()
-                            .take(2)
-                            .filter_map(|word| word.chars().next())
-                            .collect::<String>(),
-                    )
-                    .font(style(26.0, 600.0))
-                    .color(rgb(0xFFFFFF)),
-                ),
-        )
+        let user_id = person.mri.strip_prefix("8:orgid:").unwrap_or(&person.mri);
+        col().w_full().grow(1.0).center().child(crate::avatar::person(
+            s,
+            name,
+            Some(user_id),
+            72.0,
+            None,
+        ))
     };
     let mut plate = row()
         .key(format!("{key}-name"))
@@ -1529,7 +1495,7 @@ fn participant_tile<A: Actions + 'static>(
         .py(2.0)
         .gap(4.0)
         .center_y()
-        .radius(4.0)
+        .radius(6.0)
         .fill(color("#1F1F1F"))
         .child(
             text(name.to_owned())
@@ -1575,7 +1541,7 @@ fn participant_tile<A: Actions + 'static>(
                 .pin(None, Some(4.0), Some(4.0), None)
                 .size(24.0, 24.0)
                 .center()
-                .radius(4.0)
+                .radius(6.0)
                 .fill(color("#292929"))
                 .on_press(move |s: &mut UiState<A>| {
                     s.calls.tile_menu = if s.calls.tile_menu.as_ref() == Some(&mri) {
@@ -1754,6 +1720,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             .min_h(72.0)
             .px(16.0)
             .gap(8.0)
+            .flex_wrap()
             .center_y()
             .fill(color("#292929"))
             .child(
@@ -1836,7 +1803,14 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 }
             });
             controls = controls.child(if unread {
-                chat.child(el().key("call-chat-unread").w(8.0).h(8.0).radius(4.0).fill(color("#C4314B")))
+                chat.child(
+                    el()
+                        .key("call-chat-unread")
+                        .absolute(24.0, 0.0)
+                        .size(8.0, 8.0)
+                        .radius(4.0)
+                        .fill(color("#C4314B")),
+                )
             } else {
                 chat
             });
@@ -2008,10 +1982,10 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             }
         }
         for reaction in calling::Reaction::ALL {
-            let label = reaction.name().to_owned();
+            let label = reaction_glyph(&reaction);
             features = features.child(button::<A>(
                 &label,
-                &format!("reaction-{label}"),
+                &format!("reaction-{}", reaction.name()),
                 move |s, _| {
                     s.actions
                         .call_command(CallCommand::SendReaction(reaction.clone()))
@@ -2078,19 +2052,12 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             );
             if matches!(call.captions, calling::CaptionState::On) {
                 for (tag, name) in calling::SPOKEN_LANGUAGES {
-                    let label = format!(
-                        "{}{}",
-                        if call.caption_language.as_deref() == Some(tag) {
-                            "✓ "
-                        } else {
-                            ""
-                        },
-                        name
-                    );
-                    panels = panels.child(button::<A>(
-                        &label,
-                        &format!("caption-language-{tag}"),
-                        move |s, _| {
+                    let key = format!("caption-language-{tag}");
+                    panels = panels.child(crate::controls::radio_item::<A>(
+                        &key,
+                        name,
+                        call.caption_language.as_deref() == Some(tag),
+                        move |s| {
                             s.calls.caption_language = Some(tag.to_owned());
                             s.actions
                                 .call_command(CallCommand::SetCaptionLanguage(tag.to_owned()));
@@ -2272,6 +2239,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             let mut remaining = people.as_slice();
             if focused && let Some(((person, _), others)) = remaining.split_first() {
                 gallery = gallery.child(participant_tile::<A>(
+                    s,
                     call,
                     person,
                     (call.stage_size.0, (call.stage_size.1 - 132.0).max(0.0)),
@@ -2287,10 +2255,10 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     stick_bottom: false,
                 });
             for (person, _) in remaining {
-                strip = strip.child(participant_tile::<A>(call, person, (180.0, 120.0)));
+                strip = strip.child(participant_tile::<A>(s, call, person, (180.0, 120.0)));
             }
             if call.camera && call.layout != Layout::Content {
-                strip = strip.child(participant_tile::<A>(call, &own, (180.0, 120.0)));
+                strip = strip.child(participant_tile::<A>(s, call, &own, (180.0, 120.0)));
             }
             if !remaining.is_empty() || call.camera && call.layout != Layout::Content {
                 gallery = gallery.child(strip);
@@ -2307,7 +2275,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             for group in people.chunks(columns) {
                 let mut tiles = row().w_full().h(height).gap(12.0).center();
                 for (person, _) in group {
-                    tiles = tiles.child(participant_tile::<A>(call, person, (width, height)));
+                    tiles = tiles.child(participant_tile::<A>(s, call, person, (width, height)));
                 }
                 gallery = gallery.child(tiles);
             }
@@ -2372,7 +2340,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     .w_full()
                     .h(132.0)
                     .child(el().grow(1.0))
-                    .child(participant_tile::<A>(call, &own, (208.0, 132.0))),
+                    .child(participant_tile::<A>(s, call, &own, (208.0, 132.0))),
             );
         }
         if call.show_people {
@@ -2380,6 +2348,14 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 text(format!("People ({})", call.roster.len()))
                     .font(style(18.0, 600.0))
                     .color(color("#242424")),
+            );
+            panels = panels.child(
+                text_input(&call.people_search, style(14.0, 400.0))
+                    .key("call-people-search")
+                    .w_full()
+                    .placeholder("Type a name", color("#616161"))
+                    .color(color("#242424"))
+                    .on_edit(|s: &mut UiState<A>| &mut s.calls.people_search),
             );
             let can_manage = call.can_manage() && !call.lobby;
             if can_manage {
@@ -2441,7 +2417,17 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     }
                 }
             }
-            for person in &call.roster {
+            let query = call.people_search.text.trim().to_ascii_lowercase();
+            let shown_people: Vec<&RosterEntry> = call
+                .roster
+                .iter()
+                .filter(|person| {
+                    query.is_empty()
+                        || person.display_name.to_ascii_lowercase().contains(&query)
+                        || person.mri.to_ascii_lowercase().contains(&query)
+                })
+                .collect();
+            for person in shown_people {
                 let name = if person.display_name.is_empty() {
                     &person.mri
                 } else {
@@ -2454,11 +2440,14 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 } else {
                     ""
                 };
-                let mut person_row = row().w_full().gap(8.0).wrap().center_y().child(
-                    text(format!("{name}{detail}"))
-                        .font(style(13.0, 400.0))
-                        .color(color("#242424")),
-                );
+                let user_id = person.mri.strip_prefix("8:orgid:").unwrap_or(&person.mri);
+                let mut person_row = row().w_full().gap(8.0).wrap().center_y()
+                    .child(crate::avatar::person(s, name, Some(user_id), 28.0, None))
+                    .child(
+                        text(format!("{name}{detail}"))
+                            .font(style(13.0, 400.0))
+                            .color(color("#242424")),
+                    );
                 if can_manage && person.mri != call.own_mri {
                     if person.in_lobby {
                         let mri = person.mri.clone();
@@ -2532,6 +2521,11 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 crate::view_composer::composer(s, true)
             };
             content = content.child(col().key("call-chat-panel").w(360.0).h_full().min_h(0.0).fill(color("#FFFFFF"))
+                .child(
+                    row().w_full().h(48.0).px(16.0).gap(8.0).center_y()
+                        .child(text("Meeting chat").font(style(16.0, 600.0)).color(color("#242424")).grow(1.0))
+                        .child(button::<A>("Close", "call-chat-close", |s, _| s.calls.show_chat = false)),
+                )
                 .child(crate::view_messages::message_list(s, false))
                 .child(composer));
         }
@@ -2730,6 +2724,46 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(4.0);
         rt.frame(5.0);
+    }
+
+    fn by_key<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key) || e.path.ends_with(&format!("/{key}")))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no element {key} in:\n{}",
+                    elements.iter().map(|e| e.path.as_str()).collect::<Vec<_>>().join("\n")
+                )
+            })
+    }
+
+    fn runtime_at(state: UiState<Fake>, size: (f32, f32)) -> Runtime<UiState<Fake>> {
+        let mut rt = Runtime::new(state, crate::call_window::view::<Fake>, size, Env::default());
+        rt.frame(1.0);
+        rt.frame(2.0);
+        rt.frame(3.0);
+        rt
+    }
+
+    fn a11y_by_key<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        if node.get("key").and_then(|v| v.as_str()) == Some(key) {
+            return Some(node);
+        }
+        node.get("children")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .find_map(|child| a11y_by_key(child, key))
+    }
+
+    fn states(node: &serde_json::Value) -> Vec<&str> {
+        node.get("states")
+            .and_then(|s| s.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str())
+            .collect()
     }
 
     #[test]
@@ -3467,5 +3501,183 @@ mod tests {
             !rt.state.calls.show_meeting_info,
             "switching panels closes meeting info"
         );
+    }
+
+    #[test]
+    fn call_leave_uses_the_palette_danger_button() {
+        let rt = runtime(connected(1));
+        let elements = rt.elements();
+        let leave = by_key(&elements, "call-leave");
+        assert_eq!(leave.role, "button");
+        assert_eq!(leave.label.as_deref(), Some("Leave"));
+        assert!(leave.focusable, "Leave must stay in the tab order");
+        let palette = app_backend::schemes::active_palette();
+        let red = rune::color::hex(&format!("#{:06X}", palette.red)).expect("palette red");
+        assert_eq!(leave.fill, red, "Leave must use the active palette's red");
+    }
+
+    #[test]
+    fn unread_chat_badge_sits_in_the_top_right_of_the_chat_button() {
+        let mut state = connected(1);
+        state.calls.start(CallIntro::of(&calling::CallSpec::People {
+            callees: vec![calling::Callee {
+                mri: "8:orgid:bea".into(),
+                display_name: "Bea".into(),
+            }],
+            thread_id: "19:chat".into(),
+        }));
+        state.chats.push(crate::types::ChatRow {
+            id: "19:chat".into(),
+            title: "Bea".into(),
+            preview: String::new(),
+            unread: true,
+            when: String::new(),
+        });
+        let rt = runtime(state);
+        let elements = rt.elements();
+        let chat = by_key(&elements, "call-chat");
+        let badge = by_key(&elements, "call-chat-unread");
+        let [x, y, w, h] = chat.rect;
+        let [bx, by, bw, bh] = badge.rect;
+        assert!(bx >= x + w / 2.0, "badge x {bx} is outside the right half of {x},{w}");
+        assert!(bx + bw <= x + w + 0.5, "badge x {bx}+{bw} overflows the button's right edge");
+        assert!(by >= y - 0.5, "badge y {by} is above the button at {y}");
+        assert!(by + bh <= y + h / 2.0 + 0.5, "badge y {by}+{bh} is outside the top half of {y},{h}");
+    }
+
+    #[test]
+    fn toolbar_controls_stay_inside_a_narrow_call_window() {
+        let mut state = connected(1);
+        state.calls.apply(CallUpdate::MeetingChat("19:meeting".into()));
+        state.calls.apply(CallUpdate::LocalShare(Some("Screen 1".into())));
+        state.chats.push(crate::types::ChatRow {
+            id: "19:meeting".into(),
+            title: "Weekly sync".into(),
+            preview: String::new(),
+            unread: false,
+            when: String::new(),
+        });
+        let rt = runtime_at(state, (600.0, 420.0));
+        let elements = rt.elements();
+        let toolbar = by_key(&elements, "call-toolbar");
+        let prefix = format!("{}/", toolbar.path);
+        let toolbar_elements: Vec<_> = elements
+            .iter()
+            .filter(|e| e.path == toolbar.path || e.path.starts_with(&prefix))
+            .collect();
+        assert!(
+            toolbar_elements.len() >= 9,
+            "expected the toolbar and its controls, got {}",
+            toolbar_elements.len()
+        );
+        for e in toolbar_elements {
+            let [x, y, w, h] = e.rect;
+            assert!(
+                x >= -0.5 && y >= -0.5 && x + w <= 600.5 && y + h <= 420.5,
+                "{} at {x},{y},{w},{h} escapes the 600x420 viewport",
+                e.path
+            );
+        }
+        for key in [
+            "call-mute",
+            "call-camera",
+            "call-devices",
+            "stop-share",
+            "call-people",
+            "call-more",
+            "call-chat",
+            "call-leave",
+        ] {
+            assert!(rt.find(key).is_some(), "{key} missing from the narrow toolbar");
+        }
+    }
+
+    #[test]
+    fn caption_language_uses_a_checked_state_instead_of_a_text_tick() {
+        let mut state = connected(1);
+        state.calls.captions = calling::CaptionState::On;
+        state.calls.show_captions = true;
+        state.calls.caption_language = Some("en-US".into());
+        let rt = runtime(state);
+        let elements = rt.elements();
+        assert!(
+            elements.iter().all(|element| element.text.as_deref().is_none_or(|text| !text.contains('✓'))),
+            "a caption tick must be an a11y state, not text"
+        );
+        let english = elements.iter().find(|element| element.key.as_deref() == Some("caption-language-en-US"));
+        if let Some(english) = english {
+            assert_eq!(english.role, "radio");
+        }
+    }
+
+    #[test]
+    fn device_and_effect_panels_use_widget_states_instead_of_text_ticks() {
+        fn devices_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            device_panel::<Fake>(&s.calls, false)
+        }
+        fn effects_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            effects_panel::<Fake>(&s.calls, false)
+        }
+        let mut devices_state = connected(1);
+        devices_state.calls.devices.inputs = vec![calling::AudioDevice {
+            index: 0,
+            guid: "mic-1".into(),
+            name: "Headset".into(),
+        }];
+        devices_state.calls.selected_input = calling::DeviceChoice::Device("mic-1".into());
+        let mut devices_rt = Runtime::new(devices_state, devices_view, (800.0, 600.0), Env::default());
+        devices_rt.frame(0.0);
+        let elements = devices_rt.elements();
+        assert!(
+            elements.iter().all(|element| element.text.as_deref().is_none_or(|text| !text.contains('✓'))),
+            "a device tick must be an a11y state, not text"
+        );
+        let mic = elements.iter().find(|element| element.key.as_deref() == Some("input-Headset")).expect("headset row");
+        assert_eq!(mic.role, "radio");
+
+        let mut effects_state = connected(1);
+        effects_state.calls.effects.mirror = true;
+        let mut effects_rt = Runtime::new(effects_state, effects_view, (800.0, 600.0), Env::default());
+        effects_rt.frame(0.0);
+        let elements = effects_rt.elements();
+        assert!(
+            elements.iter().all(|element| element.text.as_deref().is_none_or(|text| !text.contains('✓'))),
+            "an effect tick must be an a11y state, not text"
+        );
+        let mirror = elements.iter().find(|element| element.key.as_deref() == Some("effect-mirror")).expect("mirror row");
+        assert_eq!(mirror.role, "switch");
+    }
+
+    #[test]
+    fn call_icons_keep_white_ink_on_the_dark_stage_in_light_theme() {
+        let mut state = connected(1);
+        state.apply(crate::types::Update::Appearance(app_backend::appearance::AppearanceSettings {
+            theme: app_backend::appearance::ThemeChoice::Light,
+            ..Default::default()
+        }));
+        let rt = runtime(state);
+        let elements = rt.elements();
+        let button = elements.iter()
+            .position(|element| element.key.as_deref() == Some("call-mute"))
+            .expect("mute control");
+        let icon = elements.iter()
+            .find(|element| element.parent == Some(button) && element.text_color.is_some())
+            .expect("icon inside the mute control");
+        let white = rune::color::hex("#FFFFFF").expect("white");
+        assert_eq!(icon.text_color, Some(white), "the call stage stays dark in light mode");
+    }
+
+    #[test]
+    fn toggled_call_controls_expose_checked_state() {
+        let mut state = connected(1);
+        state.calls.apply(CallUpdate::Muted(true));
+        state.calls.apply(CallUpdate::Camera(true));
+        state.calls.apply(CallUpdate::LocalShare(Some("Screen 1".into())));
+        let rt = runtime(state);
+        let tree = rt.accessibility_json();
+        for key in ["call-mute", "call-camera", "stop-share"] {
+            let node = a11y_by_key(&tree, key).unwrap_or_else(|| panic!("no a11y node {key}"));
+            assert!(states(node).contains(&"checked"), "{key} must expose its toggled state");
+        }
     }
 }
