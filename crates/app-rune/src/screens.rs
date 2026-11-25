@@ -7,6 +7,7 @@ use crate::ui::text;
 use teams_core::{ActivityItem, ActivitySnapshot};
 
 use crate::types::Actions;
+use crate::controls::{Size, Variant};
 use crate::ui::{self, UiState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,6 +79,10 @@ pub struct ScreenState {
     pub selected_activity: Option<String>,
     pub activity_search: TextEdit,
     pub screen: Screen,
+    /// Screens left by `navigate`, newest last; the title bar's back button pops it.
+    back: Vec<Screen>,
+    /// Screens left by going back, newest last; any other navigation clears it.
+    forward: Vec<Screen>,
     pub activity: ActivitySnapshot,
     pub calendar: Vec<CalendarRow>,
     pub agenda: Vec<chatsvc::CalendarEvent>,
@@ -103,6 +108,8 @@ impl Default for ScreenState {
             selected_activity: None,
             activity_search: TextEdit::default(),
             screen: Screen::Chat,
+            back: Vec::new(),
+            forward: Vec::new(),
             activity: ActivitySnapshot::default(),
             calendar: Vec::new(),
             agenda: Vec::new(),
@@ -113,6 +120,14 @@ impl Default for ScreenState {
             send_response: true,
         }
     }
+}
+
+impl ScreenState {
+    /// Whether `go_back` has a screen to return to.
+    pub fn can_go_back(&self) -> bool { !self.back.is_empty() }
+
+    /// Whether `go_forward` has a screen to return to.
+    pub fn can_go_forward(&self) -> bool { !self.forward.is_empty() }
 }
 
 fn monday(date: NaiveDate) -> NaiveDate {
@@ -127,7 +142,40 @@ pub(crate) fn occurs_on(event: &CalendarRow, date: NaiveDate) -> bool {
     event.end > event.start && start <= date && date <= end
 }
 
+/// A navigation history deeper than this is not useful and would grow for a whole session.
+const MAX_SCREEN_HISTORY: usize = 32;
+
+fn remember<A: Actions>(s: &mut UiState<A>, screen: Screen) {
+    s.screens.back.push(screen);
+    if s.screens.back.len() > MAX_SCREEN_HISTORY {
+        s.screens.back.remove(0);
+    }
+}
+
+/// Opens `screen` and records the one left, so the title bar's back button can return to it.
 pub fn navigate<A: Actions>(s: &mut UiState<A>, screen: Screen) {
+    if s.screens.screen != screen {
+        remember(s, s.screens.screen);
+        s.screens.forward.clear();
+    }
+    enter(s, screen);
+}
+
+/// Steps one screen back through `ScreenState::back`; does nothing at the start of the history.
+pub fn go_back<A: Actions>(s: &mut UiState<A>) {
+    let Some(screen) = s.screens.back.pop() else { return };
+    s.screens.forward.push(s.screens.screen);
+    enter(s, screen);
+}
+
+/// Undoes `go_back`; does nothing when no screen was stepped back from.
+pub fn go_forward<A: Actions>(s: &mut UiState<A>) {
+    let Some(screen) = s.screens.forward.pop() else { return };
+    remember(s, s.screens.screen);
+    enter(s, screen);
+}
+
+fn enter<A: Actions>(s: &mut UiState<A>, screen: Screen) {
     if s.screens.screen != screen { crate::view_composer::stop_typing(s); }
     s.chatlist.quick_view = None;
     if screen == Screen::Teams && s.selected.as_ref().is_some_and(|id| !s.teams.iter().flat_map(|t| &t.channels).any(|c| &c.id == id)) {
@@ -199,20 +247,11 @@ pub(crate) fn button<A: Actions + 'static>(
     key: &str,
     action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
 ) -> El {
-    row()
-        .key(key.to_owned())
-        .h(32.0)
-        .px(12.0)
-        .center()
-        .radius(6.0)
-        .fill(color("#F5F5F5"))
-        .hover(color("#EBEBEB"))
-        .on_press_tx(action)
-        .child(
-            text(label.to_owned())
-                .font(style(13.0, 600.0))
-                .color(color("#242424")),
-        )
+    // Compatibility wrapper for the hundred-plus call sites that still use this helper: the
+    // shared primitive supplies the palette fill, accessible name, Tab stop and focus ring that
+    // the local row used to omit. Callers that need a different weight use `controls::button`
+    // directly.
+    crate::controls::button(key, label, crate::controls::Variant::Secondary, crate::controls::Size::Md, action)
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -249,7 +288,6 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let week = s.screens.week;
     let mut header = row()
         .w_full()
         .min_h(56.0)
@@ -266,51 +304,49 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(button::<A>("Today", "calendar-today", |s, _| {
             select_date(s, Local::now().date_naive());
         }))
-        .child(button::<A>("‹", "calendar-previous", |s, _| {
+        .child(crate::controls::icon_button::<A>("calendar-previous", "keyboard_arrow_left", "Previous week", false, |s, _| {
             shift_week(s, -7)
         }))
-        .child(button::<A>("›", "calendar-next", |s, _| shift_week(s, 7)))
-        .child(button::<A>("Agenda", "calendar-agenda", |s, _| {
-            s.screens.screen = Screen::Agenda;
-            s.actions.load_agenda();
-        }))
-        .child(button::<A>(&s.screens.calendar_date.format("%B %Y").to_string(), "calendar-date-picker", |s, _| {
+        .child(crate::controls::icon_button::<A>("calendar-next", "keyboard_arrow_right", "Next week", false, |s, _| shift_week(s, 7)))
+        .child(crate::controls::button::<A>("calendar-date-picker", &format!("{} ▾", s.screens.calendar_date.format("%B %Y")), Variant::Menu, Size::Md, |s, _| {
             s.screens.picker_month = s.screens.calendar_date.with_day(1).unwrap_or(s.screens.calendar_date);
             s.screens.date_picker = !s.screens.date_picker;
+        }))
+        // Pushes the views and actions to the right edge.
+        .child(el().grow(1.0));
+    // Views as one segmented control: the selected one filled, the rest flat inside a shared track.
+    let palette = app_backend::schemes::active_palette();
+    let mut views = row().key("calendar-views").padding(2.0).gap(2.0).radius(8.0).center_y()
+        .fill(crate::avatar::rgb(palette.surface_raised))
+        .child(crate::controls::button::<A>("calendar-agenda", "Agenda", Variant::Menu, Size::Sm, |s, _| {
+            s.screens.screen = Screen::Agenda;
+            s.actions.load_agenda();
         }));
     for (label, mode) in [("Day", CalendarView::Day), ("Work week", CalendarView::WorkWeek), ("Week", CalendarView::Week), ("Month", CalendarView::Month)] {
-        header = header.child(button::<A>(label, &format!("calendar-view-{mode:?}"), move |s, _| {
-            s.screens.calendar_view = mode;
-            select_date(s, s.screens.calendar_date);
-        }).fill(color(if s.screens.calendar_view == mode { "#E8EBFA" } else { "#F5F5F5" })));
+        let selected = s.screens.calendar_view == mode;
+        views = views.child(crate::controls::button::<A>(
+            &format!("calendar-view-{mode:?}"),
+            label,
+            if selected { Variant::Primary } else { Variant::Menu },
+            Size::Sm,
+            move |s, _| {
+                s.screens.calendar_view = mode;
+                select_date(s, s.screens.calendar_date);
+            },
+        ).checked(selected));
     }
+    header = header.child(views);
     if !s.read_only {
-        header = header.child(button::<A>("Join with an ID", "calendar-join-id", |s, _| s.screens.join_id_open = true))
-            .child(button::<A>("New meeting", "calendar-new-meeting", |s, tx| { crate::meeting_form::open(s); tx.focus("meeting-title", false); }))
-            .child(button::<A>("Meet now", "calendar-meet-now", |s, _| s.actions.meet_now("")));
+        header = header.child(el().w(8.0))
+            .child(crate::controls::button::<A>("calendar-join-id", "Join with an ID", Variant::Menu, Size::Md, |s, _| s.screens.join_id_open = true))
+            .child(button::<A>("Meet now", "calendar-meet-now", |s, _| s.actions.meet_now("")))
+            .child(crate::controls::button::<A>("calendar-new-meeting", "New meeting", Variant::Primary, Size::Md, |s, tx| { crate::meeting_form::open(s); tx.focus("meeting-title", false); }));
     }
-    let mut body = row()
+    let body = row()
         .grow(1.0)
         .min_h(0.0)
         .w_full()
         .child(if s.screens.calendar_view == CalendarView::Month { crate::calendar_grid::month(s) } else { crate::calendar_grid::week(s) });
-    if let Some(event) = s.screens.calendar.iter().find(|event| {
-        (0..s.screens.calendar_view.days()).any(|day| {
-            s.screens.selected_event.as_deref()
-                == Some(format!("{}-{}", event.id, week + Duration::days(day as i64)).as_str())
-        })
-    }) {
-        body = body.child(
-            col()
-                .key("calendar-details")
-                .w(280.0)
-                .h_full()
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(calendar_details(s, event)),
-        );
-    }
     col()
         .key("calendar")
         .grow(1.0)
@@ -382,13 +418,11 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
     }
     if !s.read_only && !event.cancelled && event.response != chatsvc::ResponseType::Organizer {
         let send_response = s.screens.send_response;
-        details = details.child(button::<A>(
-            if send_response {
-                "✓ Send response"
-            } else {
-                "Send response"
-            },
+        details = details.child(crate::controls::button::<A>(
             "calendar-send-response",
+            "Send response",
+            if send_response { crate::controls::Variant::Primary } else { crate::controls::Variant::Secondary },
+            crate::controls::Size::Md,
             |s, _| s.screens.send_response = !s.screens.send_response,
         ));
         let mut choices = row().gap(8.0);
@@ -399,10 +433,12 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
         ] {
             let id = event.id.clone();
             let uid = event.ical_uid.clone();
-            choices = choices.child(button::<A>(
-                &if event.response == response { format!("✓ {label}") } else { label.into() },
-                &format!("calendar-rsvp-{label}"),
-                move |s, _| {
+            let key = format!("calendar-rsvp-{label}");
+            choices = choices.child(crate::controls::radio_item::<A>(
+                &key,
+                label,
+                event.response == response,
+                move |s| {
                     s.actions
                         .respond_event(&id, uid.as_deref(), reply, s.screens.send_response);
                 },
@@ -457,12 +493,12 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
         ("Missed calls", ActivityFilter::MissedCalls),
     ] {
         let selected = s.screens.filter == filter;
-        filters = filters.child(row().key(format!("activity-filter-{label}")).h(28.0).px(9.0).center().radius(14.0)
-            .fill(rgb(if selected { palette.selection } else { palette.surface_raised }))
-            .hover(rgb(palette.row_hover)).label(label)
+        filters = filters.child(row().key(format!("activity-filter-{label}")).h(28.0).min_w(40.0).px(12.0).center().radius(14.0)
+            .fill(rgb(if selected { palette.accent } else { palette.surface_raised }))
+            .hover(rgb(if selected { palette.accent_strong } else { palette.row_hover })).label(label).checked(selected)
             .on_press(move |s: &mut UiState<A>| s.screens.filter = filter)
             .child(text(label).font(style(12.0, if selected { 600.0 } else { 400.0 }))
-                .color(rgb(if selected { palette.accent } else { palette.foreground }))));
+                .color(rgb(if selected { palette.on_accent } else { palette.foreground }))));
     }
     let query = s.screens.activity_search.text.trim().to_lowercase();
     let search = row().w_full().px(16.0).pb(12.0).child(
@@ -525,7 +561,10 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .on_press(move |s: &mut UiState<A>| s.actions.mark_activity_read(&read_id))
                 .child(sym("done_all", 16.0).color(rgb(palette.text_muted))));
         }
-        if !conversation.is_empty() {
+        // Without a conversation (a meeting invite), open the event's day, else the item's Teams link.
+        let event_day = item.event_start_ms.and_then(DateTime::from_timestamp_millis).map(|at| at.with_timezone(&Local).date_naive());
+        let tap_url = item.tap_url.clone().filter(|url| crate::rich_text::is_openable(url));
+        if !conversation.is_empty() || event_day.is_some() || tap_url.is_some() {
             let root = item.source_reply_chain_id.clone();
             notification =
                 notification.hover(rgb(palette.row_hover))
@@ -534,8 +573,15 @@ fn activity<A: Actions + 'static>(s: &UiState<A>) -> El {
                             s.actions.mark_activity_read(&id);
                         }
                         s.screens.selected_activity = Some(id.clone());
-                        ui::open_chat(s, &conversation, tx);
-                        if ui::active_target(s).is_some_and(|target| target.channel) && root.is_some() { ui::select_thread(s, root.clone()); }
+                        if !conversation.is_empty() {
+                            ui::open_chat(s, &conversation, tx);
+                            if ui::active_target(s).is_some_and(|target| target.channel) && root.is_some() { ui::select_thread(s, root.clone()); }
+                        } else if let Some(day) = event_day {
+                            s.screens.calendar_date = day;
+                            navigate(s, Screen::Calendar);
+                        } else if let Some(url) = &tap_url {
+                            crate::rich_text::open(s, tx, url);
+                        }
                     });
         }
         rows = rows.child(notification);
@@ -585,7 +631,24 @@ pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
     let mut layers = Vec::new();
     if s.screens.screen == Screen::Calendar
         && let Some(event) = s.screens.calendar.iter().find(|event| Some(&event.id) == s.screens.event_menu.as_ref()) {
-            layers.push(crate::shortcuts::card("calendar-event-menu", 340.0, calendar_details(s, event), |s: &mut UiState<A>| s.screens.event_menu = None));
+            let card = col()
+                .w(420.0)
+                .max_h(560.0)
+                .radius(10.0)
+                .fill(color("#FFFFFF"))
+                .border(1.0, color("#E0E0E0"))
+                .child(el().w_full().h(4.0).fill(color("#7B61FF")))
+                .child(calendar_details(s, event));
+            layers.push(
+                el().key("calendar-event-menu-host")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .items_center()
+                    .pt(72.0)
+                    .modal(true, |s: &mut UiState<A>| s.screens.event_menu = None)
+                    .child(card),
+            );
         }
     if s.screens.date_picker && s.screens.screen == Screen::Calendar { layers.push(crate::calendar_grid::date_picker(s)); }
     if s.screens.join_id_open {
@@ -618,6 +681,96 @@ pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn back_and_forward_walk_the_screens_visited() {
+        let mut state = UiState::new(Fake::default());
+        navigate(&mut state, Screen::Teams);
+        navigate(&mut state, Screen::Settings);
+        go_back(&mut state);
+        assert_eq!(state.screens.screen, Screen::Teams);
+        go_back(&mut state);
+        assert_eq!(state.screens.screen, Screen::Chat);
+        go_back(&mut state);
+        assert_eq!(state.screens.screen, Screen::Chat, "nothing before the first screen");
+        go_forward(&mut state);
+        assert_eq!(state.screens.screen, Screen::Teams);
+        navigate(&mut state, Screen::Calls);
+        assert!(!state.screens.can_go_forward(), "a new visit drops the forward history");
+    }
+
+    /// The shared button used at over a hundred call sites must carry an accessible name,
+    /// a button role and a keyboard Tab stop, and stay on the Fluent control radius.
+    #[test]
+    fn calendar_header_uses_named_icon_buttons_and_accent_selected_view() {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = Screen::Calendar;
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1100.0, 800.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        for (key, label) in [("calendar-previous", "Previous week"), ("calendar-next", "Next week")] {
+            let found = elements.iter().find(|element| element.key.as_deref() == Some(key))
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert_eq!(found.label.as_deref(), Some(label));
+            assert!(!elements.iter().any(|element| element.text.as_deref() == Some("‹") || element.text.as_deref() == Some("›")));
+        }
+        let selected = elements.iter().find(|element| element.key.as_deref() == Some("calendar-view-Week")).expect("selected view");
+        let other = elements.iter().find(|element| element.key.as_deref() == Some("calendar-view-Day")).expect("other view");
+        assert_ne!(selected.fill, other.fill, "the chosen view must be marked by fill, not a text tick");
+    }
+
+    #[test]
+    fn rsvp_choices_use_checked_state_instead_of_a_text_tick() {
+        fn details_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            let event = s.screens.calendar.first().expect("event").clone();
+            calendar_details(s, &event)
+        }
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = Screen::Calendar;
+        state.screens.send_response = true;
+        state.apply(crate::types::Update::Calendar {
+            week: state.screens.week,
+            rows: vec![CalendarRow {
+                id: "event".into(),
+                subject: "Review".into(),
+                start: Utc::now(),
+                end: Utc::now(),
+                cancelled: false,
+                all_day: false,
+                organizer: None,
+                ical_uid: None,
+                dial_in: None,
+                join_url: None,
+                thread_id: Some("chat".into()),
+                response: chatsvc::ResponseType::Accepted,
+            }],
+        });
+        let mut rt = Runtime::new(state, details_view, (800.0, 600.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        assert!(
+            elements.iter().all(|element| element.text.as_deref().is_none_or(|text| !text.contains('✓'))),
+            "a text tick must not encode a selected state"
+        );
+        let accept = elements.iter().find(|element| element.key.as_deref() == Some("calendar-rsvp-Accept")).expect("accept choice");
+        assert_eq!(accept.role, "radio");
+    }
+
+    #[test]
+    fn shared_button_exposes_a11y_and_control_radius() {
+        fn view(_: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            button::<Fake>("Save", "shared-save", |_, _| {})
+        }
+        let mut rt = Runtime::new(UiState::new(Fake::default()), view, (400.0, 200.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let found = rt.elements().into_iter()
+            .find(|element| element.key.as_deref() == Some("shared-save"))
+            .expect("shared button");
+        assert_eq!(found.role, "button");
+        assert_eq!(found.label.as_deref(), Some("Save"));
+        assert!(found.focusable, "shared button must be reachable with Tab");
+        assert!((found.radius - 6.0).abs() < 0.01, "control radius must be 6");
+    }
 
     #[derive(Default)]
     struct Fake {
