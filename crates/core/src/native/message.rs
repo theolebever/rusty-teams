@@ -94,7 +94,11 @@ pub(crate) fn graph_message_json(conversation_id: &str, native: &Value) -> Optio
     } else {
         body.html
     };
-    for marker in &attachments {
+    // A plain-text body is escaped for display, so a marker would show as literal markup.
+    if message_type == "Text" {
+        html = without_attachment_markers(&html);
+    }
+    for marker in attachments.iter().filter(|_| message_type != "Text") {
         let Some(attachment_id) = marker["id"].as_str() else {
             continue;
         };
@@ -110,6 +114,19 @@ pub(crate) fn graph_message_json(conversation_id: &str, native: &Value) -> Optio
     message["mentions"] = mentions(properties, &body.mention_texts);
     message["attachments"] = Value::Array(attachments);
     Some(message)
+}
+
+fn without_attachment_markers(text: &str) -> String {
+    const CLOSE: &str = "</attachment>";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<attachment") {
+        let Some(end) = rest[start..].find(CLOSE) else { break };
+        out.push_str(&rest[..start]);
+        rest = &rest[start + end + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn is_user_message(message_type: &str) -> bool {
@@ -406,6 +423,17 @@ mod tests {
             html,
             r#"<p>see</p><attachment id="c1"></attachment><attachment id="f1"></attachment>"#
         );
+    }
+
+    #[test]
+    fn a_plain_text_body_drops_attachment_markers() {
+        let message = native(
+            "Text",
+            r#"Vérifiez-le !<attachment id="tab::f448"></attachment>"#,
+            json!({}),
+        );
+        let graph = graph_message(CHAT, &message).unwrap();
+        assert_eq!(graph.body.unwrap().content.unwrap(), "Vérifiez-le !");
     }
 
     #[test]
