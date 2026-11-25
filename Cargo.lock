@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "app-backend"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "calling",
  "chatsvc",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "app-rune"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "agents",
  "app-backend",
