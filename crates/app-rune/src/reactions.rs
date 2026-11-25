@@ -4,8 +4,7 @@
 use crate::avatar::rgb;
 use crate::types::{Actions, MessageRow};
 use crate::ui::{UiState, ts};
-use crate::icons::sym;
-use crate::view_messages::toolbar_button;
+use crate::view_messages::action_button;
 use app_backend::schemes::active_palette;
 use rune::*;
 use crate::ui::text;
@@ -30,6 +29,13 @@ impl Picker {
         self.all = false;
     }
 
+    fn toggle(&mut self, message_id: &str) {
+        self.all = false;
+        self.open = match self.open.take() {
+            Some(open) if open == message_id => None,
+            _ => Some(message_id.to_owned()),
+        };
+    }
 }
 
 pub fn people<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
@@ -95,40 +101,10 @@ pub fn is_mine(message: &MessageRow, glyph: &str) -> bool {
         .any(|reaction| reaction.mine && bare(&reaction.emoji) == bare(glyph))
 }
 
-/// Opens the full emoji picker under `message_id`, from the toolbar's add button or the menu's `+`.
-fn open_full_picker<A: Actions>(s: &mut UiState<A>, tx: &mut Tx, message_id: &str) {
-    s.picker.open = Some(message_id.to_owned());
-    s.picker.all = true;
-    s.emoji_open = false;
-    s.compose.emoji.query.clear();
-    tx.focus("emoji-search", false);
-}
-
-/// The quick reactions of the hover toolbar, one button per glyph of the account's set. A click
-/// adds the reaction, or takes the viewer's own one back.
-pub fn quick_buttons<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> Vec<El> {
-    let palette = active_palette();
-    let conversation_id = s.selected.clone().unwrap_or_default();
-    preferred_glyphs(s).into_iter().map(|glyph| {
-        let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
-        let mine = is_mine(message, &glyph);
-        let label = format!("React with {glyph}");
-        let key = format!("quick-{}-{glyph}", message.id);
-        let ink = text(glyph.clone()).font(ts(17.0, 400.0));
-        let button = toolbar_button(key, &label, ink, move |s: &mut UiState<A>, _| {
-            s.actions.react(&conversation_id, &message_id, &wire(&glyph), mine);
-        });
-        if mine { button.fill(rgb(palette.reaction_on_own)) } else { button }
-    }).collect()
-}
-
-/// The toolbar's add button: opens the full emoji picker under the message.
-pub fn add_button<A: Actions + 'static>(message: &MessageRow) -> El {
+/// The hover toolbar's react button: it opens or closes the quick set under the message.
+pub fn trigger<A: Actions + 'static>(message: &MessageRow) -> El {
     let message_id = message.id.clone();
-    let icon = sym("add", 16.0).color(rgb(active_palette().text_soft));
-    toolbar_button(format!("add-reaction-{}", message.id), "Add reaction", icon, move |s: &mut UiState<A>, tx: &mut Tx| {
-        open_full_picker(s, tx, &message_id);
-    })
+    action_button::<A>(format!("react-{}", message.id), "mood", move |s: &mut UiState<A>, _| s.picker.toggle(&message_id))
 }
 
 /// The quick set heading the message menu: picking one reacts (or takes the own one back) and
@@ -155,12 +131,16 @@ pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> 
     let message_id = message.id.clone();
     bar.child(crate::controls::button::<A>("menu-reaction-more", "+", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, tx| {
         crate::message_menu::close(s);
-        open_full_picker(s, tx, &message_id);
+        s.picker.open = Some(message_id.clone());
+        s.picker.all = true;
+        s.emoji_open = false;
+        s.compose.emoji.query.clear();
+        tx.focus("emoji-search", false);
     }))
 }
 
-/// The reaction pills of a message, plus the full emoji picker when it is open. Read-only views
-/// show the pills without the picker.
+/// The reaction pills of a message, plus the quick set when it is open. Read-only views show the
+/// pills without the quick set.
 pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> El {
     let conversation_id = s.selected.clone().unwrap_or_default();
     let palette = active_palette();
@@ -197,8 +177,34 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
         return chips;
     }
     let mut column = col().gap(4.0).child(chips);
-    if s.picker.all && s.picker.open.as_deref() == Some(message.id.as_str()) {
-        column = column.child(crate::emoji_picker::picker(s));
+    if s.picker.open.as_deref() == Some(message.id.as_str()) {
+        let mut quick = row().key(format!("quick-{}", message.id)).gap(4.0);
+        for glyph in preferred_glyphs(s) {
+            let (conversation_id, message_id) = (conversation_id.clone(), message.id.clone());
+            let mine = is_mine(message, &glyph);
+            let label = glyph.clone();
+            quick = quick.child(
+                row()
+                    .key(format!("pick-{}-{glyph}", message.id))
+                    .padding(4.0)
+                    .radius(PILL_HEIGHT / 2.0)
+                    .fill(rgb(if mine { palette.reaction_on_own } else { palette.border_strong }))
+                    .hover(rgb(palette.row_hover))
+                    .on_press_tx(move |s: &mut UiState<A>, _| {
+                        s.picker.close();
+                        s.actions.react(&conversation_id, &message_id, &wire(&glyph), mine);
+                    })
+                    .child(text(label).font(ts(14.0, 400.0))),
+            );
+        }
+        column = column.child(quick);
+        column = column.child(crate::controls::button::<A>("reaction-more", "More emoji", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, tx| {
+            s.picker.all = !s.picker.all;
+            s.emoji_open = false;
+            s.compose.emoji.query.clear();
+            if s.picker.all { tx.focus("emoji-search", false); }
+        }));
+        if s.picker.all { column = column.child(crate::emoji_picker::picker(s)); }
     }
     column
 }
@@ -285,23 +291,14 @@ mod tests {
         let mut rt = rt();
         show(&mut rt, vec![msg("m", vec![])]);
         rt.update(|s, _| s.composer = TextEdit::new("keep this draft"));
-        click(&mut rt, "add-reaction-m");
+        click(&mut rt, "react-m");
+        click(&mut rt, "reaction-more");
         rt.update(|s, _| s.compose.emoji.query = TextEdit::new("rocket"));
         rt.frame(1.0 / 60.0);
         click(&mut rt, "emoji-🚀");
         assert_eq!(calls(&rt), ["react a m 🚀 false"]);
         assert_eq!(rt.state.composer.text, "keep this draft");
-        assert!(rt.state.picker.open.is_none());
-    }
-
-    #[test]
-    fn the_toolbar_offers_the_quick_reactions_without_opening_a_picker() {
-        let mut rt = rt();
-        show(&mut rt, vec![msg("m", vec![])]);
-        assert!(rt.state.picker.open.is_none());
-        assert!(rt.find("quick-m-\u{1F44D}").is_some());
-        assert!(rt.find("quick-m-\u{2764}").is_some());
-        assert!(rt.find("emoji-search").is_none());
+        assert!(rt.find("quick-m").is_none());
     }
 
     #[test]
@@ -340,12 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn picking_a_toolbar_reaction_adds_it() {
+    fn picking_a_quick_reaction_adds_it_and_closes_the_picker() {
         let mut rt = rt();
         show(&mut rt, vec![msg("m", vec![])]);
-        click(&mut rt, "quick-m-\u{1F44D}");
+        click(&mut rt, "react-m");
+        click(&mut rt, "pick-m-\u{1F44D}");
         assert_eq!(calls(&rt), ["react a m \u{1F44D} false"]);
-        assert!(rt.state.picker.open.is_none());
+        assert!(rt.find("quick-m").is_none());
     }
 
     #[test]
@@ -360,7 +358,8 @@ mod tests {
     fn picking_an_own_quick_reaction_removes_it() {
         let mut rt = rt();
         show(&mut rt, vec![msg("m", vec![summary("\u{1F44D}", 1, true)])]);
-        click(&mut rt, "quick-m-\u{1F44D}");
+        click(&mut rt, "react-m");
+        click(&mut rt, "pick-m-\u{1F44D}");
         assert_eq!(calls(&rt), ["react a m \u{1F44D} true"]);
     }
 
@@ -369,8 +368,7 @@ mod tests {
         let mut rt = rt();
         rt.update(|s, _| s.read_only = true);
         show(&mut rt, vec![msg("m", vec![summary("\u{1F44D}", 1, false)])]);
-        assert!(rt.find("add-reaction-m").is_none());
-        assert!(rt.find("quick-m-\u{1F44D}").is_none());
+        assert!(rt.find("react-m").is_none());
         click(&mut rt, "reaction-m-\u{1F44D}");
         assert!(calls(&rt).is_empty());
     }

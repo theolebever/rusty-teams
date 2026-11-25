@@ -931,14 +931,9 @@ impl Actions for Bridge {
         });
     }
 
-    fn start_chat_call(&self, id: &str, video: bool) {
-        if self.shared.read_only { return; }
-        self.call_chat(id, video);
-    }
-
     fn meet_now(&self, id: &str) {
         if self.shared.read_only { return; }
-        if !id.is_empty() { return self.call_chat(id, true); }
+        if !id.is_empty() { return self.call_chat(id); }
         let launcher = self.shared.calls.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let Some(launcher) = launcher else { self.shared.publish(Update::MeetingReady(Err("Not connected yet".into()))); return };
         let subject = self.shared.engine().and_then(|engine| engine.store().chat(id).ok().flatten()).map(|chat| chat.title)
@@ -1481,14 +1476,14 @@ fn chat_callees(chat: &ChatRecord, me: &str) -> Result<Vec<calling::Callee>, &'s
 }
 
 impl Bridge {
-    /// Rings the chat's members, with video or audio only, like the GPUI header call buttons.
-    fn call_chat(&self, id: &str, video: bool) {
+    /// Rings the chat's members with video on, like the GPUI header call button.
+    fn call_chat(&self, id: &str) {
         let Some(engine) = self.shared.engine() else { self.shared.publish(Update::Status("Not connected yet".into())); return };
         match engine.store().chat(id) {
             Ok(Some(chat)) => {
                 let me = engine.store().meta(META_USER_ID).ok().flatten().unwrap_or_default();
                 match chat_callees(&chat, &me) {
-                    Ok(callees) => self.shared.call_control.start_with_video(calling::CallSpec::People { callees, thread_id: id.to_owned() }, video),
+                    Ok(callees) => self.shared.call_control.start_with_video(calling::CallSpec::People { callees, thread_id: id.to_owned() }, true),
                     Err(why) => self.shared.publish(Update::Status(why.into())),
                 }
             }

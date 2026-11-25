@@ -97,7 +97,7 @@ pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
 }
 
-pub(crate) fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
+fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
     s.details.get(id).is_some_and(|d| d.members.iter().filter(|m| !m.is_bot()).count() > 2)
 }
 

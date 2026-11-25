@@ -1,5 +1,5 @@
-//! The chat list pane: header, search, filter chips, and the collapsible Quick views and Chats
-//! sections. Teams live on their own rail screen (`screens::view`), which also calls `teams`. Sizes and colours follow the GPUI sidebar (`crates/app/src/views/sidebar.rs`
+//! The chat list pane: header, search, filter chips, and the collapsible Quick views, Teams and
+//! Chats sections. Sizes and colours follow the GPUI sidebar (`crates/app/src/views/sidebar.rs`
 //! and `sidebar/chat_filter_bar.rs`), read from the same palette the rest of the theme uses.
 
 use std::borrow::Cow;
@@ -188,6 +188,7 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
         // Rune: a virtual/growth stack must be the last child of its scroll viewport.
         list = list
             .child(quick_views(s))
+            .child(teams(s))
             .child(folder_rows(s))
             .child(col().w_full().px(6.0).child(section_header(s, CHATS, "Chats", unread)))
             .child(chat_rows(s));
@@ -198,7 +199,7 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
         .h_full()
         .min_h(0.0)
         .fill(tone(active_palette().surface))
-        .child(header::<A>(s))
+        .child(header::<A>())
         .child(status(s))
         .child(crate::search::search_box(s))
         .children(filter_field(s))
@@ -210,9 +211,8 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>, width: f32) -> El {
             })))
 }
 
-fn header<A: Actions + 'static>(s: &UiState<A>) -> El {
+fn header<A: Actions + 'static>() -> El {
     let p = active_palette();
-    let filtering = s.chatlist.filter_open || !s.chatlist.filters.is_empty() || !s.chatlist.filter.text.trim().is_empty();
     let mut bar = row()
         .key("chat-header")
         .w_full()
@@ -223,7 +223,7 @@ fn header<A: Actions + 'static>(s: &UiState<A>) -> El {
         .center_y()
         .child(
             text("Chat")
-                .font(ts(16.0, 700.0))
+                .font(ts(18.0, 700.0))
                 .color(tone(p.foreground))
                 .grow(1.0)
                 .min_w(0.0),
@@ -233,22 +233,13 @@ fn header<A: Actions + 'static>(s: &UiState<A>) -> El {
         ("chat-filter", "filter_alt"),
         ("chat-new", "edit"),
     ] {
-        // New chat sits on a permanent raised fill; the filter button only lights up while in use.
-        let active = match key {
-            "chat-new" => s.chatlist.manage.new_chat_open,
-            "chat-filter" => filtering,
-            _ => false,
-        };
-        let rest = if key == "chat-new" { tone(p.surface_raised) } else { Color::TRANSPARENT };
-        let icon_color = if key == "chat-filter" && active { p.accent_text } else { p.text_soft };
         let mut button = row()
             .key(key)
             .size(ICON_BUTTON, ICON_BUTTON)
             .center()
             .radius(8.0)
-            .fill(if active { tone(p.popup_hover) } else { rest })
             .hover(tone(p.popup_hover))
-            .child(sym(glyph, 16.0).color(tone(icon_color)));
+            .child(sym(glyph, 16.0).color(tone(p.text_soft)));
         button = match key {
             "chat-new" => button.label("New chat").help("New chat (Ctrl+N)").on_press(|s: &mut UiState<A>| crate::new_chat::open(s)),
             "chat-more" => button.label("More options").help("More options").on_press(|s: &mut UiState<A>| s.chatlist.more = !s.chatlist.more),
@@ -278,10 +269,8 @@ fn status<A: Actions>(s: &UiState<A>) -> El {
     )
 }
 
-/// The overflow pills (Mentions, Muted) show only while active, as in GPUI; the shortcut can turn them on.
 fn filter_chips<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let overflow: Vec<Pill> = [Pill::Mentions, Pill::Muted].into_iter().filter(|pill| s.chatlist.filters.contains(pill)).collect();
-    col().w_full().child(chips(s, &Pill::ALL)).children((!overflow.is_empty()).then(|| chips(s, &overflow)))
+    col().w_full().child(chips(s, &Pill::ALL)).children(s.chatlist.filter_open.then(|| chips(s, &[Pill::Mentions, Pill::Muted])))
 }
 
 fn chips<A: Actions + 'static>(s: &UiState<A>, pills: &[Pill]) -> El {
@@ -844,29 +833,6 @@ mod tests {
         assert!(rt.find("chat-a").is_none());
         click(&mut rt, "chat-b");
         assert_eq!(rt.state.selected.as_deref(), Some("b"));
-    }
-
-    #[test]
-    fn chat_list_has_no_teams_section() {
-        let mut rt = rt();
-        rt.update(|s, _| {
-            s.screens.screen = crate::screens::Screen::Chat;
-            s.teams = vec![crate::types::TeamRow { id: "t".into(), name: "Team".into(), channels: vec![] }];
-        });
-        rt.frame(1.0 / 60.0);
-        assert!(rt.find("section-teams").is_none());
-        assert!(rt.find("team-t").is_none());
-        assert!(rt.find("chat-a").is_some());
-    }
-
-    #[test]
-    fn overflow_pills_show_only_while_active() {
-        let mut rt = rt();
-        assert!(rt.find("filter-mentions").is_none());
-        rt.update(|s, _| s.chatlist.filters.push(Pill::Mentions));
-        rt.frame(1.0 / 60.0);
-        assert!(rt.find("filter-mentions").is_some());
-        assert!(rt.find("filter-muted").is_none());
     }
 
     #[test]
