@@ -13,7 +13,7 @@ use crate::ui::{UiState, c, ts, INK, MUTED};
 
 /// Height of the title bar the window draws over its caption buttons (`main.rs`).
 pub const TITLE_BAR_HEIGHT: f32 = 40.0;
-const RAIL_WIDTH: f32 = 60.0;
+pub const RAIL_WIDTH: f32 = 60.0;
 const RAIL_ITEM_WIDTH: f32 = 48.0;
 const RAIL_ITEM_HEIGHT: f32 = 52.0;
 const RAIL_RADIUS: f32 = 10.0;

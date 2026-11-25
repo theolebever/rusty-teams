@@ -449,6 +449,19 @@ mod tests {
     }
 
     #[test]
+    fn a_group_down_to_two_people_keeps_its_group_controls() {
+        let mut rt = runtime("c0");
+        rt.update(|s, _| {
+            set_members(s, 2);
+            s.details.get_mut("c0").expect("details").group_chat = true;
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("participants").is_some(), "a group keeps its member count");
+        assert!(rt.find("meet-now").is_some() && rt.find("audio-call").is_none());
+        assert!(rt.find("add-people").is_none(), "a group has no add-people button");
+    }
+
+    #[test]
     fn one_on_one_has_audio_button_video_in_its_menu_and_no_group_controls() {
         let mut rt = runtime("c0");
         make_one_on_one(&mut rt);

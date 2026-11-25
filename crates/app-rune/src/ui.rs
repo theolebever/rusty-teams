@@ -1071,6 +1071,7 @@ mod tests {
             avatar_id: None, group: vec![],
             members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
             muted: true, presence: None, importance: Default::default(), desktop_notifications: Default::default(),
+            group_chat: false,
         })])));
         assert_eq!(state.member_counts["b"], 1);
         assert!(state.details["b"].muted);

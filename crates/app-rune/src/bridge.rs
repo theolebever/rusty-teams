@@ -180,7 +180,7 @@ impl Shared {
                     let group = if one_on_one { vec![] } else {
                         chat.members.iter().filter(|m| !m.is_bot() && m.user_id.as_deref() != Some(&me)).take(2).cloned().collect()
                     };
-                    (chat.id.clone(), crate::types::ChatDetails { importance: engine.unread_importance(&chat.id), desktop_notifications: engine.chat_desktop_notifications(&chat.id), avatar_id, group, members: chat.members.clone(), muted: chat.muted, presence })
+                    (chat.id.clone(), crate::types::ChatDetails { importance: engine.unread_importance(&chat.id), desktop_notifications: engine.chat_desktop_notifications(&chat.id), avatar_id, group, members: chat.members.clone(), group_chat: chat.kind == "group", muted: chat.muted, presence })
                 }).collect();
                 self.publish(Update::Details(details));
                 self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now())));

@@ -80,6 +80,8 @@ pub struct ChatDetails {
     /// Up to two other people of a group chat, drawn as a pair when it has no picture of its own.
     pub group: Vec<store::MemberRecord>,
     pub members: Vec<store::MemberRecord>,
+    /// A group chat, even one down to two people. Unset for a 1:1 and in tests.
+    pub group_chat: bool,
     pub muted: bool,
     pub presence: Option<teams_core::Presence>,
 }

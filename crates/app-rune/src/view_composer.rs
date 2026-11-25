@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_and_gifs_live_behind_the_emoji_button_and_the_send_chevron() {
+    fn schedule_and_importance_live_behind_the_send_chevron() {
         let mut rt = rt();
         assert!(rt.find("composer-gif").is_none() && rt.find("composer-schedule").is_none());
         click(&mut rt, "composer-send-options");

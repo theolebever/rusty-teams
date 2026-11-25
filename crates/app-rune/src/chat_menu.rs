@@ -17,7 +17,7 @@ const ITEM_H: f32 = 32.0;
 /// The menu's height is not measured; keep its anchor this far above the window bottom guess.
 const MAX_ANCHOR_Y: f32 = 480.0;
 /// Where the panels sit: under the chat list header, and under the conversation header.
-const NEW_CHAT_AT: (f32, f32) = (76.0, 100.0);
+const NEW_CHAT_AT: (f32, f32) = (crate::view_chrome::RAIL_WIDTH, crate::view_chrome::TITLE_BAR_HEIGHT + 52.0);
 const MEMBERS_TOP: f32 = 110.0;
 
 /// Open overlays and the pending chat to open. Lives on `ChatListState`.
@@ -98,7 +98,7 @@ pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 pub(crate) fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
-    s.details.get(id).is_some_and(|d| d.members.iter().filter(|m| !m.is_bot()).count() > 2)
+    s.details.get(id).is_some_and(|d| d.group_chat || d.members.iter().filter(|m| !m.is_bot()).count() > 2)
 }
 
 fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
