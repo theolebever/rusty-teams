@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
 use store::MessageRecord;
@@ -8,6 +8,12 @@ use teams_core::{
 };
 
 pub type MessageKey = (String, String);
+
+/// Translated HTML is the largest per-message payload kept in memory. Browsing a long history
+/// must not keep every translation of every message for the whole session.
+const MAX_CACHED_TRANSLATIONS: usize = 512;
+/// Bookkeeping sets grow one entry per message seen, without holding the HTML.
+const MAX_TRACKED_MESSAGES: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranslationLine {
@@ -126,6 +132,30 @@ pub struct TranslationState {
     shown: HashSet<MessageKey>,
     working: HashSet<MessageKey>,
     failed: HashSet<MessageKey>,
+    /// Oldest-first insertion order for each bounded collection above.
+    cache_order: VecDeque<CacheKey>,
+    stamp_order: VecDeque<MessageKey>,
+    asked_order: VecDeque<MessageKey>,
+    shown_order: VecDeque<MessageKey>,
+    working_order: VecDeque<MessageKey>,
+    failed_order: VecDeque<MessageKey>,
+}
+
+/// Tracks a key in a set and its oldest-first queue, evicting the oldest once `cap` is exceeded.
+fn track(
+    set: &mut HashSet<MessageKey>,
+    order: &mut VecDeque<MessageKey>,
+    key: MessageKey,
+    cap: usize,
+) {
+    order.retain(|tracked| tracked != &key);
+    order.push_back(key.clone());
+    set.insert(key);
+    while order.len() > cap
+        && let Some(oldest) = order.pop_front()
+    {
+        set.remove(&oldest);
+    }
 }
 
 impl TranslationState {
@@ -219,13 +249,23 @@ impl TranslationState {
     pub fn start(&mut self, conversation_id: &str, message_id: &str) {
         let key = (conversation_id.to_owned(), message_id.to_owned());
         self.failed.remove(&key);
-        self.working.insert(key);
+        track(
+            &mut self.working,
+            &mut self.working_order,
+            key,
+            MAX_TRACKED_MESSAGES,
+        );
     }
 
     pub fn fail(&mut self, conversation_id: &str, message_id: &str) {
         let key = (conversation_id.to_owned(), message_id.to_owned());
         self.working.remove(&key);
-        self.failed.insert(key);
+        track(
+            &mut self.failed,
+            &mut self.failed_order,
+            key,
+            MAX_TRACKED_MESSAGES,
+        );
     }
 
     pub fn finish(
@@ -245,31 +285,67 @@ impl TranslationState {
             .and_then(|stamps| stamps.get(message_id))
             .and_then(|stamp| LanguageStamp::parse(stamp))
             .and_then(|stamp| stamp.candidates.first().map(|(code, _)| code.clone()));
-        self.cache.insert(
-            CacheKey {
-                conversation_id: conversation_id.to_owned(),
-                message_id: message_id.to_owned(),
-                version,
-                target: target.to_owned(),
-            },
-            CachedTranslation { html, source },
+        let cache_key = CacheKey {
+            conversation_id: conversation_id.to_owned(),
+            message_id: message_id.to_owned(),
+            version,
+            target: target.to_owned(),
+        };
+        self.cache_order.retain(|cached| cached != &cache_key);
+        self.cache_order.push_back(cache_key.clone());
+        self.cache
+            .insert(cache_key, CachedTranslation { html, source });
+        while self.cache_order.len() > MAX_CACHED_TRANSLATIONS
+            && let Some(oldest) = self.cache_order.pop_front()
+        {
+            self.cache.remove(&oldest);
+        }
+        track(
+            &mut self.shown,
+            &mut self.shown_order,
+            key,
+            MAX_TRACKED_MESSAGES,
         );
-        self.shown.insert(key);
     }
 
     /// Flips between the translation and the original of a message that has a stored translation.
     pub fn toggle(&mut self, conversation_id: &str, message_id: &str) {
         let key = (conversation_id.to_owned(), message_id.to_owned());
         if !self.shown.remove(&key) {
-            self.shown.insert(key);
+            track(
+                &mut self.shown,
+                &mut self.shown_order,
+                key,
+                MAX_TRACKED_MESSAGES,
+            );
+        } else {
+            self.shown_order.retain(|tracked| tracked != &key);
         }
     }
 
     pub fn mark_asked(&mut self, conversation_id: &str, message_ids: Vec<String>) {
-        self.asked
-            .entry(conversation_id.to_owned())
-            .or_default()
-            .extend(message_ids);
+        for message_id in message_ids {
+            if self.was_asked(conversation_id, &message_id) {
+                continue;
+            }
+            let key = (conversation_id.to_owned(), message_id.clone());
+            self.asked_order.retain(|tracked| tracked != &key);
+            self.asked_order.push_back(key);
+            self.asked
+                .entry(conversation_id.to_owned())
+                .or_default()
+                .insert(message_id);
+        }
+        while self.asked_order.len() > MAX_TRACKED_MESSAGES
+            && let Some(oldest) = self.asked_order.pop_front()
+        {
+            if let Some(ids) = self.asked.get_mut(&oldest.0) {
+                ids.remove(&oldest.1);
+                if ids.is_empty() {
+                    self.asked.remove(&oldest.0);
+                }
+            }
+        }
     }
 
     pub fn was_asked(&self, conversation_id: &str, message_id: &str) -> bool {
@@ -279,13 +355,38 @@ impl TranslationState {
     }
 
     pub fn merge_stamps(&mut self, conversation_id: &str, stamps: HashMap<String, String>) -> bool {
-        let known = self.stamps.entry(conversation_id.to_owned()).or_default();
-        let before = known.len();
+        let before = self
+            .stamps
+            .get(conversation_id)
+            .map_or(0, |stamps| stamps.len());
         let mut changed = false;
         for (message_id, stamp) in stamps {
-            changed |= known.insert(message_id, stamp.clone()).as_ref() != Some(&stamp);
+            let known = self.stamps.entry(conversation_id.to_owned()).or_default();
+            if known.get(&message_id) == Some(&stamp) {
+                continue;
+            }
+            known.insert(message_id.clone(), stamp);
+            let key = (conversation_id.to_owned(), message_id);
+            self.stamp_order.retain(|tracked| tracked != &key);
+            self.stamp_order.push_back(key);
+            changed = true;
         }
-        changed || known.len() != before
+        while self.stamp_order.len() > MAX_TRACKED_MESSAGES
+            && let Some(oldest) = self.stamp_order.pop_front()
+        {
+            if let Some(known) = self.stamps.get_mut(&oldest.0) {
+                known.remove(&oldest.1);
+                if known.is_empty() {
+                    self.stamps.remove(&oldest.0);
+                }
+            }
+        }
+        changed
+            || self
+                .stamps
+                .get(conversation_id)
+                .map_or(0, |stamps| stamps.len())
+                != before
     }
 }
 
@@ -481,5 +582,26 @@ mod tests {
         let stamps = HashMap::from([("m1".to_owned(), FRENCH.to_owned())]);
         assert!(state.merge_stamps("chat", stamps.clone()));
         assert!(!state.merge_stamps("chat", stamps));
+    }
+
+    #[test]
+    fn translation_caches_are_bounded() {
+        let mut state = TranslationState::default();
+        for index in 0..MAX_CACHED_TRANSLATIONS + 5 {
+            let id = format!("m{index}");
+            state.finish("chat", &id, 0, "en", format!("<p>{id}</p>"));
+        }
+        assert_eq!(state.cache.len(), MAX_CACHED_TRANSLATIONS);
+        assert_eq!(state.cache_order.len(), MAX_CACHED_TRANSLATIONS);
+        assert!(state.is_cached("chat", "m5", 0));
+        assert!(!state.is_cached("chat", "m0", 0));
+
+        for index in 0..MAX_TRACKED_MESSAGES + 5 {
+            let id = format!("asked{index}");
+            state.mark_asked("chat", vec![id.clone()]);
+            assert!(state.was_asked("chat", &id));
+        }
+        assert!(state.asked_order.len() <= MAX_TRACKED_MESSAGES);
+        assert!(!state.was_asked("chat", "asked0"));
     }
 }
