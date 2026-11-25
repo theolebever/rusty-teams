@@ -198,7 +198,12 @@ pub struct PicturePlanes {
 
 impl PicturePlanes {
     pub fn new(rgb: &[u8], width: usize, height: usize) -> PicturePlanes {
-        let rgba: Vec<u8> = rgb.as_chunks::<3>().0.iter().flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect();
+        let rgba: Vec<u8> = rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect();
         let buffer = i420_from_rgba(&rgba, width as u32, height as u32);
         let (stride_y, stride_u, stride_v) = buffer.strides();
         let (plane_y, plane_u, plane_v) = buffer.data();
@@ -309,7 +314,15 @@ impl PlaneJob<'_> {
 
 type BackgroundPicture<'a> = (&'a [u8], &'a (Vec<f32>, usize, usize));
 
-fn plane_job<'a>(plane: &[u8], stride: usize, matte: &'a Matte, factor: usize, person: &PersonGrid, reach: (usize, usize), picture: Option<BackgroundPicture<'a>>) -> PlaneJob<'a> {
+fn plane_job<'a>(
+    plane: &[u8],
+    stride: usize,
+    matte: &'a Matte,
+    factor: usize,
+    person: &PersonGrid,
+    reach: (usize, usize),
+    picture: Option<BackgroundPicture<'a>>,
+) -> PlaneJob<'a> {
     let size = (matte.width, matte.height);
     let estimate = background_estimate(plane, stride, size, factor, person, reach);
     let picture = picture.map(|(planar, (soft, soft_width, soft_height))| {

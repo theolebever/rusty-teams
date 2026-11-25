@@ -740,15 +740,22 @@ mod tests {
 
         impl MaskInference for GatedSegmenter {
             fn infer(&mut self, frame: I420Buffer) -> Result<Mask> {
-                self.captured.send(frame.data().0[0]).expect("capture receiver");
-                self.release.recv_timeout(Duration::from_secs(10)).map_err(|_| crate::error::Error::Cancelled)?;
+                self.captured
+                    .send(frame.data().0[0])
+                    .expect("capture receiver");
+                self.release
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| crate::error::Error::Cancelled)?;
                 Ok(Mask::filled(MASK_WIDTH, MASK_HEIGHT, 1.))
             }
         }
 
         let (captured, capture) = std::sync::mpsc::sync_channel(1);
         let (release, proceed) = std::sync::mpsc::sync_channel(1);
-        let mut source = MaskSource::with_inference(GatedSegmenter { captured, release: proceed });
+        let mut source = MaskSource::with_inference(GatedSegmenter {
+            captured,
+            release: proceed,
+        });
         assert!(!source.refresh(|| marked_frame(5)));
         let captured = capture.recv_timeout(Duration::from_secs(10));
         if captured != Ok(5) {
@@ -762,7 +769,12 @@ mod tests {
         // Stop after this inference so a second result cannot race the age assertions.
         source.shared.inbox.close();
         release.send(()).expect("release inference");
-        source.worker.take().unwrap().join().expect("segmentation worker");
+        source
+            .worker
+            .take()
+            .unwrap()
+            .join()
+            .expect("segmentation worker");
         assert!(source.refresh(|| marked_frame(7)));
         assert_eq!(source.age(), 4);
         assert_eq!(source.reference().values.len(), 4);

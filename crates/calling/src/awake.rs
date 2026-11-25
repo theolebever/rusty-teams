@@ -55,7 +55,9 @@ mod platform {
 }
 
 impl Default for StayAwake {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StayAwake {
