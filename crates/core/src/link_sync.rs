@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use chatsvc::{ConversationRef, MessageLinks};
 use store::MessageRecord;
@@ -10,6 +11,8 @@ use crate::remote::Remote;
 
 const LINKS_PAGE_SIZE: usize = 50;
 const MAX_REPLY_THREADS: usize = 5;
+const LINK_PREVIEWS_MAX: usize = 512;
+const LINK_PREVIEWS_TTL: Duration = Duration::from_secs(3600);
 
 impl<R: Remote> SyncEngine<R> {
     /// `None` when the page has no title and no image, or the link is not public.
@@ -22,16 +25,24 @@ impl<R: Remote> SyncEngine<R> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(url)
-            .cloned();
+            .map(|(_, preview)| preview.clone());
         if let Some(preview) = cached {
             return Ok(preview);
         }
         let info = self.remote.link_info(url).await?;
         let preview = LinkPreview::from_info(url, &info);
-        self.link_previews
+        let mut cache = self
+            .link_previews
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(url.to_owned(), preview.clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= LINK_PREVIEWS_MAX {
+            let cutoff = Instant::now() - LINK_PREVIEWS_TTL;
+            cache.retain(|_, (fetched_at, _)| *fetched_at > cutoff);
+            if cache.len() >= LINK_PREVIEWS_MAX {
+                cache.clear();
+            }
+        }
+        cache.insert(url.to_owned(), (Instant::now(), preview.clone()));
         Ok(preview)
     }
 

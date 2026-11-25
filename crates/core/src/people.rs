@@ -12,6 +12,7 @@ const DIRECTORY_CACHE_MAX_QUERIES: usize = 64;
 const DIRECTORY_MIN_QUERY_CHARS: usize = 2;
 const RECENT_SENDERS_SCANNED: usize = 200;
 const TAG_CACHE_TTL: Duration = Duration::from_secs(300);
+const TAG_CACHE_MAX_TEAMS: usize = 64;
 const GROUP_CHAT_KIND: &str = "group";
 pub const EVERYONE_MENTION_TEXT: &str = "Everyone";
 
@@ -92,6 +93,13 @@ impl TagCache {
     }
 
     fn put(&mut self, team_id: &str, tags: Vec<Tag>) {
+        if self.entries.len() >= TAG_CACHE_MAX_TEAMS {
+            let cutoff = Instant::now() - TAG_CACHE_TTL;
+            self.entries.retain(|_, (stored_at, _)| *stored_at > cutoff);
+        }
+        if self.entries.len() >= TAG_CACHE_MAX_TEAMS {
+            self.entries.clear();
+        }
         self.entries
             .insert(team_id.to_owned(), (Instant::now(), tags));
     }
@@ -461,5 +469,14 @@ mod tests {
             cache.put(&format!("q{index}"), Vec::new());
         }
         assert!(cache.entries.len() <= DIRECTORY_CACHE_MAX_QUERIES);
+    }
+
+    #[test]
+    fn the_tag_cache_is_bounded() {
+        let mut cache = TagCache::default();
+        for index in 0..TAG_CACHE_MAX_TEAMS + 1 {
+            cache.put(&format!("team{index}"), Vec::new());
+        }
+        assert!(cache.entries.len() <= TAG_CACHE_MAX_TEAMS);
     }
 }

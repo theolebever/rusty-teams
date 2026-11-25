@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use chatsvc::{ChatApp, ConversationState, TrouterEndpoint};
 use chrono::{DateTime, Duration, Utc};
@@ -130,7 +131,7 @@ pub struct SyncEngine<R: Remote = Graph> {
     pub(crate) receipts: ReceiptCache,
     pub(crate) channel_folders: Mutex<HashMap<String, DriveFolder>>,
     pub(crate) chat_apps: Mutex<HashMap<String, Vec<ChatApp>>>,
-    pub(crate) link_previews: Mutex<HashMap<String, Option<LinkPreview>>>,
+    pub(crate) link_previews: Mutex<HashMap<String, (Instant, Option<LinkPreview>)>>,
     pub(crate) links_backfilled: Mutex<HashSet<String>>,
     pub(crate) forwards_healed: Mutex<HashSet<String>>,
     pub(crate) chat_states: Mutex<HashMap<String, ConversationState>>,

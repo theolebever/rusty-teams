@@ -19,16 +19,78 @@ use crate::remote::{ChatsPage, RemotePage};
 const THREADS_IN_FLIGHT: usize = 6;
 const OLDER_PAGE_MARKER: &str = "chatsvc:older";
 
+const MAX_PROFILES: usize = 8_000;
+const MAX_EXTERNAL: usize = 4_000;
+const MAX_TENANTS: usize = 8_000;
+const MAX_ROSTERS: usize = 1_000;
+
+/// A cache with a fixed capacity: inserting a new key drops the least recently inserted one.
+/// The lookups below only need a fast answer, so a miss costs one refetch instead of keeping every
+/// id and roster seen since the process started.
+struct RecentMap<V> {
+    values: HashMap<String, V>,
+    inserted_at: HashMap<String, u64>,
+    clock: u64,
+    capacity: usize,
+}
+
+impl<V> RecentMap<V> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            values: HashMap::new(),
+            inserted_at: HashMap::new(),
+            clock: 0,
+            capacity,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&V> {
+        self.values.get(key)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
+    fn insert(&mut self, key: String, value: V) {
+        self.clock += 1;
+        self.inserted_at.insert(key.clone(), self.clock);
+        self.values.insert(key, value);
+        if self.values.len() > self.capacity {
+            let oldest = self
+                .inserted_at
+                .iter()
+                .min_by_key(|(_, sequence)| **sequence)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.values.remove(&oldest);
+                self.inserted_at.remove(&oldest);
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&String, &V)> {
+        self.values.iter()
+    }
+
+    fn snapshot(&self) -> HashMap<String, V>
+    where
+        V: Clone,
+    {
+        self.values.clone()
+    }
+}
+
 /// Profiles looked up so far; `None` when the directory does not know the id, such as a bot.
-static PROFILES: LazyLock<Mutex<HashMap<String, Option<UserProfile>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static EXTERNAL: LazyLock<Mutex<HashMap<String, Option<String>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static TENANTS: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PROFILES: LazyLock<Mutex<RecentMap<Option<UserProfile>>>> =
+    LazyLock::new(|| Mutex::new(RecentMap::new(MAX_PROFILES)));
+static EXTERNAL: LazyLock<Mutex<RecentMap<Option<String>>>> =
+    LazyLock::new(|| Mutex::new(RecentMap::new(MAX_EXTERNAL)));
+static TENANTS: LazyLock<Mutex<RecentMap<String>>> =
+    LazyLock::new(|| Mutex::new(RecentMap::new(MAX_TENANTS)));
 /// Thread members by chat, kept while the thread's roster version stays the same.
-static ROSTERS: LazyLock<Mutex<HashMap<String, (String, Vec<NativeMember>)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ROSTERS: LazyLock<Mutex<RecentMap<(String, Vec<NativeMember>)>>> =
+    LazyLock::new(|| Mutex::new(RecentMap::new(MAX_ROSTERS)));
 
 /// Chats, members and messages read from the Teams chat service instead of Graph.
 pub struct NativeChats<'a> {
@@ -341,7 +403,7 @@ fn remember_tenants(thread: &Value) {
 /// People of other organizations the lookups met, with their organization's name when known.
 /// A chat member whose tenant is not `home_tenant` counts too.
 pub fn external_people(home_tenant: Option<&str>) -> Vec<(String, Option<String>)> {
-    let mut people: HashMap<String, Option<String>> = EXTERNAL.lock().unwrap().clone();
+    let mut people: HashMap<String, Option<String>> = EXTERNAL.lock().unwrap().snapshot();
     if let Some(home_tenant) = home_tenant {
         for (user_id, tenant) in TENANTS.lock().unwrap().iter() {
             if tenant != home_tenant {
@@ -367,6 +429,20 @@ fn profile_email(user_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::RecentMap;
+
+    #[test]
+    fn the_recent_map_drops_the_oldest_entry() {
+        let mut cache = RecentMap::new(2);
+        cache.insert("a".to_owned(), 1);
+        cache.insert("b".to_owned(), 2);
+        cache.insert("a".to_owned(), 3);
+        cache.insert("c".to_owned(), 4);
+        assert_eq!(cache.get("a"), Some(&3));
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("c"), Some(&4));
+    }
+
     #[test]
     fn a_chat_member_of_another_tenant_is_external() {
         super::remember_tenants(&serde_json::json!({"members": [
