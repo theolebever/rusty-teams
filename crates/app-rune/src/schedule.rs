@@ -56,26 +56,36 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if !s.schedule.open { return None; }
     let mut body = col().key("schedule-picker").w_full().gap(6.0).padding(8.0)
         .child(text("Schedule send").font(ts(14.0, 600.0)))
-        .child(crate::screens::button("Manage scheduled messages", "scheduled-load", |s: &mut UiState<A>, _| {
+        .child(crate::controls::button::<A>("scheduled-load", "Manage scheduled messages", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| {
             if !s.schedule.loading && s.schedule.changing.is_none() { s.schedule.loading = true; s.actions.load_scheduled(); }
         }))
         .child(manager(s));
     for preset in app_base::schedule_time::presets(Local::now()) {
-        body = body.child(crate::screens::button(&format!("{} · {}", preset.label, preset.time_label), &format!("schedule-{:?}", preset.kind), move |s: &mut UiState<A>, _| submit(s, preset.at)));
+        body = body.child(crate::controls::button::<A>(&format!("schedule-{:?}", preset.kind), &format!("{} · {}", preset.label, preset.time_label), crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| submit(s, preset.at)));
     }
     let mut days = row().w_full().wrap().gap(4.0);
     for day in app_base::schedule_time::day_choices(Local::now().date_naive()) {
-        days = days.child(crate::screens::button(&day.label, &format!("schedule-day-{}", day.date), move |s: &mut UiState<A>, _| s.schedule.day = Some(day.date))
-            .opacity(if s.schedule.day == Some(day.date) { 1.0 } else { 0.5 }));
+        days = days.child(crate::controls::button::<A>(
+            &format!("schedule-day-{}", day.date),
+            &day.label,
+            if s.schedule.day == Some(day.date) { crate::controls::Variant::Primary } else { crate::controls::Variant::Secondary },
+            crate::controls::Size::Sm,
+            move |s: &mut UiState<A>, _| s.schedule.day = Some(day.date),
+        ));
     }
     Some(body.child(days)
         .child(text_input(&s.schedule.time, ts(14.0, 400.0)).key("schedule-time").label("Local time (HH:MM)").w_full().on_edit(|s: &mut UiState<A>| &mut s.schedule.time))
         .children(blocker(s).map(|reason| text(reason).font(ts(12.0, 400.0))))
         .children(s.schedule.error.as_ref().map(|error| text(error.clone()).key("schedule-error").font(ts(12.0, 400.0))))
-        .child(crate::screens::button("Schedule", "schedule-submit", |s: &mut UiState<A>, _| {
-            let at = s.schedule.day.and_then(|day| app_base::schedule_time::custom_time(day, &s.schedule.time.text));
-            match at { Some(at) => submit(s, at), None => s.schedule.error = Some("Enter a time like 14:30.".into()) }
-        })))
+        .child(if s.schedule.pending.is_some() {
+            crate::controls::button::<A>("schedule-submit", "Scheduling…", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                .on_press(|_: &mut UiState<A>| {})
+        } else {
+            crate::controls::button::<A>("schedule-submit", "Schedule", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, _| {
+                let at = s.schedule.day.and_then(|day| app_base::schedule_time::custom_time(day, &s.schedule.time.text));
+                match at { Some(at) => submit(s, at), None => s.schedule.error = Some("Enter a time like 14:30.".into()) }
+            })
+        }))
 }
 
 fn change<A: Actions>(s: &mut UiState<A>, draft: chatsvc::ScheduledDraft, text: Option<String>) {
@@ -114,10 +124,10 @@ fn manager<A: Actions + 'static>(s: &UiState<A>) -> El {
         if s.schedule.edit_id.as_deref() == Some(&draft.id) {
             let draft = draft.clone();
             entry = entry.child(text_input(&s.schedule.edit, ts(13.0, 400.0)).key("scheduled-edit").label("Scheduled message").w_full().on_edit(|s: &mut UiState<A>| &mut s.schedule.edit))
-                .child(crate::screens::button("Save changes", "scheduled-save", move |s: &mut UiState<A>, _| change(s, draft.clone(), Some(s.schedule.edit.text.clone()))));
+                .child(crate::controls::button::<A>("scheduled-save", "Save changes", crate::controls::Variant::Primary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| change(s, draft.clone(), Some(s.schedule.edit.text.clone()))));
         } else {
             let draft = draft.clone();
-            entry = entry.child(crate::screens::button("Edit", &format!("scheduled-edit-{}", draft.id), move |s: &mut UiState<A>, _| {
+            entry = entry.child(crate::controls::button::<A>(&format!("scheduled-edit-{}", draft.id), "Edit", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| {
                 if s.schedule.changing.is_none() {
                     s.schedule.edit_id = Some(draft.id.clone());
                     s.schedule.edit_draft = teams_core::Draft::from_spans(&teams_core::html_to_spans(&draft.html));
@@ -127,7 +137,12 @@ fn manager<A: Actions + 'static>(s: &UiState<A>) -> El {
         }
         let draft = draft.clone();
         let label = if s.schedule.cancel_confirm.as_deref() == Some(&draft.id) { "Confirm cancellation" } else { "Cancel scheduled send" };
-        entry = entry.child(crate::screens::button(label, &format!("scheduled-cancel-{}", draft.id), move |s: &mut UiState<A>, _| {
+        entry = entry.child(crate::controls::button::<A>(
+            &format!("scheduled-cancel-{}", draft.id),
+            label,
+            if s.schedule.cancel_confirm.as_deref() == Some(&draft.id) { crate::controls::Variant::Danger } else { crate::controls::Variant::Secondary },
+            crate::controls::Size::Sm,
+            move |s: &mut UiState<A>, _| {
             if s.schedule.cancel_confirm.as_deref() == Some(&draft.id) { change(s, draft.clone(), None); }
             else { s.schedule.cancel_confirm = Some(draft.id.clone()); }
         }));

@@ -202,24 +202,11 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
 }
 
 fn item<A: Actions + 'static>(key: &str, glyph: Option<(&str, Color)>, label: &str, checked: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
-    let palette = active_palette();
-    let mut row = row()
-        .key(key.to_owned())
-        .w_full()
-        .h(32.0)
-        .px(8.0)
-        .gap(8.0)
-        .center_y()
-        .radius(4.0)
-        .hover(rgb(palette.popup_hover))
-        .on_press(press);
-    row = row.child(match glyph {
-        Some((name, color)) => sym(name, 14.0).color(color),
-        None => el().size(14.0, 14.0),
-    });
-    row = row.child(text(label.to_owned()).font(ts(13.0, 400.0)).color(rgb(palette.foreground)).grow(1.0).truncate());
-    if checked {
-        row = row.child(sym("check", 14.0).color(rgb(palette.foreground)));
+    // The shared row owns the geometry, role, hover and checked state. Its glyph slot uses the
+    // row ink, so a coloured presence dot is overlaid in the same 14 pt slot instead.
+    let mut row = crate::controls::menu_item::<A>(key, label, None, checked, press).pl(34.0);
+    if let Some((name, color)) = glyph {
+        row = row.child(sym(name, 14.0).color(color).absolute(10.0, 9.0));
     }
     row
 }
@@ -320,18 +307,11 @@ fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
         }))
 }
 
-fn chip<A: Actions + 'static>(key: String, label: &str, on: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
-    let palette = active_palette();
-    let (fill, ink) = if on { (palette.accent, palette.on_accent) } else { (palette.popup_hover, palette.foreground) };
-    row().key(key).h(28.0).px(10.0).center().radius(14.0).fill(rgb(fill)).on_press(press)
-        .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(rgb(ink)))
-}
-
 fn dialog<A: Actions + 'static>(s: &UiState<A>) -> El {
     let palette = active_palette();
     let mut spans = row().gap(6.0);
     for (index, span) in NOTE_SPANS.into_iter().enumerate() {
-        spans = spans.child(chip(format!("note-span-{index}"), span.label(), s.own.note_span == span, move |s: &mut UiState<A>| s.own.note_span = span));
+        spans = spans.child(crate::controls::chip::<A>(&format!("note-span-{index}"), span.label(), s.own.note_span == span, move |s: &mut UiState<A>| s.own.note_span = span));
     }
     let when = s.own.show_when_messaged;
     let sheet = col()
@@ -461,6 +441,35 @@ mod runtime_tests {
         assert!(rt.find("status-for-0").is_some(), "a forced state offers durations");
         click(&mut rt, "status-reset");
         assert_eq!(calls(&rt)[1], "availability None");
+    }
+
+    #[test]
+    fn presence_rows_and_the_submenu_back_row_are_accessible_menu_items() {
+        let mut rt = rt();
+        click(&mut rt, "title-account");
+        let elements = rt.elements();
+        let busy = elements.iter().find(|e| e.key.as_deref() == Some("status-Busy")).expect("Busy row");
+        assert_eq!(busy.role, "menuitem");
+        assert_eq!(busy.label.as_deref(), Some("Busy"));
+        assert!(busy.focusable);
+        assert_eq!(busy.fill.a, 0.0, "menu rows are unfilled");
+
+        click(&mut rt, "status-Busy");
+        click(&mut rt, "title-account");
+        let elements = rt.elements();
+        let busy = elements.iter().find(|e| e.key.as_deref() == Some("status-Busy")).expect("Busy row");
+        assert!(busy.item_selected, "the checked presence is exposed as a selected row");
+
+        // Opening the pause submenu draws a registered back arrow, not a missing glyph.
+        click(&mut rt, "status-pause");
+        assert!(rt.find("status-back").is_some(), "pause submenu exposes Back");
+        let elements = rt.elements();
+        let back = elements.iter().find(|e| e.key.as_deref() == Some("status-back")).expect("Back row");
+        assert_eq!(back.role, "menuitem");
+        assert_eq!(back.label.as_deref(), Some("Back"));
+        assert!(back.focusable);
+        click(&mut rt, "status-back");
+        assert!(rt.find("status-back").is_none(), "Back returns to the top-level menu");
     }
 
     #[test]

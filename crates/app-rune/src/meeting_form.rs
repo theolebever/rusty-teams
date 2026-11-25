@@ -65,12 +65,23 @@ pub fn dialog<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .child(field("Details", "meeting-details", &s.meeting.details, |s| &mut s.meeting.details));
     let mut repeats = row().w_full().wrap().gap(4.0);
     for repeat in chatsvc::Repeat::ALL {
-        repeats = repeats.child(crate::screens::button(repeat.label(), &format!("meeting-repeat-{repeat:?}"), move |s: &mut UiState<A>, _| s.meeting.repeat = repeat)
-            .opacity(if s.meeting.repeat == repeat { 1.0 } else { 0.5 }));
+        repeats = repeats.child(crate::controls::button::<A>(
+            &format!("meeting-repeat-{repeat:?}"),
+            repeat.label(),
+            if s.meeting.repeat == repeat { crate::controls::Variant::Primary } else { crate::controls::Variant::Secondary },
+            crate::controls::Size::Sm,
+            move |s: &mut UiState<A>, _| s.meeting.repeat = repeat,
+        ));
     }
     body = body.child(repeats)
         .children(s.meeting.error.as_ref().map(|error| text(error.clone()).key("meeting-error").wrap()))
-        .child(crate::screens::button(if s.meeting.sending { "Sending…" } else { "Send invitation" }, "meeting-send", |s: &mut UiState<A>, _| submit(s)));
+        .child(if s.meeting.sending {
+            // Keep the press target so a click cannot fall through to the dialog's scrim.
+            crate::controls::button::<A>("meeting-send", "Sending…", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                .on_press(|_: &mut UiState<A>| {})
+        } else {
+            crate::controls::button::<A>("meeting-send", "Send invitation", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, _| submit(s))
+        });
     Some(crate::shortcuts::card("meeting-form", 540.0, body, |s: &mut UiState<A>| s.meeting.open = false))
 }
 

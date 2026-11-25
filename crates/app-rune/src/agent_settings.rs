@@ -6,7 +6,7 @@
 use agents::{AgentProfile, AgentSettings, Environment, OutputFormat, environment_choices, output_choices, same_environment_kind};
 use rune::*;
 
-use crate::screens::button;
+use crate::controls::{button, Size, Variant};
 use crate::settings::{caption, choice, color, toggle};
 use crate::types::Actions;
 use crate::ui::{UiState, text, ts};
@@ -117,8 +117,8 @@ fn field<A: Actions + 'static>(s: &UiState<A>, label: &str, index: usize) -> El 
 
 fn form_buttons<A: Actions + 'static>() -> El {
     row().gap(8.0).px(12.0).pt(16.0)
-        .child(button::<A>("Done", "agent-form-done", |s, _| done(s)))
-        .child(button::<A>("Delete", "agent-form-delete", |s, _| delete(s)))
+        .child(button::<A>("agent-form-done", "Done", Variant::Primary, Size::Md, |s, _| done(s)))
+        .child(button::<A>("agent-form-delete", "Delete", Variant::Danger, Size::Md, |s, _| delete(s)))
 }
 
 fn agent_form<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -186,7 +186,7 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
         let mut buttons = row().gap(6.0);
         for (label, preset) in line {
             let preset = preset.clone();
-            buttons = buttons.child(button::<A>(&format!("+ {label}"), &format!("agent-add-{}", preset.id), move |s, _| {
+            buttons = buttons.child(button::<A>(&format!("agent-add-{}", preset.id), &format!("+ {label}"), Variant::Primary, Size::Sm, move |s, _| {
                 let mut id = String::new();
                 save(s, |settings| id = settings.add_agent(preset.clone()));
                 open_agent(s, &id);
@@ -199,10 +199,10 @@ pub fn pane<A: Actions + 'static>(s: &UiState<A>) -> El {
         let id = action.id.clone();
         pane = pane.child(row().w_full().gap(4.0).center_y()
             .child(item(format!("action-row-{id}"), &action.label, move |s: &mut UiState<A>| open_action(s, &id)).grow(1.0).min_w(0.0))
-            .child(button::<A>("Up", &format!("action-up-{index}"), move |s, _| save(s, |settings| { agents::move_item(&mut settings.actions, index, true); })))
-            .child(button::<A>("Down", &format!("action-down-{index}"), move |s, _| save(s, |settings| { agents::move_item(&mut settings.actions, index, false); }))));
+            .child(button::<A>(&format!("action-up-{index}"), "Up", Variant::Secondary, Size::Sm, move |s, _| save(s, |settings| { agents::move_item(&mut settings.actions, index, true); })))
+            .child(button::<A>(&format!("action-down-{index}"), "Down", Variant::Secondary, Size::Sm, move |s, _| save(s, |settings| { agents::move_item(&mut settings.actions, index, false); }))));
     }
-    pane = pane.child(row().px(12.0).pt(4.0).child(button::<A>("+ Add action", "action-add", |s, _| {
+    pane = pane.child(row().px(12.0).pt(4.0).child(button::<A>("action-add", "+ Add action", Variant::Primary, Size::Sm, |s, _| {
         let mut id = String::new();
         save(s, |settings| id = settings.add_action());
         open_action(s, &id);

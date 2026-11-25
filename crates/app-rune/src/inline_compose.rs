@@ -57,7 +57,7 @@ pub fn previews<A: Actions + 'static>(s: &UiState<A>) -> El {
             preview = preview.child(el().w(96.0).h(72.0).pixels_fit(loaded.pixels(), SurfaceFit::Fit));
         }
         preview = preview.child(text(image.name.clone()).font(ts(11.0, 400.0)).truncate())
-            .child(crate::screens::button("Remove", &format!("inline-remove-{marker}"), move |s: &mut UiState<A>, _| {
+            .child(crate::controls::button::<A>(&format!("inline-remove-{marker}"), "Remove", crate::controls::Variant::Danger, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| {
                 s.composer = TextEdit::new(s.composer.text.replace(&remove, ""));
                 s.compose.inline.retain(|(marker, _)| marker != &remove);
             }));

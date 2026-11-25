@@ -75,7 +75,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .h(30.0)
                         .px(8.0)
                         .center_y()
-                        .radius(4.0)
+                        .radius(6.0)
                         .hover(hover)
                         .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| {
                             s.compose.gifs.push(gif.clone());
@@ -117,21 +117,17 @@ pub fn chips<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     }
     let mut chips = row().key("gif-chips").gap(6.0);
     for (index, gif) in s.compose.gifs.iter().enumerate() {
-        chips = chips.child(
-            row()
-                .key(format!("gif-chip-{index}"))
-                .h(28.0)
-                .px(8.0)
-                .center_y()
-                .radius(14.0)
-                .fill(rgb(active_palette().popup_hover))
-                .on_press(move |s: &mut UiState<A>| {
-                    if index < s.compose.gifs.len() {
-                        s.compose.gifs.remove(index);
-                    }
-                })
-                .child(text(format!("GIF: {}  ×", gif.title)).font(ts(12.0, 600.0)).color(c(INK))),
-        );
+        chips = chips.child(crate::controls::chip::<A>(
+            &format!("gif-chip-{index}"),
+            &format!("GIF: {}  ×", gif.title),
+            false,
+            move |s: &mut UiState<A>| {
+                if index < s.compose.gifs.len() {
+                    s.compose.gifs.remove(index);
+                }
+            },
+        )
+        .label(format!("Remove GIF {}", gif.title)));
     }
     Some(chips)
 }

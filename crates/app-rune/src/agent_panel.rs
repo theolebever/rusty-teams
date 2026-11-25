@@ -72,7 +72,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         let mut chips = row().w_full().wrap().gap(6.0);
         for dir in recent {
             let pick = dir.clone();
-            chips = chips.child(crate::screens::button(dir, &format!("agent-dir-{dir}"), move |s: &mut UiState<A>, _| s.agent.working_dir = TextEdit::new(&pick)));
+            chips = chips.child(crate::controls::chip::<A>(&format!("agent-dir-{dir}"), dir, false, move |s: &mut UiState<A>| s.agent.working_dir = TextEdit::new(&pick)));
         }
         content = content.child(chips);
     }
@@ -80,15 +80,15 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         for action in &s.agent.settings.actions {
             let action = action.clone();
             let label = action.label.clone();
-            content = content.child(crate::screens::button(&label, &format!("agent-action-{}", action.id), move |s: &mut UiState<A>, _| start_action(s, &action)));
+            content = content.child(crate::controls::button::<A>(&format!("agent-action-{}", action.id), &label, crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| start_action(s, &action)));
         }
         for agent in &s.agent.settings.agents {
             let (id, name) = (agent.id.clone(), agent.name.clone());
-            content = content.child(crate::screens::button(&format!("Run {name}"), &format!("agent-{id}"), move |s: &mut UiState<A>, _| start(s, &id, &name)));
+            content = content.child(crate::controls::button::<A>(&format!("agent-{id}"), &format!("Run {name}"), crate::controls::Variant::Primary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| start(s, &id, &name)));
         }
     }
     if s.agent.running {
-        content = content.child(crate::screens::button("Stop", "agent-stop", |s: &mut UiState<A>, _| s.actions.stop_agent()));
+        content = content.child(crate::controls::button::<A>("agent-stop", "Stop", crate::controls::Variant::Danger, crate::controls::Size::Sm, |s: &mut UiState<A>, _| s.actions.stop_agent()));
         for step in &s.agent.steps {
             content = content.child(text(step.clone()).font(ts(13.0, 400.0)).color(c(MUTED)).truncate());
         }

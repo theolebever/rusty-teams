@@ -114,7 +114,7 @@ pub fn popup<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let mut list = col().key("emoji-suggestions").w_full().padding(4.0).radius(6.0).fill(rgb(palette.surface));
     for (index, glyph) in found.into_iter().enumerate() {
         list = list.child(row().key(format!("emoji-suggestion-{index}")).w_full().h(32.0).px(8.0).center_y()
-            .fill(rgb(if index == s.compose.emoji.highlighted { palette.popup_hover } else { palette.surface }))
+            .fill(rgb(if index == s.compose.emoji.highlighted { palette.surface_raised } else { palette.surface }))
             .hover(rgb(palette.popup_hover)).on_press_tx(move |s: &mut UiState<A>, tx| { choose(s, index); tx.focus("composer", false); })
             .child(text(app_base::emoticons::with_tone(glyph, s.settings.prefs.skin_tone)).font(ts(20.0, 400.0))));
     }
@@ -142,8 +142,9 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .size(CELL, CELL)
                 .radius(6.0)
                 .center()
-                .fill(if selected { hover } else { rgb(palette.surface) })
+                .fill(if selected { rgb(palette.surface_raised) } else { rgb(palette.surface) })
                 .hover(hover)
+                .label(format!("Emoji group {}", GROUPS[i].1))
                 .on_press(move |s: &mut UiState<A>| {
                     s.compose.emoji.tab = i;
                     s.compose.emoji.query.clear();
@@ -201,7 +202,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
     for tone in 0..=app_base::emoticons::SKIN_TONE_COUNT {
         tones = tones.child(row().key(format!("emoji-tone-{tone}")).size(CELL, CELL).center().radius(6.0)
             .label(format!("Skin tone {tone}"))
-            .fill(if s.settings.prefs.skin_tone == tone { hover } else { rgb(palette.surface) })
+            .fill(if s.settings.prefs.skin_tone == tone { rgb(palette.surface_raised) } else { rgb(palette.surface) })
             .hover(hover).on_press(move |s: &mut UiState<A>| crate::settings::change(s, crate::settings::Change::SkinTone(tone)))
             .child(text(app_base::emoticons::with_tone("👍", tone)).font(ts(20.0, 400.0))));
     }

@@ -20,7 +20,8 @@ use chrono::{DateTime, Local, Offset, Utc};
 use rune::*;
 use crate::ui::text;
 
-use crate::screens::{Screen, button, color, style};
+use crate::controls::{button, Size, Variant};
+use crate::screens::{Screen, color, style};
 use crate::types::Actions;
 use crate::ui::UiState;
 
@@ -65,8 +66,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .font(style(18.0, 600.0))
                 .color(color("#242424")),
         )
-        .child(button::<A>("Refresh", "agenda-refresh", |s, _| s.actions.load_agenda()))
-        .child(button::<A>("Week", "agenda-week", |s, _| {
+        .child(button::<A>("agenda-refresh", "Refresh", Variant::Secondary, Size::Sm, |s, _| s.actions.load_agenda()))
+        .child(button::<A>("agenda-week", "Week", Variant::Secondary, Size::Sm, |s, _| {
             crate::screens::navigate(s, Screen::Calendar)
         }));
     col()
@@ -125,8 +126,10 @@ fn meeting_card<A: Actions + 'static>(
     if let Some(url) = join {
         // The existing call flow: the Calls screen with the link filled in, joined from its prejoin.
         card = card.child(button::<A>(
-            "Join",
             &format!("agenda-join-{}", meeting.key),
+            "Join",
+            Variant::Primary,
+            Size::Sm,
             move |s, _| {
                 s.calls.link = TextEdit::new(&url);
                 s.screens.screen = Screen::Calls;

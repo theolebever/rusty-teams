@@ -61,7 +61,7 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         panel = panel.child(crate::new_chat::picker(s, draft, "members-new", |s| &mut s.chatlist.manage.add, &skip));
         if !draft.chips.is_empty() {
             let id = id.to_owned();
-            panel = panel.child(crate::screens::button("Add", "members-add-confirm", move |s: &mut UiState<A>, _| {
+            panel = panel.child(crate::controls::button::<A>("members-add-confirm", "Add", crate::controls::Variant::Primary, crate::controls::Size::Md, move |s: &mut UiState<A>, _| {
                 let people = s.chatlist.manage.add.chips.iter()
                     .map(|chip| store::MemberRecord { user_id: Some(chip.user_id.clone()), display_name: chip.name.clone() })
                     .collect();
@@ -87,16 +87,13 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
             .child(crate::avatar::person(s, &member.display_name, member.user_id.as_deref(), 28.0, None))
             .child(text(member.display_name.clone()).font(ts(13.0, 400.0)).color(tone(p.foreground)).truncate().grow(1.0).min_w(0.0));
         if let (true, Some(user)) = (group, user) {
-            line = line.child(
-                row()
-                    .key(format!("member-remove-{index}"))
-                    .size(24.0, 24.0)
-                    .center()
-                    .radius(6.0)
-                    .hover(tone(p.popup_hover))
-                    .on_press(move |s: &mut UiState<A>| s.actions.remove_member(&chat, &user))
-                    .child(sym("close", 14.0).color(tone(p.text_muted))),
-            );
+            line = line.child(crate::controls::icon_button::<A>(
+                &format!("member-remove-{index}"),
+                "close",
+                &format!("Remove {}", member.display_name),
+                false,
+                move |s: &mut UiState<A>, _| s.actions.remove_member(&chat, &user),
+            ));
         }
         list = list.child(line);
     }

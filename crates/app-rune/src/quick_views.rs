@@ -59,7 +59,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, view: QuickView) -> El {
             Some(Err(error)) => {
                 count += 1;
                 list = list.child(text(error.clone()).font(ts(13.0, 400.0)).color(tone(p.red_soft)).wrap())
-                    .child(crate::screens::button("Retry", "saved-retry", |s: &mut UiState<A>, _| { s.chatlist.saved = None; s.actions.load_saved(); }));
+                    .child(crate::controls::button::<A>("saved-retry", "Retry", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| { s.chatlist.saved = None; s.actions.load_saved(); }));
             }
             Some(Ok(items)) => for (i, item) in items.iter().enumerate() {
                 count += 1;
@@ -68,7 +68,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, view: QuickView) -> El {
                     item.topic.clone().or_else(|| item.author_name.clone()).unwrap_or_else(|| "Saved message".into()),
                     teams_core::preview_text(&item.preview).unwrap_or_default(), item.conversation_id.clone(), Some(item.root_id.clone())).grow(1.0).min_w(0.0));
                 if !s.read_only {
-                    line = line.child(crate::screens::button("Remove from saved", &format!("saved-remove-{i}"), move |s: &mut UiState<A>, _| s.actions.unsave(&saved)));
+                    line = line.child(crate::controls::button::<A>(&format!("saved-remove-{i}"), "Remove from saved", crate::controls::Variant::Danger, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| s.actions.unsave(&saved)));
                 }
                 list = list.child(line);
             },
@@ -116,5 +116,27 @@ mod tests {
         assert!(is_mention("mentionInChat"));
         assert!(is_mention("communityMention"));
         assert!(!is_mention("reply"));
+    }
+
+    #[test]
+    fn remove_from_saved_is_a_danger_action() {
+        use app_backend::schemes::active_palette;
+        fn saved_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            view(s, QuickView::Saved)
+        }
+        let mut state = UiState::new(Fake::default());
+        state.chatlist.saved = Some(Ok(vec![chatsvc::SavedMessage {
+            conversation_id: "chat".into(), message_id: "m".into(), root_id: String::new(),
+            author_id: None, author_name: Some("Ada".into()), preview: "keep me".into(),
+            saved_at: chrono::Utc::now(), topic: None,
+        }]));
+        let mut rt = Runtime::new(state, saved_view, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let e = elements.iter().find(|e| e.key.as_deref() == Some("saved-remove-0")).expect("remove button");
+        assert_eq!(e.role, "button");
+        assert_eq!(e.label.as_deref(), Some("Remove from saved"));
+        let red = rune::color::hex(&format!("#{:06X}", active_palette().red)).expect("red colour");
+        assert_eq!(e.fill, red, "a destructive action uses the danger fill");
     }
 }

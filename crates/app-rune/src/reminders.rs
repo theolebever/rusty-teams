@@ -10,7 +10,8 @@ use rune::*;
 use state::call::outlook_reminders::ReminderWrite;
 use state::call::reminder::{MeetingToast, ReminderPhase, subtitle};
 
-use crate::screens::{button, color, style};
+use crate::controls::{button, Size, Variant};
+use crate::screens::{color, style};
 use crate::types::Actions;
 use crate::ui::{UiState, text};
 
@@ -80,18 +81,18 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     let toast = shown(s)?;
     let mut actions = row().gap(8.0);
     if !s.read_only {
-        actions = actions.child(button::<A>("Join", "reminder-join", |s, _| { join(s); }));
+        actions = actions.child(button::<A>("reminder-join", "Join", Variant::Primary, Size::Md, |s, _| { join(s); }));
     }
     // As GPUI: snoozing only makes sense before the meeting starts.
     if toast.phase == ReminderPhase::Soon {
-        actions = actions.child(button::<A>("Snooze", "reminder-snooze", |s, _| snooze(s)));
+        actions = actions.child(button::<A>("reminder-snooze", "Snooze", Variant::Secondary, Size::Md, |s, _| snooze(s)));
     }
     let card = col().key("meeting-reminder").w(340.0).padding(16.0).gap(10.0).radius(8.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
         .role("alert").label(toast.subject.clone())
         .child(text(toast.subject.clone()).font(style(15.0, 600.0)).color(color("#242424")).truncate())
         .child(text(card_subtitle(toast)).font(style(13.0, 400.0)).color(color("#616161")))
         .child(actions
-            .child(button::<A>("Dismiss", "reminder-dismiss", |s, _| dismiss(s))));
+            .child(button::<A>("reminder-dismiss", "Dismiss", Variant::Danger, Size::Md, |s, _| dismiss(s))));
     Some(el().pin(None, None, Some(16.0), Some(16.0)).child(card))
 }
 

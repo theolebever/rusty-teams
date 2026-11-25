@@ -163,13 +163,12 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
             move |s: &mut UiState<A>| s.actions.set_chat_muted(&id, !muted)
         }));
         let chat = id.to_owned();
-        panel = panel.child(row().key("menu-copy-link").w_full().h(ITEM_H).px(8.0).gap(10.0).center_y().radius(6.0).hover(tone(p.popup_hover))
-            .label("Copy link").on_press_tx(move |s: &mut UiState<A>, tx| {
+        panel = panel.child(crate::controls::menu_item::<A>("menu-copy-link", "Copy link", Some("link"), false, |_| {})
+            .on_press_tx(move |s: &mut UiState<A>, tx| {
                 tx.copy(teams_core::chat_link(&chat));
                 s.chatlist.manage.close();
                 s.toast.show("Link copied");
-            }).child(sym("link", 16.0).color(tone(p.foreground)))
-            .child(text("Copy link").font(ts(13.0, 400.0)).color(tone(p.foreground))));
+            }));
         if !is_group(s, id) {
             let chat = id.to_owned();
             panel = panel.child(item("menu-remove-history", "delete", "Remove chat history", true,
@@ -190,32 +189,43 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
 }
 
 fn submenu_button<A: Actions + 'static>(key: &str, label: &str, page: Option<&'static str>) -> El {
-    let p = active_palette();
-    row().key(key.to_owned()).w_full().h(ITEM_H).px(8.0).gap(10.0).center_y().radius(6.0).hover(tone(p.popup_hover))
-        .label(label.to_owned()).on_press(move |s: &mut UiState<A>| s.chatlist.manage.submenu = page)
-        .child(sym(if page.is_some() { "keyboard_arrow_right" } else { "keyboard_arrow_left" }, 16.0).color(tone(p.foreground)))
-        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(tone(p.foreground)))
+    let glyph = if page.is_some() { "keyboard_arrow_right" } else { "keyboard_arrow_left" };
+    crate::controls::menu_item::<A>(key, label, Some(glyph), false, move |s: &mut UiState<A>| s.chatlist.manage.submenu = page)
 }
 
 /// One menu row. The menu closes after the action unless the action opens a dialog.
 fn item<A: Actions + 'static>(key: &str, glyph: &str, label: &str, danger: bool, act: impl Fn(&mut UiState<A>) + 'static) -> El {
+    let act = move |s: &mut UiState<A>| {
+        s.chatlist.manage.menu = None;
+        act(s);
+    };
+    if danger {
+        danger_item::<A>(key, glyph, label, act)
+    } else {
+        // A "check" glyph marks the active notification choice; use the shared selected state.
+        crate::controls::menu_item::<A>(key, label, Some(glyph), glyph == "check", act)
+    }
+}
+
+/// The shared row has no danger-ink variant. Keep its geometry, hover and role and change only
+/// the ink, so destructive actions stay red without a second menu style.
+fn danger_item<A: Actions + 'static>(key: &str, glyph: &str, label: &str, act: impl Fn(&mut UiState<A>) + 'static) -> El {
     let p = active_palette();
-    let color = tone(if danger { p.red_soft } else { p.foreground });
+    let ink = tone(p.red_soft);
     row()
         .key(key.to_owned())
         .w_full()
         .h(ITEM_H)
-        .px(8.0)
-        .gap(10.0)
+        .px(10.0)
+        .gap(8.0)
         .center_y()
         .radius(6.0)
         .hover(tone(p.popup_hover))
-        .on_press(move |s: &mut UiState<A>| {
-            s.chatlist.manage.menu = None;
-            act(s);
-        })
-        .child(sym(glyph, 16.0).color(color))
-        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(color))
+        .role("menuitem")
+        .label(label.to_owned())
+        .focusable(true)
+        .on_press(act)
+        .children([sym(glyph, 16.0).color(ink), text(label.to_owned()).font(ts(13.0, 400.0)).color(ink)])
 }
 
 fn confirm_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str, history: bool) -> El {
@@ -318,6 +328,37 @@ mod tests {
     fn calls(rt: &Runtime<UiState<Fake>>) -> Vec<String> { rt.state.actions.calls.borrow().clone() }
 
     #[test]
+    fn chat_menu_and_its_submenu_rows_are_accessible_menu_items() {
+        let mut rt = rt();
+        right_click(&mut rt, "chat-duo");
+        let elements = rt.elements();
+        let read = elements.iter().find(|e| e.key.as_deref() == Some("menu-read")).expect("read row");
+        assert_eq!(read.role, "menuitem");
+        assert_eq!(read.label.as_deref(), Some("Mark as read"));
+        assert!(read.focusable);
+        assert_eq!(read.fill.a, 0.0);
+
+        rt.update(|s, _| s.chatlist.folders.push(teams_core::ChatFolder {
+            id: "f".into(),
+            name: "Favorites".into(),
+            kind: teams_core::FolderKind::Favorites,
+            expanded: false,
+            conversation_ids: vec![],
+        }));
+        rt.frame(1.0 / 60.0);
+        click(&mut rt, "menu-sections");
+        assert!(rt.find("menu-back").is_some(), "sections submenu exposes Back");
+        let elements = rt.elements();
+        for key in ["menu-back", "menu-move-f"] {
+            let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert!(e.label.is_some() && e.focusable, "{key} is not an accessible menu row");
+        }
+        click(&mut rt, "menu-back");
+        assert!(rt.find("menu-read").is_some(), "Back returns to the chat menu");
+    }
+
+    #[test]
     fn chat_menu_requests_a_separate_window() {
         let mut rt = rt();
         right_click(&mut rt, "chat-duo");
@@ -392,13 +433,16 @@ mod tests {
         });
         rt.frame(1.0);
         click(&mut rt, "new-chat-start");
+        assert!(rt.state.chatlist.manage.new_chat_open, "a pending creation keeps the panel open");
+        // A second press while creating hits the start button's no-op handler, not a second create.
         click(&mut rt, "new-chat-start");
         assert_eq!(calls(&rt).iter().filter(|call| call.as_str() == "create zoe").count(), 1);
         assert_eq!(calls(&rt).last().map(String::as_str), Some("first Hello Zoe"));
         rt.update(|s, _| s.apply(Update::ChatCreateFailed("offline".into())));
         assert_eq!(rt.state.chatlist.manage.new_chat.first_message.text, "Hello Zoe");
         assert!(!rt.state.chatlist.manage.new_chat.creating);
-        assert!(rt.state.chatlist.manage.new_chat_open);
+        assert_eq!(rt.state.chatlist.manage.new_chat.error.as_deref(), Some("offline"));
+        assert!(rt.state.chatlist.manage.new_chat_open, "a failed creation keeps the panel open for a retry");
     }
 
     #[test]

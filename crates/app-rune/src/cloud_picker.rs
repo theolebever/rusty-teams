@@ -197,7 +197,7 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .on_press(move |s: &mut UiState<A>| open_tab(s, tab)));
         for (index, (name, folder)) in cloud.crumbs.iter().enumerate() {
             let folder = folder.clone();
-            trail = trail.child(text("›").font(ts(12.0, 400.0)).color(c(MUTED)))
+            trail = trail.child(sym("keyboard_arrow_right", 12.0).color(c(MUTED)))
                 .child(text(name.clone()).key(format!("cloud-crumb-{index}")).font(ts(12.0, 600.0)).color(rgb(palette.accent_text))
                     .on_press(move |s: &mut UiState<A>| {
                         s.compose.cloud.crumbs.truncate(index + 1);
@@ -237,15 +237,16 @@ pub fn picker<A: Actions + 'static>(s: &UiState<A>) -> El {
     let count = cloud.selected.len();
     let footer = row().key("cloud-footer").w_full().gap(8.0).center_y()
         .child(text(if count == 0 { String::new() } else { format!("{count} selected") }).font(ts(12.0, 400.0)).color(c(MUTED)).grow(1.0))
-        .child(crate::screens::button("Cancel", "cloud-cancel", |s: &mut UiState<A>, tx| { close(s); tx.focus("composer", false); }))
-        .child(row().key("cloud-attach").h(32.0).px(12.0).center().radius(6.0)
-            .fill(if count == 0 { c(LINE) } else { rgb(palette.accent) })
-            .on_press_tx(|s: &mut UiState<A>, tx: &mut Tx| {
-                if s.compose.cloud.selected.is_empty() { return; }
+        .child(crate::controls::button::<A>("cloud-cancel", "Cancel", crate::controls::Variant::Secondary, crate::controls::Size::Md, |s: &mut UiState<A>, tx| { close(s); tx.focus("composer", false); }))
+        .child(if count == 0 {
+            crate::controls::button::<A>("cloud-attach", "Attach", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                .on_press(|_: &mut UiState<A>| {})
+        } else {
+            crate::controls::button::<A>("cloud-attach", "Attach", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, tx: &mut Tx| {
                 attach(s);
                 tx.focus("composer", false);
             })
-            .child(text("Attach").font(ts(13.0, 600.0)).color(if count == 0 { c(MUTED) } else { rgb(palette.on_accent) })));
+        });
 
     col()
         .key("cloud-picker")

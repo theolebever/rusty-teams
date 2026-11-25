@@ -29,10 +29,15 @@ pub fn check<A: Actions>(s: &mut UiState<A>) {
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let mut body = col().w_full().gap(8.0).padding(12.0)
-        .child(crate::screens::button(if s.updates.checking { "Checking…" } else { "Check for updates" }, "updates-check", |s: &mut UiState<A>, _| check(s)));
+        .child(if s.updates.checking {
+            crate::controls::button::<A>("updates-check", "Checking…", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                .on_press(|_: &mut UiState<A>| {})
+        } else {
+            crate::controls::button::<A>("updates-check", "Check for updates", crate::controls::Variant::Secondary, crate::controls::Size::Md, |s: &mut UiState<A>, _| check(s))
+        });
     if let Some(tag) = &s.updates.ready {
         body = body.child(text(format!("Update {tag} is ready")).font(ts(14.0, 600.0)))
-            .child(crate::screens::button("Install and restart", "updates-install", |s: &mut UiState<A>, tx| {
+            .child(crate::controls::button::<A>("updates-install", "Install and restart", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, tx| {
                 let busy = s.calls.state.as_ref().is_some_and(calling::CallState::is_active) || s.calls.pending || !s.outbox.is_empty()
                     || crate::ui::active_target(s).is_some_and(|target| s.media.is_uploading(&target));
                 if busy { s.updates.error = Some("Finish calls, uploads and outgoing messages before restarting.".into()); return; }
@@ -48,6 +53,51 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rune::ElementInfo;
+
+    struct Quiet;
+    impl Actions for Quiet {
+        fn open(&self, _: &str) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+    }
+
+    fn updates_view(s: &UiState<Quiet>, _: &mut Cx<UiState<Quiet>>) -> El {
+        view(s)
+    }
+
+    fn by_key<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"))
+    }
+
+    #[test]
+    fn checking_for_updates_is_a_dimmed_waiting_button() {
+        let mut state = UiState::new(Quiet);
+        state.updates.checking = true;
+        let mut rt = Runtime::new(state, updates_view, (800.0, 600.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let e = by_key(&elements, "updates-check");
+        assert_eq!(e.label.as_deref(), Some("Checking…"));
+        assert!(!e.focusable, "a busy check leaves the tab order");
+        assert!(e.opacity < 1.0);
+        assert_eq!(e.fill.a, 0.0);
+    }
+
+    #[test]
+    fn install_is_a_primary_action() {
+        use app_backend::schemes::active_palette;
+        let mut state = UiState::new(Quiet);
+        state.updates.ready = Some("v9.0.0".into());
+        let mut rt = Runtime::new(state, updates_view, (800.0, 600.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let e = by_key(&elements, "updates-install");
+        assert_eq!(e.role, "button");
+        assert!(e.focusable);
+        let accent = rune::color::hex(&format!("#{:06X}", active_palette().accent)).expect("accent colour");
+        assert_eq!(e.fill, accent);
+    }
+
     #[test]
     fn rune_updates_cannot_take_gpui_staging_or_installer_assets() {
         let exe = Path::new("client/rusty-teams-rune.exe");

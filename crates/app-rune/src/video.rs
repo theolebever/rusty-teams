@@ -61,18 +61,23 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, url: &str, name: &str, key: &s
     let selected = url.to_owned();
     let mut body = col().key(key.to_owned()).w_full().max_w(560.0).gap(6.0)
         .child(text(name.to_owned()).font(ts(13.0, 600.0)))
-        .child(crate::screens::button(if loading { "Loading…" } else if playing { "Pause" } else { "Play video" }, &format!("{key}-play"), move |s: &mut UiState<A>, _| {
-            if s.media.video.pending.as_deref() == Some(&selected) { return; }
-            if let Some(playback) = s.media.video.playback.as_ref().filter(|playback| playback.url == selected) {
-                if playback.player.is_playing() { playback.player.pause(); } else { playback.player.play(); }
-            } else {
-                s.media.video.pause();
-                s.media.video.playback = None;
-                s.media.video.pending = Some(selected.clone());
-                s.media.video.error = None;
-                s.actions.load_video(&selected);
-            }
-        }));
+        .child(if loading {
+            crate::controls::button::<A>(&format!("{key}-play"), "Loading…", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                .on_press(|_: &mut UiState<A>| {})
+        } else {
+            let (label, variant) = if playing { ("Pause", crate::controls::Variant::Secondary) } else { ("Play video", crate::controls::Variant::Primary) };
+            crate::controls::button::<A>(&format!("{key}-play"), label, variant, crate::controls::Size::Md, move |s: &mut UiState<A>, _| {
+                if let Some(playback) = s.media.video.playback.as_ref().filter(|playback| playback.url == selected) {
+                    if playback.player.is_playing() { playback.player.pause(); } else { playback.player.play(); }
+                } else {
+                    s.media.video.pause();
+                    s.media.video.playback = None;
+                    s.media.video.pending = Some(selected.clone());
+                    s.media.video.error = None;
+                    s.actions.load_video(&selected);
+                }
+            })
+        });
     if let Some(playback) = playback {
         let (width, height) = playback.player.natural_size().unwrap_or((16, 9));
         let player = playback.player.clone();
@@ -83,10 +88,10 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>, url: &str, name: &str, key: &s
         let rewind = player.clone();
         let forward = player.clone();
         body = body.child(row().gap(6.0)
-            .child(crate::screens::button(if player.muted() { "Unmute" } else { "Mute" }, &format!("{key}-mute"), move |_: &mut UiState<A>, _| player.set_muted(!player.muted())))
-            .child(crate::screens::button("−10s", &format!("{key}-back"), move |_: &mut UiState<A>, _| rewind.seek(rewind.time() - 10.0)))
-            .child(crate::screens::button("+10s", &format!("{key}-forward"), move |_: &mut UiState<A>, _| forward.seek(forward.time() + 10.0)))
-            .child(crate::screens::button("Replay", &format!("{key}-replay"), move |_: &mut UiState<A>, _| { replay.seek(0.0); replay.play(); })));
+            .child(crate::controls::button::<A>(&format!("{key}-mute"), if player.muted() { "Unmute" } else { "Mute" }, crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |_: &mut UiState<A>, _| player.set_muted(!player.muted())))
+            .child(crate::controls::button::<A>(&format!("{key}-back"), "−10s", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |_: &mut UiState<A>, _| rewind.seek(rewind.time() - 10.0)))
+            .child(crate::controls::button::<A>(&format!("{key}-forward"), "+10s", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |_: &mut UiState<A>, _| forward.seek(forward.time() + 10.0)))
+            .child(crate::controls::button::<A>(&format!("{key}-replay"), "Replay", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |_: &mut UiState<A>, _| { replay.seek(0.0); replay.play(); })));
         if let PlayerState::Failed(error) = playback.player.state() { body = body.child(text(error).wrap()); }
     }
     if let Some((failed, error)) = &state.error && failed == url { body = body.child(text(error.clone()).key(format!("{key}-error")).wrap()); }

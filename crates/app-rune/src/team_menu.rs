@@ -29,18 +29,18 @@ pub fn open<A: Actions>(s: &mut UiState<A>, id: &str, channel: bool, x: f32, y: 
 
 pub fn more<A: Actions + 'static>(id: &str, channel: bool) -> El {
     let id = id.to_owned();
-    row().key(format!("team-more-{channel}-{id}")).size(24.0, 24.0).center().radius(4.0)
+    row().key(format!("team-more-{channel}-{id}")).size(24.0, 24.0).center().radius(6.0)
         .label("More options").help("More options").hover(tone(active_palette().row_hover))
         .on_pointer_move(|s: &mut UiState<A>, at| s.chatlist.team_menu.anchor = (at.x, at.y))
         .on_press(move |s: &mut UiState<A>| { let (x, y) = s.chatlist.team_menu.anchor; open(s, &id, channel, x, y); })
         .child(crate::icons::sym("more_horiz", 14.0).color(tone(active_palette().text_soft)))
 }
 
-fn item<A: Actions + 'static>(label: &str, key: &str, action: impl Fn(&mut UiState<A>) + 'static) -> El {
-    let p = active_palette();
-    row().key(key.to_owned()).w_full().h(32.0).px(8.0).center_y().radius(4.0).label(label.to_owned())
-        .hover(tone(p.popup_hover)).on_press(move |s: &mut UiState<A>| { s.chatlist.team_menu.menu = None; action(s); })
-        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(tone(p.foreground)))
+fn item<A: Actions + 'static>(label: &str, key: &str, selected: bool, action: impl Fn(&mut UiState<A>) + 'static) -> El {
+    crate::controls::menu_item::<A>(key, label, selected.then_some("check"), selected, move |s: &mut UiState<A>| {
+        s.chatlist.team_menu.menu = None;
+        action(s);
+    })
 }
 
 pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
@@ -52,7 +52,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .fill(tone(p.popup)).border(1.0, tone(p.border_strong));
     let copy_id = id.clone();
     let is_channel = *channel;
-    menu = menu.child(item("Copy link", "team-copy-link", move |s: &mut UiState<A>| s.actions.copy_team_link(&copy_id, is_channel)));
+    menu = menu.child(item("Copy link", "team-copy-link", false, move |s: &mut UiState<A>| s.actions.copy_team_link(&copy_id, is_channel)));
     if !s.read_only {
         if *channel {
             let row = s.channel(id)?;
@@ -61,7 +61,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                 for (delete, allowed, label) in [(false, rights.owner || rights.edit_channel, "Edit channel"), (true, rights.owner || rights.delete_channel, "Delete channel")] {
                     if allowed {
                         let (id, name) = (id.clone(), row.name.clone());
-                        menu = menu.child(item(label, if delete { "channel-delete" } else { "channel-edit" }, move |s: &mut UiState<A>| {
+                        menu = menu.child(item(label, if delete { "channel-delete" } else { "channel-edit" }, false, move |s: &mut UiState<A>| {
                             let state = &mut s.chatlist.team_menu;
                             state.edit_channel = Some(id.clone()); state.name = TextEdit::new(&name);
                             state.description.clear(); state.delete_confirm = delete; state.pending = false; state.loading = !delete; state.error = None;
@@ -73,11 +73,11 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             }
             let pinned = s.chatlist.pinned_channels.contains(id);
             let chat = id.clone();
-            menu = menu.child(item(if pinned { "Unpin channel" } else { "Pin channel" }, "channel-pin", move |s: &mut UiState<A>| s.actions.set_channel_pinned(&chat, !pinned)));
+            menu = menu.child(item(if pinned { "Unpin channel" } else { "Pin channel" }, "channel-pin", false, move |s: &mut UiState<A>| s.actions.set_channel_pinned(&chat, !pinned)));
             let (chat, shown) = (id.clone(), row.hidden);
-            menu = menu.child(item(if shown { "Show" } else { "Hide" }, "channel-show", move |s: &mut UiState<A>| s.actions.set_channel_shown(&chat, shown)));
+            menu = menu.child(item(if shown { "Show" } else { "Hide" }, "channel-show", false, move |s: &mut UiState<A>| s.actions.set_channel_shown(&chat, shown)));
             let chat = id.clone();
-            menu = menu.child(item("Mark all as read", "channel-read", move |s: &mut UiState<A>| s.actions.set_chat_read(&chat, true)));
+            menu = menu.child(item("Mark all as read", "channel-read", false, move |s: &mut UiState<A>| s.actions.set_chat_read(&chat, true)));
             let current = s.chatlist.channel_details.get(id).map(|details| details.notifications).unwrap_or_default();
             menu = menu.child(text("Channel notifications").font(ts(11.0, 600.0)).color(tone(p.text_muted)).padding(8.0));
             for (key, label, level) in [
@@ -86,25 +86,24 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                 ("off", "Off", store::ChannelNotificationLevel::Off),
             ] {
                 let chat = id.clone();
-                let label = if current.level == level { format!("✓ {label}") } else { label.into() };
-                menu = menu.child(item(&label, &format!("channel-notify-{key}"), move |s: &mut UiState<A>| s.actions.set_channel_notifications(&chat, store::ChannelNotifications { level, ..current })));
+                menu = menu.child(item(label, &format!("channel-notify-{key}"), current.level == level, move |s: &mut UiState<A>| s.actions.set_channel_notifications(&chat, store::ChannelNotifications { level, ..current })));
             }
             let chat = id.clone();
-            menu = menu.child(item(if current.include_replies { "✓ Include replies" } else { "Include replies" }, "channel-notify-replies", move |s: &mut UiState<A>| {
+            menu = menu.child(item("Include replies", "channel-notify-replies", current.include_replies, move |s: &mut UiState<A>| {
                 s.actions.set_channel_notifications(&chat, store::ChannelNotifications { include_replies: !current.include_replies, ..current });
             }));
         } else {
             let team = s.teams.iter().find(|team| &team.id == id)?;
             let shown = s.chatlist.team_details.get(id).is_some_and(|details| details.hidden);
             let team_id = id.clone();
-            menu = menu.child(item(if shown { "Show" } else { "Hide" }, "team-show", move |s: &mut UiState<A>| s.actions.set_team_shown(&team_id, shown)));
+            menu = menu.child(item(if shown { "Show" } else { "Hide" }, "team-show", false, move |s: &mut UiState<A>| s.actions.set_team_shown(&team_id, shown)));
             let channels: Vec<_> = team.channels.iter().map(|channel| channel.id.clone()).collect();
-            menu = menu.child(item("Mark all as read", "team-read", move |s: &mut UiState<A>| {
+            menu = menu.child(item("Mark all as read", "team-read", false, move |s: &mut UiState<A>| {
                 for channel in &channels { s.actions.set_chat_read(channel, true); }
             }));
             if s.chatlist.team_details.get(id).is_some_and(|details| details.rights.owner || details.rights.add_channel) {
                 let team_id = id.clone();
-                menu = menu.child(item("Add channel", "team-create-channel", move |s: &mut UiState<A>| {
+                menu = menu.child(item("Add channel", "team-create-channel", false, move |s: &mut UiState<A>| {
                     s.chatlist.team_menu.create_team = Some(team_id.clone());
                     s.chatlist.team_menu.name.clear();
                     s.chatlist.team_menu.description.clear();
@@ -182,7 +181,7 @@ fn create_dialog<A: Actions + 'static>(s: &UiState<A>, team: &str) -> El {
             .placeholder("Description", tone(p.text_muted)).color(tone(p.foreground))
             .on_edit(|s: &mut UiState<A>| &mut s.chatlist.team_menu.description));
     if s.chatlist.team_details.get(team).is_some_and(|details| details.rights.owner || details.rights.add_private_channel) {
-        dialog = dialog.child(item(if state.private { "✓ Private channel" } else { "Private channel" }, "channel-private", |s: &mut UiState<A>| s.chatlist.team_menu.private = !s.chatlist.team_menu.private));
+        dialog = dialog.child(item("Private channel", "channel-private", state.private, |s: &mut UiState<A>| s.chatlist.team_menu.private = !s.chatlist.team_menu.private));
     }
     dialog = dialog.child(row().gap(8.0).justify_end()
         .child(crate::screens::button("Cancel", "channel-create-cancel", |s: &mut UiState<A>, _| s.chatlist.team_menu.create_team = None))
@@ -229,6 +228,46 @@ mod tests {
         assert_eq!(s.chatlist.team_menu.description.text, "Existing description");
         assert_eq!(s.chatlist.team_menu.edit_channel.as_deref(), Some("channel"));
         assert!(!s.chatlist.team_menu.pending);
+    }
+
+    #[test]
+    fn notification_rows_use_selected_state_instead_of_a_text_check() {
+        use crate::types::ChannelDetails;
+
+        let mut s = UiState::new(Fake::default());
+        s.screens.screen = crate::screens::Screen::Teams;
+        s.teams.push(crate::types::TeamRow {
+            id: "team".into(),
+            name: "Team".into(),
+            channels: vec![crate::types::ChannelRow { id: "channel".into(), name: "General".into(), hidden: false, unread: false }],
+        });
+        s.chatlist.channel_details.insert(
+            "channel".into(),
+            ChannelDetails {
+                notifications: store::ChannelNotifications {
+                    level: store::ChannelNotificationLevel::BannerAndFeed,
+                    include_replies: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        open(&mut s, "channel", true, 200.0, 100.0);
+        let mut rt = Runtime::new(s, crate::ui::view::<Fake>, (1280.0, 800.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(1.0);
+        let elements = rt.elements();
+        let row = |key: &str| elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
+        for (key, label) in [("channel-notify-banner", "Banner and feed"), ("channel-notify-replies", "Include replies")] {
+            let e = row(key);
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert_eq!(e.label.as_deref(), Some(label), "{key}");
+            assert!(e.focusable && e.item_selected, "{key} should be a selected menu row");
+            assert_eq!(e.fill.a, 0.0, "{key} is filled at rest");
+        }
+        assert!(
+            elements.iter().all(|e| e.text.as_deref().map_or(true, |text| !text.contains('✓'))),
+            "no textual checkmarks in the menu"
+        );
     }
 
     #[test]

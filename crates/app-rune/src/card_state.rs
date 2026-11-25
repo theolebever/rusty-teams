@@ -28,36 +28,67 @@ pub fn input<A: Actions + 'static>(s: &UiState<A>, scope: &Scope, input: &CardIn
     let current = s.cards.inputs.get(&key).unwrap_or(&initial);
     let mut body = col().key(format!("{}-input-{}", scope.key, input.id)).w_full().gap(4.0)
         .children(input.label.as_ref().map(|label| text(format!("{label}{}", if input.required { " *" } else { "" })).font(ts(13.0, 600.0))));
-    let choices: Option<Vec<(String, String, bool)>> = match &input.kind {
-        CardInputKind::Choice(choice) => Some(choice.choices.iter().map(|item| (item.title.clone(), choice.toggled(&current.text, &item.value), choice.is_selected(&current.text, &item.value))).collect()),
-        CardInputKind::Toggle(toggle) => Some(vec![(toggle.title.clone(), toggle.flipped(&current.text), toggle.is_on(&current.text))]),
-        CardInputKind::Rating(rating) => Some((1..=rating.max).map(|number| ("★".repeat(number as usize), rating.value_text(f64::from(number)), rating.rating(&current.text) == f64::from(number))).collect()),
-        _ => None,
-    };
-    if let Some(choices) = choices {
-        for (index, (label, value, on)) in choices.into_iter().enumerate() {
-            let key = key.clone();
-            let choice = crate::screens::button(&format!("{} {label}", if on { "☑" } else { "☐" }), &format!("{}-choice-{}-{index}", scope.key, input.id), move |s: &mut UiState<A>, _| {
-                if !s.read_only && !s.cards.busy.contains(&key.0) { s.cards.inputs.insert(key.clone(), TextEdit::new(&value)); }
-            });
-            body = body.child(choice);
+    match &input.kind {
+        CardInputKind::Choice(choice) => {
+            for (index, item) in choice.choices.iter().enumerate() {
+                let (value, on) = (choice.toggled(&current.text, &item.value), choice.is_selected(&current.text, &item.value));
+                let owner = key.clone();
+                let choice_key = format!("{}-choice-{}-{index}", scope.key, input.id);
+                let label = item.title.clone();
+                let press = move |s: &mut UiState<A>| {
+                    if !s.read_only && !s.cards.busy.contains(&owner.0) { s.cards.inputs.insert(owner.clone(), TextEdit::new(&value)); }
+                };
+                // A single choice is an exclusive radio; a multi-select is a set of chips.
+                // Neither draws a text glyph for its state: the widget role and fill carry it.
+                body = body.child(if choice.multi {
+                    crate::controls::chip::<A>(&choice_key, &label, on, press)
+                } else {
+                    crate::controls::radio_item::<A>(&choice_key, &label, on, press)
+                });
+            }
         }
-    } else {
-        let input_copy = input.clone();
-        let placeholder = match &input.kind {
-            CardInputKind::Text(text) => text.placeholder.as_deref().unwrap_or_default(),
-            CardInputKind::Number(number) => number.placeholder.as_deref().unwrap_or_default(),
-            CardInputKind::Date(_) => "YYYY-MM-DD", CardInputKind::Time(_) => "HH:MM", _ => "",
-        };
-        let secure = matches!(&input.kind, CardInputKind::Text(text) if text.style == teams_core::TextStyle::Password);
-        let mut field = text_input(current, ts(14.0, 400.0)).key(format!("{}-field-{}", scope.key, input.id))
-            .label(input.label.clone().unwrap_or_else(|| input.id.clone())).placeholder(placeholder, crate::ui::c(crate::ui::MUTED)).w_full()
-            .on_edit(move |s: &mut UiState<A>| s.cards.inputs.entry(key.clone()).or_insert_with(|| {
-                let edit = TextEdit::new(input_copy.initial_value());
-                if secure { edit.secure() } else { edit }
-            }));
-        if secure { field = field.secure(); }
-        body = body.child(field);
+        CardInputKind::Toggle(toggle) => {
+            let value = toggle.flipped(&current.text);
+            let on = toggle.is_on(&current.text);
+            let owner = key.clone();
+            let enabled = !s.read_only && !s.cards.busy.contains(&owner.0);
+            body = body.child(crate::controls::switch_item::<A>(
+                &format!("{}-choice-{}-0", scope.key, input.id),
+                &toggle.title,
+                on,
+                enabled,
+                move |s: &mut UiState<A>| { s.cards.inputs.insert(owner.clone(), TextEdit::new(&value)); },
+            ));
+        }
+        CardInputKind::Rating(rating) => {
+            for index in 0..rating.max {
+                let value = rating.value_text(f64::from(index + 1));
+                let on = rating.rating(&current.text) == f64::from(index + 1);
+                let label = "★".repeat(index as usize + 1);
+                let owner = key.clone();
+                let rating_key = format!("{}-choice-{}-{index}", scope.key, input.id);
+                body = body.child(crate::controls::chip::<A>(&rating_key, &label, on, move |s: &mut UiState<A>| {
+                    if !s.read_only && !s.cards.busy.contains(&owner.0) { s.cards.inputs.insert(owner.clone(), TextEdit::new(&value)); }
+                }));
+            }
+        }
+        _ => {
+            let input_copy = input.clone();
+            let placeholder = match &input.kind {
+                CardInputKind::Text(text) => text.placeholder.as_deref().unwrap_or_default(),
+                CardInputKind::Number(number) => number.placeholder.as_deref().unwrap_or_default(),
+                CardInputKind::Date(_) => "YYYY-MM-DD", CardInputKind::Time(_) => "HH:MM", _ => "",
+            };
+            let secure = matches!(&input.kind, CardInputKind::Text(text) if text.style == teams_core::TextStyle::Password);
+            let mut field = text_input(current, ts(14.0, 400.0)).key(format!("{}-field-{}", scope.key, input.id))
+                .label(input.label.clone().unwrap_or_else(|| input.id.clone())).placeholder(placeholder, crate::ui::c(crate::ui::MUTED)).w_full()
+                .on_edit(move |s: &mut UiState<A>| s.cards.inputs.entry(key.clone()).or_insert_with(|| {
+                    let edit = TextEdit::new(input_copy.initial_value());
+                    if secure { edit.secure() } else { edit }
+                }));
+            if secure { field = field.secure(); }
+            body = body.child(field);
+        }
     }
     body
 }
@@ -131,7 +162,7 @@ pub fn dialog<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         }
         TaskDialogKind::Url { url, .. } => {
             let url = url.clone();
-            body = body.child(crate::screens::button("Open task", "card-task-open", move |s: &mut UiState<A>, tx| crate::rich_text::open(s, tx, &url)));
+            body = body.child(crate::controls::button::<A>("card-task-open", "Open task", crate::controls::Variant::Primary, crate::controls::Size::Md, move |s: &mut UiState<A>, tx| crate::rich_text::open(s, tx, &url)));
         }
     }
     Some(crate::shortcuts::card("card-task-dialog", dialog.width.clamp(320, 900) as f32, body, |s: &mut UiState<A>| s.cards.dialog = None))
@@ -213,5 +244,25 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let CardActionKind::Submit(submit) = &calls[0].kind else { panic!("submit action"); };
         assert_eq!(submit.data, serde_json::json!({"name":"Ada"}));
+    }
+
+    #[test]
+    fn card_inputs_use_widget_states_instead_of_checkbox_glyphs() {
+        fn view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            let card = AdaptiveCard::parse(r#"{"type":"AdaptiveCard","body":[{"type":"Input.ChoiceSet","id":"pick","choices":[{"title":"Ada","value":"ada"},{"title":"Bo","value":"bo"}]},{"type":"Input.Toggle","id":"ok","title":"Remember"}]}"#).expect("card");
+            crate::cards::view(s, &card, "card-glyphs", "message")
+        }
+        let mut rt = Runtime::new(UiState::new(Fake::default()), view, (600.0, 500.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let texts: Vec<&str> = elements.iter().filter_map(|e| e.text.as_deref()).collect();
+        assert!(
+            texts.iter().all(|text| !text.contains('☑') && !text.contains('☐') && !text.contains('✓')),
+            "checkbox glyphs leaked into the card: {texts:?}"
+        );
+        let roles: Vec<&str> = elements.iter().map(|e| e.role).collect();
+        assert!(roles.contains(&"radio"), "a single choice set exposes radio rows: {roles:?}");
+        assert!(roles.contains(&"switch"), "a toggle exposes a switch row: {roles:?}");
+        assert!(elements.iter().any(|e| e.label.as_deref() == Some("Ada")));
     }
 }

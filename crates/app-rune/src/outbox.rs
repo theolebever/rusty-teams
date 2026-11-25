@@ -89,7 +89,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
             .child(text(row.error.clone().unwrap_or_else(|| "Sending…".into())).font(ts(12.0, 400.0)));
         if row.error.is_some() && !s.read_only {
             let id = row.id.clone();
-            message = message.child(crate::screens::button("Retry", &format!("retry-{}", row.id), move |s: &mut UiState<A>, _| s.actions.retry_outbox(&id)));
+            message = message.child(crate::controls::button::<A>(&format!("retry-{}", row.id), "Retry", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| s.actions.retry_outbox(&id)));
         }
         list = list.child(message);
     }

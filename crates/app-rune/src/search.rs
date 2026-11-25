@@ -119,19 +119,10 @@ pub fn search_box<A: Actions + 'static>(s: &UiState<A>) -> El {
                         .on_edit(|s: &mut UiState<A>| &mut s.global_search.edit)
                         .on_submit(|s: &mut UiState<A>, _| submit(s)),
                 )
-                .child(
-                    row()
-                        .key("chat-search-clear")
-                        .size(20.0, 20.0)
-                        .center()
-                        .radius(6.0)
-                        .hover(tone(p.popup_hover))
-                        .on_press_tx(|s: &mut UiState<A>, _| {
-                            s.global_search.edit.clear();
-                            s.global_search.results = None;
-                        })
-                        .child(sym("close", 14.0).color(tone(p.text_muted))),
-                ),
+                .child(crate::controls::icon_button::<A>("chat-search-clear", "close", "Clear search", false, |s: &mut UiState<A>, _| {
+                    s.global_search.edit.clear();
+                    s.global_search.results = None;
+                })),
         )
 }
 

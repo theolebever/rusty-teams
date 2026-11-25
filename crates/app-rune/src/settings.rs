@@ -9,6 +9,7 @@ use app_backend::schemes;
 use calling::DeviceChoice;
 use rune::*;
 use teams_core::{ChatSettingChange, ChatSettingsDocument, EnterKeyBehavior};
+use crate::controls::{self, Size, Variant};
 use crate::ui::{text, ts};
 
 use crate::types::Actions;
@@ -28,6 +29,10 @@ pub fn color(hex: &str) -> Color {
         "#E8EBFA" => Some(palette.bubble_own),
         "#DADDF5" => Some(palette.reaction_on_own),
         "#C4314B" => Some(palette.red),
+        // Find's match highlight is a tinted row wash, not a fixed yellow that would be
+        // illegible in dark mode. `selection` is the role for a highlighted row; its
+        // `#rrggbbaa` value is decoded by `rune::color::hex` with the intended alpha.
+        "#FFF4CE" => Some(palette.selection),
         _ => None,
     };
     let mapped = value.map(|value| format!("#{value:06X}"));
@@ -188,30 +193,33 @@ pub(crate) fn notify<A: Actions>(s: &mut UiState<A>, edit: impl FnOnce(&mut rule
     change(s, Change::Notify(settings));
 }
 
+/// Section captions are sentence case across every pane. Callers that still pass an all-caps
+/// legacy string (translation and agent panes) are normalised here so the look stays consistent.
 pub(crate) fn caption(label: &str) -> El {
-    text(label.to_owned()).font(ts(12.0, 600.0)).color(color("#616161")).pt(16.0)
+    text(sentence_case(label)).font(ts(12.0, 600.0)).color(color("#616161")).pt(16.0)
 }
 
-fn switch(on: bool) -> El {
-    let knob = el().w(14.0).h(14.0).radius(7.0).fill(color(if on { "#FFFFFF" } else { "#616161" }));
-    let track = row().w(40.0).h(20.0).radius(10.0).px(3.0).center_y();
-    let track = if on { track.fill(color("#5B5FC7")).child(el().grow(1.0)) } else { track.border(1.0, color("#616161")) };
-    track.child(knob)
+/// Lowercases an all-caps label and capitalises only its first letter; anything else is kept.
+fn sentence_case(label: &str) -> String {
+    if label.is_empty() || !label.chars().all(|c| !c.is_lowercase() && (c.is_uppercase() || c.is_whitespace())) {
+        return label.to_owned();
+    }
+    let lower = label.to_lowercase();
+    let mut chars = lower.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + chars.as_str())
 }
 
 /// A setting row with a switch on the right; the whole row toggles.
+///
+/// The shared primitive supplies the switch role, accessible name, checked state, focus and the
+/// dimmed disabled look that this row used to approximate with local `el()` drawing.
 pub(crate) fn toggle<A: Actions + 'static>(key: &str, title: &str, on: bool, enabled: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
-    let row = row().key(key.to_owned()).w_full().min_h(40.0).px(12.0).gap(12.0).center_y().radius(6.0)
-        .child(text(title.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).wrap().grow(1.0).min_w(0.0))
-        .child(switch(on));
-    if enabled { row.hover(color("#EBEBEB")).on_press(press) } else { row.opacity(0.4) }
+    controls::switch_item(key, title, on, enabled, press)
 }
 
-/// A radio row in a choice list.
+/// A radio row in a choice list. The circle is drawn by the primitive, never a text glyph.
 pub(crate) fn choice<A: Actions + 'static>(key: String, label: &str, selected: bool, press: impl Fn(&mut UiState<A>) + 'static) -> El {
-    row().key(key).w_full().h(34.0).px(12.0).gap(10.0).center_y().radius(6.0).hover(color("#EBEBEB")).on_press(press)
-        .child(text(if selected { "●" } else { "○" }).color(color(if selected { "#5B5FC7" } else { "#616161" })))
-        .child(text(label.to_owned()).font(ts(14.0, 400.0)).color(color("#242424")).truncate())
+    controls::radio_item(&key, label, selected, press)
 }
 
 pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -229,10 +237,13 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     for section in &shown {
         let section = *section;
         let active = section == s.settings.section;
-        let item = row().key(format!("settings-nav-{section:?}")).w_full().h(32.0).px(12.0).center_y().radius(6.0)
-            .on_press(move |s: &mut UiState<A>| select(s, section))
-            .child(text(section.label()).font(ts(14.0, if active { 600.0 } else { 400.0 })).color(color("#242424")).truncate());
-        nav = nav.child(if active { item.fill(color("#EBEBEB")) } else { item.hover(color("#EBEBEB")) });
+        nav = nav.child(controls::menu_item(
+            &format!("settings-nav-{section:?}"),
+            section.label(),
+            None,
+            active,
+            move |s: &mut UiState<A>| select(s, section),
+        ));
     }
     // A search that hides the open section shows its first match instead.
     let section = if shown.contains(&s.settings.section) { s.settings.section } else { shown.first().copied().unwrap_or(s.settings.section) };
@@ -263,11 +274,11 @@ fn general<A: Actions + 'static>(s: &UiState<A>) -> El {
     let prefs = &s.settings.prefs;
     let (auto_start, background, close_to_tray) = (prefs.auto_start, prefs.open_in_background, prefs.notify.close_to_tray);
     let mut pane = col().w_full()
-        .child(caption("SYSTEM"))
+        .child(caption("System"))
         .child(toggle("settings-auto-start", AUTO_START, auto_start, true, move |s: &mut UiState<A>| change(s, Change::AutoStart(!auto_start))))
         .child(toggle("settings-open-in-background", BACKGROUND, background, auto_start, move |s: &mut UiState<A>| change(s, Change::OpenInBackground(!background))))
         .child(toggle("settings-close-to-tray", CLOSE_TO_TRAY, close_to_tray, true, |s: &mut UiState<A>| notify(s, |n| n.close_to_tray = !n.close_to_tray)))
-        .child(caption("UP ARROW IN COMPOSE BOX"));
+        .child(caption("Up arrow in compose box"));
     for (label, behavior) in [("Edit last message", teams_core::UpArrowBehavior::EditLastMessage), ("Navigate to messages", teams_core::UpArrowBehavior::NavigateToMessages), ("Stay in compose", teams_core::UpArrowBehavior::StayInCompose)] {
         pane = pane.child(choice(format!("settings-up-{behavior:?}"), label, prefs.chat.settings().up_arrow == behavior, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::UpArrow(behavior)))));
     }
@@ -275,7 +286,7 @@ fn general<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 fn calls<A: Actions + 'static>(s: &UiState<A>) -> El {
-    let mut pane = col().w_full().child(caption("RINGTONES"));
+    let mut pane = col().w_full().child(caption("Ringtones"));
     for call_type in chatsvc::sounds::RingtoneCallType::ALL {
         let current = s.settings.prefs.notify.sounds.ringtones.get(call_type);
         pane = pane.child(text(call_type.label()).font(ts(14.0, 600.0)).padding(12.0));
@@ -306,10 +317,10 @@ fn notifications<A: Actions + 'static>(s: &UiState<A>) -> El {
     let preview = prefs.chat.settings().notifications.show_preview;
     let sounds = &n.sounds;
     let mut pane = col().w_full()
-        .child(caption("APPEARANCE AND SOUND"))
+        .child(caption("Appearance and sound"))
         .child(toggle("settings-preview", PREVIEW, preview, true, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::ShowPreview(!preview)))))
         .child(toggle("settings-flash", FLASH, n.flash, true, |s: &mut UiState<A>| notify(s, |n| n.flash = !n.flash)))
-        .child(caption("SOUND"))
+        .child(caption("Sound"))
         .child(toggle("settings-notification-sound", SOUND, sounds.notification_sound, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.notification_sound = !n.sounds.notification_sound)));
     if sounds.notification_sound {
         pane = pane.child(sound_list::<A>("settings-sound", &AlertSound::NORMAL, sounds.notification_sound_type, |n| &mut n.sounds.notification_sound_type));
@@ -320,10 +331,10 @@ fn notifications<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
     pane = pane.child(toggle("settings-call-sound", CALL_SOUND, sounds.call_and_meeting_sound, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.call_and_meeting_sound = !n.sounds.call_and_meeting_sound)))
         .child(toggle("settings-busy-sound", BUSY_SOUND, sounds.sound_when_busy, true, |s: &mut UiState<A>| notify(s, |n| n.sounds.sound_when_busy = !n.sounds.sound_when_busy)))
-        .child(caption("CALLS AND MEETINGS"))
+        .child(caption("Calls and meetings"))
         .child(toggle("settings-hide-in-calls", HIDE_IN_CALLS, n.mute_in_calls, true, |s: &mut UiState<A>| notify(s, |n| n.mute_in_calls = !n.mute_in_calls)));
     let account = prefs.chat.settings().notifications;
-    pane = pane.child(caption("ACTIVITY"));
+    pane = pane.child(caption("Activity"));
     for preset in teams_core::NotificationPreset::ALL {
         let label = match preset { teams_core::NotificationPreset::AllActivity => "All activity", teams_core::NotificationPreset::MentionsAndReplies => "Mentions and replies", teams_core::NotificationPreset::Customised => "Customised" };
         pane = pane.child(choice(format!("settings-preset-{preset:?}"), label, account.preset == preset, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::Preset(preset)))));
@@ -339,11 +350,11 @@ fn notifications<A: Actions + 'static>(s: &UiState<A>) -> El {
             pane = pane.child(choice(format!("settings-alert-{key}-{alert:?}"), label, current == alert, move |s: &mut UiState<A>| change(s, Change::Chat(update(alert)))));
         }
     }
-    pane = pane.child(caption("MEETING CHATS"));
+    pane = pane.child(caption("Meeting chats"));
     for (label, mode) in [("Mute", teams_core::MeetingChatNotifications::Mute), ("Unmute", teams_core::MeetingChatNotifications::Unmute), ("Mute until I join", teams_core::MeetingChatNotifications::MuteUntilJoin)] {
         pane = pane.child(choice(format!("settings-meeting-chat-{mode:?}"), label, account.meeting_chats == mode, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::MeetingChats(mode)))));
     }
-    pane = pane.child(caption("STATUS NOTIFICATIONS"));
+    pane = pane.child(caption("Status notifications"));
     for person in &s.profile.followed {
         let id = person.user_id.clone();
         let name = person.name.clone();
@@ -354,21 +365,21 @@ fn notifications<A: Actions + 'static>(s: &UiState<A>) -> El {
 
 fn appearance<A: Actions + 'static>(s: &UiState<A>) -> El {
     let current = s.appearance;
-    let mut pane = col().w_full().child(caption("THEME"));
+    let mut pane = col().w_full().child(caption("Theme"));
     for theme in ThemeChoice::ALL {
         pane = pane.child(choice(format!("theme-{}", theme.key()), theme.label(), current.theme == theme, move |s: &mut UiState<A>| {
             s.appearance.theme = theme;
             s.actions.set_appearance(s.appearance);
         }));
     }
-    pane = pane.child(caption("COLOR SCHEME"));
+    pane = pane.child(caption("Color scheme"));
     for scheme in schemes::SCHEMES {
         pane = pane.child(choice(format!("settings-color-scheme-{}", scheme.id), scheme.name, current.color_scheme.id == scheme.id, move |s: &mut UiState<A>| {
             s.appearance.color_scheme = scheme;
             s.actions.set_appearance(s.appearance);
         }));
     }
-    pane = pane.child(caption("APP ICON"));
+    pane = pane.child(caption("App icon"));
     for icon in AppIcon::ALL {
         pane = pane.child(choice(format!("settings-app-icon-{}", icon.key()), icon.label(), current.app_icon == icon, move |s: &mut UiState<A>| {
             s.appearance.app_icon = icon;
@@ -383,9 +394,9 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
     let account = prefs.chat.settings();
     let receipts = account.read_receipts;
     let mut pane = col().w_full()
-        .child(caption("CHAT LIST"))
+        .child(caption("Chat list"))
         .child(toggle("settings-muted-section", "Show muted items in their own section", s.section_settings.enabled(teams_core::ChatSection::Muted), true, |s: &mut UiState<A>| change(s, Change::MutedSection(!s.section_settings.enabled(teams_core::ChatSection::Muted)))))
-        .child(caption("CHATS"))
+        .child(caption("Chats"))
         .child(toggle("settings-markdown", "Format messages using mark-down", prefs.markdown, true, |s: &mut UiState<A>| change(s, Change::Markdown(!s.settings.prefs.markdown))))
         .child(toggle("settings-actions-right-click", "Show message actions on right click", prefs.actions_on_right_click, true, |s: &mut UiState<A>| change(s, Change::ActionsOnRightClick(!s.settings.prefs.actions_on_right_click))))
         .child(toggle("settings-read-receipts", RECEIPTS, receipts, true, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::ReadReceipts(!receipts)))))
@@ -395,7 +406,7 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
             change(s, Change::Chat(ChatSettingChange::EnterKey(behavior)));
         }));
     }
-    pane = pane.child(caption("MESSAGE DENSITY"));
+    pane = pane.child(caption("Message density"));
     for (label, density) in [("Comfy", teams_core::MessageDensity::Comfy), ("Compact", teams_core::MessageDensity::Compact)] {
         pane = pane.child(choice(format!("settings-density-{density:?}"), label, account.message_density == density, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::MessageDensity(density)))));
     }
@@ -404,23 +415,27 @@ fn chats<A: Actions + 'static>(s: &UiState<A>) -> El {
     for id in REACTION_CHOICES {
         let on = prefs.reactions.iter().any(|chosen| chosen == id);
         let glyph = chatsvc::reaction_glyph_for_key(id).unwrap_or_else(|| id.to_owned());
-        let chip = row().key(format!("settings-reaction-{id}")).h(32.0).px(10.0).center().radius(6.0)
-            .on_press(move |s: &mut UiState<A>| {
+        reactions = reactions.child(controls::chip(
+            &format!("settings-reaction-{id}"),
+            &glyph,
+            on,
+            move |s: &mut UiState<A>| {
                 let mut ids = s.settings.prefs.reactions.clone();
                 if on { ids.retain(|chosen| chosen != id); } else if ids.len() < teams_core::DEFAULT_REACTION_SLOTS { ids.push(id.to_owned()); } else { return; }
                 change(s, Change::DefaultReactions(ids));
-            })
-            .child(text(glyph).font(ts(16.0, 400.0)));
-        reactions = reactions.child(if on { chip.fill(color("#E8EBFA")).border(1.0, color("#5B5FC7")) } else { chip.fill(color("#F5F5F5")).hover(color("#EBEBEB")) });
+            },
+        ));
     }
     pane = pane.child(reactions).child(caption(SKIN_TONE));
     let mut tones = row().w_full().gap(6.0).px(12.0);
     for tone in 0..=5u8 {
         let glyph = chatsvc::reaction_glyph_for_key(&if tone == 0 { "like".to_owned() } else { format!("like-tone{tone}") }).unwrap_or_else(|| tone.to_string());
-        let chip = row().key(format!("settings-skin-tone-{tone}")).h(32.0).w(36.0).center().radius(6.0)
-            .on_press(move |s: &mut UiState<A>| change(s, Change::SkinTone(tone)))
-            .child(text(glyph).font(ts(16.0, 400.0)));
-        tones = tones.child(if prefs.skin_tone == tone { chip.fill(color("#E8EBFA")).border(1.0, color("#5B5FC7")) } else { chip.hover(color("#EBEBEB")) });
+        tones = tones.child(controls::chip(
+            &format!("settings-skin-tone-{tone}"),
+            &glyph,
+            prefs.skin_tone == tone,
+            move |s: &mut UiState<A>| change(s, Change::SkinTone(tone)),
+        ));
     }
     pane.child(tones)
 }
@@ -429,9 +444,9 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
     let prefs = &s.settings.prefs;
     let mut pane = col().w_full();
     for (device, title, entries, selected) in [
-        (Device::Speaker, "Speaker", s.calls.devices.output_entries(), &prefs.speaker),
-        (Device::Microphone, "Microphone", s.calls.devices.input_entries(), &prefs.microphone),
-        (Device::Camera, "Camera", calling::camera_entries(&s.calls.cameras), &prefs.camera),
+        (Device::Speaker, "Speaker", s.calls.devices.output_entries_for(&prefs.speaker), &prefs.speaker),
+        (Device::Microphone, "Microphone", s.calls.devices.input_entries_for(&prefs.microphone), &prefs.microphone),
+        (Device::Camera, "Camera", calling::camera_entries_for(&s.calls.cameras, &prefs.camera), &prefs.camera),
     ] {
         pane = pane.child(caption(title));
         for entry in entries {
@@ -446,10 +461,16 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
 
 fn about<A: Actions + 'static>() -> El {
     col().w_full()
-        .child(caption("RUSTY TEAMS"))
+        .child(caption("Rusty Teams"))
         .child(text(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0))
         .child(text(format!("Build {}", app_backend::version::build_version())).font(ts(14.0, 400.0)).color(color("#616161")).px(12.0).pt(4.0))
-        .child(crate::screens::button("Copy build", "settings-copy-build", |_: &mut UiState<A>, tx| tx.copy(app_backend::version::build_version())))
+        .child(controls::button::<A>(
+            "settings-copy-build",
+            "Copy build",
+            Variant::Secondary,
+            Size::Md,
+            |_: &mut UiState<A>, tx| tx.copy(app_backend::version::build_version()),
+        ))
 }
 
 #[cfg(test)]
@@ -516,5 +537,184 @@ mod tests {
         assert!(Section::General.matches("up arrow"));
         assert!(Section::Chats.matches("density"));
         assert!(Section::Chats.matches("right click"));
+    }
+
+    #[test]
+    fn caption_sentence_cases_all_caps_labels_keeping_accents() {
+        assert_eq!(sentence_case("PRÉFÉRENCES"), "Préférences");
+        assert_eq!(sentence_case("UP ARROW"), "Up arrow");
+        assert_eq!(sentence_case("Already fine"), "Already fine");
+    }
+
+    // --- Shared-control migration tests -------------------------------------------------
+
+    fn by_key<'a>(elements: &'a [rune::ElementInfo], key: &str) -> &'a rune::ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.path.ends_with(&format!("/{key}")) || e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no element {key} in:\n{}", elements.iter().map(|e| e.path.as_str()).collect::<Vec<_>>().join("\n")))
+    }
+
+    fn a11y_by_key<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        if node.get("key").and_then(|v| v.as_str()) == Some(key) {
+            return Some(node);
+        }
+        node.get("children")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .find_map(|child| a11y_by_key(child, key))
+    }
+
+    fn states(node: &serde_json::Value) -> Vec<&str> {
+        node.get("states")
+            .and_then(|s| s.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str())
+            .collect()
+    }
+
+    fn control_fixture(_s: &UiState<Fake>, _cx: &mut Cx<UiState<Fake>>) -> El {
+        col()
+            .key("settings-controls-fixture")
+            .w(400.0)
+            .gap(4.0)
+            .padding(8.0)
+            .child(toggle::<Fake>("fixture-switch-on", "Notifications", true, true, |_| {}))
+            .child(toggle::<Fake>("fixture-switch-off", "Do not disturb", false, false, |_| {}))
+            .child(choice::<Fake>("fixture-radio-on".to_owned(), "Light", true, |_| {}))
+            .child(choice::<Fake>("fixture-radio-off".to_owned(), "Dark", false, |_| {}))
+    }
+
+    fn control_runtime() -> Runtime<UiState<Fake>> {
+        let mut rt = Runtime::new(UiState::new(Fake::default()), control_fixture, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        rt
+    }
+
+    fn settings_runtime() -> Runtime<UiState<Fake>> {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = crate::screens::Screen::Settings;
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1100.0, 800.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        rt
+    }
+
+    #[test]
+    fn shared_controls_toggle_exposes_switch_role_and_checked_state() {
+        let rt = control_runtime();
+        let elements = rt.elements();
+        let on = by_key(&elements, "fixture-switch-on");
+        assert_eq!(on.role, "switch");
+        assert_eq!(on.label.as_deref(), Some("Notifications"));
+        assert!(on.focusable, "an enabled switch is keyboard reachable");
+        let tree = rt.accessibility_json();
+        let on_node = a11y_by_key(&tree, "fixture-switch-on").expect("switch-on in a11y tree");
+        let off_node = a11y_by_key(&tree, "fixture-switch-off").expect("switch-off in a11y tree");
+        assert!(states(on_node).contains(&"checked"), "on switch is checked");
+        assert!(states(off_node).contains(&"unchecked"), "off switch is unchecked");
+    }
+
+    #[test]
+    fn shared_controls_choice_exposes_radio_role_without_glyphs() {
+        let rt = control_runtime();
+        let elements = rt.elements();
+        let on = by_key(&elements, "fixture-radio-on");
+        assert_eq!(on.role, "radio");
+        assert_eq!(on.label.as_deref(), Some("Light"));
+        assert!(on.focusable);
+        assert!(
+            elements.iter().all(|e| e.text.as_deref().map_or(true, |t| !t.contains('●') && !t.contains('○'))),
+            "radio dots must be drawn, not text glyphs"
+        );
+        let tree = rt.accessibility_json();
+        assert!(states(a11y_by_key(&tree, "fixture-radio-on").unwrap()).contains(&"checked"));
+        assert!(states(a11y_by_key(&tree, "fixture-radio-off").unwrap()).contains(&"unchecked"));
+    }
+
+    #[test]
+    fn shared_controls_disabled_toggle_is_dimmed_and_not_focusable() {
+        let rt = control_runtime();
+        let elements = rt.elements();
+        let off = by_key(&elements, "fixture-switch-off");
+        assert_eq!(off.role, "switch");
+        assert_eq!(off.label.as_deref(), Some("Do not disturb"));
+        assert!(off.opacity < 1.0, "disabled row is dimmed");
+        assert!(!off.focusable, "disabled row leaves the tab order");
+    }
+
+    #[test]
+    fn shared_controls_nav_rows_are_menu_items() {
+        let rt = settings_runtime();
+        let elements = rt.elements();
+        let nav = by_key(&elements, "settings-nav-General");
+        assert_eq!(nav.role, "menuitem");
+        assert_eq!(nav.label.as_deref(), Some("General"));
+        assert!(nav.focusable);
+        assert!(nav.item_selected, "the open section is selected");
+    }
+
+    #[test]
+    fn shared_controls_chips_expose_checked_state() {
+        let mut rt = settings_runtime();
+        rt.update(|s, _| {
+            s.settings.section = Section::Chats;
+            s.settings.prefs.reactions = vec!["like".to_owned()];
+        });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        for key in ["settings-reaction-like", "settings-skin-tone-0"] {
+            let chip = by_key(&elements, key);
+            assert_eq!(chip.role, "button", "{key}");
+            assert!(chip.focusable, "{key}");
+            assert!((chip.rect[3] - 28.0).abs() < 0.5, "{key} chip height");
+        }
+        let tree = rt.accessibility_json();
+        assert!(states(a11y_by_key(&tree, "settings-reaction-like").unwrap()).contains(&"checked"));
+        assert!(states(a11y_by_key(&tree, "settings-skin-tone-3").unwrap()).contains(&"unchecked"));
+    }
+
+    #[test]
+    fn captions_render_uppercase_callers_in_sentence_case() {
+        fn view(_: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            caption("NEVER TRANSLATE THESE LANGUAGES").key("caption-test")
+        }
+        let mut rt = Runtime::new(UiState::new(Fake::default()), view, (800.0, 600.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        let found = rt.elements().into_iter()
+            .find(|element| element.key.as_deref() == Some("caption-test"))
+            .expect("caption");
+        assert_eq!(found.text.as_deref(), Some("Never translate these languages"));
+    }
+
+    #[test]
+    fn shared_controls_captions_are_sentence_case() {
+        let mut rt = settings_runtime();
+        let mut texts = Vec::new();
+        for section in Section::ALL {
+            rt.update(|s, _| s.settings.section = section);
+            rt.frame(0.0);
+            texts.extend(rt.elements().into_iter().filter_map(|e| e.text));
+        }
+        for expected in [
+            "System", "Theme", "Ringtones", "Sound", "Calls and meetings", "Activity", "Meeting chats",
+            "Status notifications", "Rusty Teams", "Chat list", "Chats", "Message density", "Default reactions",
+            "Skin tone", "Color scheme", "App icon",
+        ] {
+            assert!(texts.iter().any(|t| t == expected), "missing sentence-case caption {expected:?}");
+        }
+    }
+
+    #[test]
+    fn shared_controls_copy_build_is_a_secondary_button() {
+        let mut rt = settings_runtime();
+        rt.update(|s, _| s.settings.section = Section::About);
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let button = by_key(&elements, "settings-copy-build");
+        assert_eq!(button.role, "button");
+        assert_eq!(button.label.as_deref(), Some("Copy build"));
+        assert!(button.focusable);
     }
 }

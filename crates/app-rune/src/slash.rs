@@ -1,5 +1,6 @@
 //! Composer commands matching the GPUI client's command menu.
 
+use app_backend::schemes::active_palette;
 use rune::*;
 use teams_core::{ForcedAvailability, ForcedKind};
 use crate::types::Actions;
@@ -79,9 +80,18 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if found.is_empty() { return None; }
     let mut list = col().key("slash-menu").w_full().max_h(240.0).scroll(ScrollSpec { stick_bottom: false });
     for (index, name) in found.into_iter().enumerate() {
-        list = list.child(crate::screens::button(&format!("/{name}"), &format!("slash-{name}"), move |s: &mut UiState<A>, tx| run(s, name, tx))
-            .opacity(if index == s.compose.slash.selected { 1.0 } else { 0.7 })
-            .label(format!("Command {name}")));
+        let selected = index == s.compose.slash.selected;
+        let highlight = if selected { crate::avatar::rgb(active_palette().popup_hover) } else { Color::TRANSPARENT };
+        list = list.child(crate::controls::button::<A>(
+            &format!("slash-{name}"),
+            &format!("/{name}"),
+            crate::controls::Variant::Menu,
+            crate::controls::Size::Md,
+            move |s: &mut UiState<A>, tx| run(s, name, tx),
+        )
+        .fill(highlight)
+        .focus_selected(selected)
+        .label(format!("Command {name}")));
     }
     Some(col().w_full().padding(6.0).child(text("Commands").font(ts(12.0, 600.0))).child(list))
 }

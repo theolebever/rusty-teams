@@ -161,7 +161,14 @@ pub fn panel<A: Actions + 'static>(s: &UiState<A>) -> El {
         body = body.child(text_input(&draft.first_message, ts(14.0, 400.0)).key("new-chat-first-message").label("First message")
             .placeholder("First message (optional)", tone(p.text_muted)).w_full().on_edit(|s: &mut UiState<A>| &mut s.chatlist.manage.new_chat.first_message))
             .children(draft.error.as_ref().map(|error| text(error.clone()).key("new-chat-error").font(ts(12.0, 400.0))))
-            .child(crate::screens::button(if draft.creating { "Creating…" } else { "Start chat" }, "new-chat-start", |s: &mut UiState<A>, tx| start(s, tx)));
+            .child(if draft.creating {
+                // Keep a press target so the click does not fall through to the menu backdrop,
+                // while the Quiet variant carries no action and leaves the tab order.
+                crate::controls::button::<A>("new-chat-start", "Creating…", crate::controls::Variant::Quiet, crate::controls::Size::Md, |_, _| {})
+                    .on_press(|_: &mut UiState<A>| {})
+            } else {
+                crate::controls::button::<A>("new-chat-start", "Start chat", crate::controls::Variant::Primary, crate::controls::Size::Md, |s: &mut UiState<A>, tx| start(s, tx))
+            });
     }
     body
 }
@@ -194,4 +201,61 @@ pub fn start<A: Actions>(s: &mut UiState<A>, tx: &mut Tx) {
     s.chatlist.manage.new_chat.creating = true;
     s.chatlist.manage.new_chat.error = None;
     s.actions.create_chat(ids, topic, first_message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app_backend::schemes::active_palette;
+    use rune::{ElementInfo, Env, Runtime};
+
+    struct Quiet;
+    impl Actions for Quiet {
+        fn open(&self, _: &str) {}
+        fn send(&self, _: crate::types::SendTarget, _: String, _: Vec<teams_core::FileReference>) {}
+    }
+
+    fn start_view(s: &UiState<Quiet>, _: &mut Cx<UiState<Quiet>>) -> El {
+        panel(s)
+    }
+
+    fn runtime(creating: bool) -> Runtime<UiState<Quiet>> {
+        let mut state = UiState::new(Quiet);
+        state.chatlist.manage.new_chat.chips.push(Person { user_id: "u".into(), name: "Ada".into(), mail: None });
+        state.chatlist.manage.new_chat.creating = creating;
+        let mut rt = Runtime::new(state, start_view, (1000.0, 700.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        rt
+    }
+
+    fn by_key<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key) || e.path.ends_with(&format!("/{key}")))
+            .unwrap_or_else(|| panic!("no element {key}"))
+    }
+
+    #[test]
+    fn start_chat_is_a_focusable_primary_button() {
+        let rt = runtime(false);
+        let elements = rt.elements();
+        let e = by_key(&elements, "new-chat-start");
+        assert_eq!(e.role, "button", "the action has a button role");
+        assert_eq!(e.label.as_deref(), Some("Start chat"));
+        assert!(e.focusable, "the primary action is keyboard reachable");
+        let accent = rune::color::hex(&format!("#{:06X}", active_palette().accent)).expect("accent colour");
+        assert_eq!(e.fill, accent, "a primary action uses the accent fill");
+        assert!((e.radius - 6.0).abs() < 0.5, "radius {}", e.radius);
+    }
+
+    #[test]
+    fn creating_shows_a_dimmed_waiting_button_without_an_action() {
+        let rt = runtime(true);
+        let elements = rt.elements();
+        let e = by_key(&elements, "new-chat-start");
+        assert_eq!(e.label.as_deref(), Some("Creating…"));
+        assert!(!e.focusable, "a busy action leaves the tab order");
+        assert!(e.opacity < 1.0, "a busy action is dimmed");
+        assert_eq!(e.fill.a, 0.0, "a busy action has no resting fill");
+    }
 }

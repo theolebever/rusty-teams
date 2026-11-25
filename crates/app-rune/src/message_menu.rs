@@ -139,10 +139,29 @@ pub(crate) fn edited_mark<A: Actions>(s: &UiState<A>, m: &MessageRow) -> Option<
         .then(|| text("Edited").key(format!("edited-{}", m.id)).font(ts(11.0, 400.0)).color(rgb(active_palette().text_muted)))
 }
 
-fn item<A: Actions + 'static>(key: String, label: &str, color: u32, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
-    row().key(key).h(28.0).px(8.0).radius(6.0).center_y().hover(rgb(active_palette().popup_hover))
+fn item<A: Actions + 'static>(key: String, label: &str, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
+    // The shared row supplies the role, name, focus, geometry and hover; keep the Tx-aware
+    // handler by installing it after the row's no-op action.
+    crate::controls::menu_item::<A>(&key, label, None, false, |_| {}).on_press_tx(on_press)
+}
+
+/// `controls::menu_item` has no danger-ink variant: same geometry and hover, red ink only.
+fn danger_item<A: Actions + 'static>(key: String, label: &str, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
+    let palette = active_palette();
+    let ink = rgb(palette.red);
+    row()
+        .key(key)
+        .w_full()
+        .h(32.0)
+        .px(10.0)
+        .center_y()
+        .radius(6.0)
+        .hover(rgb(palette.popup_hover))
+        .role("menuitem")
+        .label(label.to_owned())
+        .focusable(true)
         .on_press_tx(on_press)
-        .child(text(label.to_owned()).font(ts(12.0, 400.0)).color(rgb(color)))
+        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(ink))
 }
 
 /// The open message menu, floating over the window: at the right-click point, or under the
@@ -230,7 +249,7 @@ fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
         }
         for (i, target) in found.into_iter().enumerate() {
             let choice = target.clone();
-            let candidate = item(format!("forward-to-{}", target.0), &target.1, palette.foreground,
+            let candidate = item(format!("forward-to-{}", target.0), &target.1,
                 move |s: &mut UiState<A>, tx| choose_forward(s, choice.clone(), tx));
             results = results.child(if i == highlighted { candidate.fill(rgb(palette.popup_hover)) } else { candidate });
         }
@@ -250,7 +269,6 @@ fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
 
 fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     let palette = active_palette();
-    let ink = palette.foreground;
     let id = m.id.clone();
     let conversation = s.selected.clone().unwrap_or_default();
     let channel = active_target(s).is_some_and(|target| target.channel);
@@ -262,35 +280,35 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
 
     if !channel {
         let reply = crate::types::ReplyReference { message_id: id.clone(), sender: m.sender.clone(), text: m.text.clone() };
-        list = list.child(item(format!("menu-reply-{id}"), "Reply", ink, move |s: &mut UiState<A>, tx| {
+        list = list.child(item(format!("menu-reply-{id}"), "Reply", move |s: &mut UiState<A>, tx| {
             s.compose.reply = Some(reply.clone());
             close(s);
             tx.focus("composer", false);
         }));
     }
     let body = m.text.clone();
-    list = list.child(item(format!("menu-copy-{id}"), "Copy text", ink, move |s: &mut UiState<A>, tx| {
+    list = list.child(item(format!("menu-copy-{id}"), "Copy text", move |s: &mut UiState<A>, tx| {
         tx.copy(body.clone());
         close(s);
     }));
-    list = list.child(item(format!("menu-save-{id}"), "Save this message", ink, move |s: &mut UiState<A>, _| {
+    list = list.child(item(format!("menu-save-{id}"), "Save this message", move |s: &mut UiState<A>, _| {
         s.actions.save_message(&saved_conversation, &saved_message.id, saved_message.reply_to_id.clone());
         close(s);
     }));
     let (link_id, link_conversation) = (id.clone(), conversation.clone());
-    list = list.child(item(format!("menu-link-{id}"), "Copy link", ink, move |s: &mut UiState<A>, _| {
+    list = list.child(item(format!("menu-link-{id}"), "Copy link", move |s: &mut UiState<A>, _| {
         s.actions.copy_message_link(&link_conversation, &link_id);
         close(s);
     }));
     let share = teams_core::outlook_compose_link(&format!("Message from {}", m.sender), &m.text);
-    list = list.child(item(format!("menu-outlook-{id}"), "Share to Outlook", ink, move |s: &mut UiState<A>, tx| {
+    list = list.child(item(format!("menu-outlook-{id}"), "Share to Outlook", move |s: &mut UiState<A>, tx| {
         crate::rich_text::open(s, tx, &share);
         close(s);
     }));
     if channel {
         let followed = s.menu.followed.get(&root).copied().unwrap_or(false);
         let (follow_id, follow_conversation) = (root.clone(), conversation.clone());
-        list = list.child(item(format!("menu-follow-{id}"), if followed { "Unfollow post" } else { "Follow post" }, ink, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-follow-{id}"), if followed { "Unfollow post" } else { "Follow post" }, move |s: &mut UiState<A>, _| {
             s.actions.set_post_followed(&follow_conversation, &follow_id, !followed);
             close(s);
         }));
@@ -301,26 +319,26 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     }
     if !m.reactions.is_empty() {
         let (message, conversation) = (id.clone(), conversation.clone());
-        list = list.child(item(format!("menu-reaction-people-{id}"), "Who reacted", ink, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-reaction-people-{id}"), "Who reacted", move |s: &mut UiState<A>, _| {
             close(s);
             s.picker.people = Some((message.clone(), Err("Loading…".into())));
             s.actions.load_reaction_people(&conversation, &message);
         }));
     }
     let translation_id = id.clone();
-    list = list.child(item(format!("menu-translate-{id}"), "Translate", ink, move |s: &mut UiState<A>, tx| {
+    list = list.child(item(format!("menu-translate-{id}"), "Translate", move |s: &mut UiState<A>, tx| {
         close(s); s.translation.dialog = Some(translation_id.clone()); tx.focus("translation-language", false);
     }));
     if m.mine {
         let message = m.clone();
-        list = list.child(item(format!("menu-edit-{id}"), "Edit", ink, move |s: &mut UiState<A>, tx| {
+        list = list.child(item(format!("menu-edit-{id}"), "Edit", move |s: &mut UiState<A>, tx| {
             begin_edit(s, &message, tx);
         }));
     }
     let pinned = s.pinned.iter().any(|pin| pin.message_id == m.id);
     {
         let (pin_id, conversation) = (id.clone(), conversation.clone());
-        list = list.child(item(format!("menu-pin-{id}"), if pinned { "Unpin" } else { "Pin" }, ink, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-pin-{id}"), if pinned { "Unpin" } else { "Pin" }, move |s: &mut UiState<A>, _| {
             s.actions.pin_message(&conversation, &pin_id, !pinned);
             close(s);
         }));
@@ -328,7 +346,7 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     {
         let selected = s.menu.selected.contains(&id);
         let select_id = id.clone();
-        list = list.child(item(format!("menu-select-{id}"), if selected { "Deselect" } else { "Select for forwarding" }, ink, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-select-{id}"), if selected { "Deselect" } else { "Select for forwarding" }, move |s: &mut UiState<A>, _| {
             if !s.menu.selected.remove(&select_id) {
                 if s.menu.selected.len() == 5 { s.toast.show("Select up to five messages"); return; }
                 s.menu.selected.insert(select_id.clone());
@@ -336,7 +354,7 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
             close(s);
         }));
         let fwd_id = id.clone();
-        list = list.child(item(format!("menu-forward-{id}"), "Forward", ink, move |s: &mut UiState<A>, tx| {
+        list = list.child(item(format!("menu-forward-{id}"), "Forward", move |s: &mut UiState<A>, tx| {
             close(s);
             s.menu.forward = Some(fwd_id.clone());
             tx.focus("forward-search", false);
@@ -344,7 +362,7 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     }
     if !channel {
         let unread_id = id.clone();
-        list = list.child(item(format!("menu-unread-{id}"), "Mark as unread", ink, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-unread-{id}"), "Mark as unread", move |s: &mut UiState<A>, _| {
             s.actions.mark_unread_from(&conversation, &unread_id);
             close(s);
         }));
@@ -353,7 +371,7 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
         let conversation = s.selected.clone().unwrap_or_default();
         let confirming = s.confirm_delete.as_deref() == Some(id.as_str());
         let delete_id = id.clone();
-        list = list.child(item(format!("delete-{id}"), if confirming { "Confirm delete" } else { "Delete" }, palette.red, move |s: &mut UiState<A>, _| {
+        list = list.child(danger_item(format!("delete-{id}"), if confirming { "Confirm delete" } else { "Delete" }, move |s: &mut UiState<A>, _| {
             if confirming {
                 s.actions.delete_message(&conversation, &delete_id);
                 close(s);
@@ -426,6 +444,24 @@ mod tests {
 
     fn last_call(rt: &Runtime<UiState<Fake>>) -> String {
         rt.state.actions.calls.borrow().last().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn message_menu_rows_are_unfilled_full_width_menu_items() {
+        let mut message = msg("m1", false, "hi");
+        message.can_delete = true;
+        let mut rt = show(vec![message]);
+        open_menu(&mut rt, "m1");
+        let elements = rt.elements();
+        for key in ["menu-reply-m1", "menu-copy-m1", "menu-save-m1", "delete-m1"] {
+            let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
+            assert_eq!(e.role, "menuitem", "{key}");
+            assert!(e.label.is_some(), "{key} has no accessible name");
+            assert!(e.focusable, "{key} is not keyboard reachable");
+            assert_eq!(e.fill.a, 0.0, "{key} is filled at rest");
+            assert!((e.rect[3] - 32.0).abs() < 0.5, "{key} height {}", e.rect[3]);
+            assert!((e.radius - 6.0).abs() < 0.5, "{key} radius {}", e.radius);
+        }
     }
 
     #[test]

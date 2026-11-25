@@ -264,9 +264,11 @@ pub fn line<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> Optio
         }
         let language = offered(s, message)?;
         let id = message.id.clone();
-        return Some(crate::screens::button(
-            "Translate",
+        return Some(crate::controls::button::<A>(
             &format!("translation-offer-{id}"),
+            "Translate",
+            crate::controls::Variant::Secondary,
+            crate::controls::Size::Sm,
             move |s: &mut UiState<A>, _| {
                 s.translation.language = TextEdit::new(&language);
                 request(s, &id);
@@ -279,9 +281,11 @@ pub fn line<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> Optio
     } else {
         "Show translation".into()
     };
-    Some(crate::screens::button(
-        &label,
+    Some(crate::controls::button::<A>(
         &format!("translation-toggle-{}", message.id),
+        &label,
+        crate::controls::Variant::Secondary,
+        crate::controls::Size::Sm,
         move |s: &mut UiState<A>, _| {
             if let Some(cached) = s.translation.cached.get_mut(&key) {
                 cached.shown = !cached.shown;
@@ -305,9 +309,11 @@ pub fn dialog<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                 .w_full()
                 .on_edit(|s: &mut UiState<A>| &mut s.translation.language),
         )
-        .child(crate::screens::button(
-            "Translate",
+        .child(crate::controls::button::<A>(
             "translation-submit",
+            "Translate",
+            crate::controls::Variant::Primary,
+            crate::controls::Size::Md,
             move |s: &mut UiState<A>, _| request(s, &message),
         ));
     Some(crate::shortcuts::card(

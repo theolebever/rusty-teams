@@ -103,16 +103,6 @@ fn direct_chat<A: Actions>(s: &UiState<A>, user_id: &str) -> Option<String> {
     s.details.iter().find(|(_, details)| details.avatar_id.as_deref() == Some(user_id) && details.group.is_empty()).map(|(id, _)| id.clone())
 }
 
-fn button<A: Actions + 'static>(key: &str, glyph: Option<&str>, label: &str, filled: bool, press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
-    let palette = active_palette();
-    let (fill, ink) = if filled { (palette.accent, palette.on_accent) } else { (palette.popup_hover, palette.text_soft) };
-    let mut button = row().key(key.to_owned()).h(32.0).px(12.0).gap(6.0).center().radius(6.0).fill(rgb(fill)).on_press_tx(press);
-    if let Some(glyph) = glyph {
-        button = button.child(crate::icons::sym(glyph, 14.0).color(rgb(ink)));
-    }
-    button.child(text(label.to_owned()).font(ts(13.0, 600.0)).color(rgb(ink)))
-}
-
 fn field(label: &str, value: &str) -> El {
     let palette = active_palette();
     col()
@@ -160,7 +150,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         .role("dialog")
         .label("Profile")
         .modal(true, |s: &mut UiState<A>| s.profile.open = None)
-        .children((!s.profile.history.is_empty()).then(|| button("profile-back", Some("keyboard_arrow_left"), "Back", false, |s: &mut UiState<A>, _| back(s))))
+        .children((!s.profile.history.is_empty()).then(|| crate::controls::icon_button::<A>("profile-back", "keyboard_arrow_left", "Back", false, |s: &mut UiState<A>, _| back(s))))
         .child(row().w_full().gap(14.0).center_y().child(person(s, &title, Some(user_id), 64.0, presence)).child(lines));
 
     let note = profile.and_then(|p| p.out_of_office.as_ref().map(|text| if text.trim().is_empty() { "Out of office".to_owned() } else { text.clone() }).or_else(|| p.status_message.clone()));
@@ -173,12 +163,18 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if !is_me {
         let (follow_id, follow_name) = (user_id.clone(), title.clone());
         let following = s.profile.followed.iter().any(|person| person.user_id == *user_id);
-        actions = actions.child(button("profile-follow", Some("notifications"), if following { state::presence_follow::TURN_OFF_NOTIFICATIONS } else { state::presence_follow::NOTIFY_WHEN_AVAILABLE }, false, move |s: &mut UiState<A>, _| {
-            s.actions.follow_presence(&follow_id, &follow_name, !following);
-        }));
+        actions = actions.child(crate::controls::button::<A>(
+            "profile-follow",
+            if following { state::presence_follow::TURN_OFF_NOTIFICATIONS } else { state::presence_follow::NOTIFY_WHEN_AVAILABLE },
+            crate::controls::Variant::Secondary,
+            crate::controls::Size::Md,
+            move |s: &mut UiState<A>, _| {
+                s.actions.follow_presence(&follow_id, &follow_name, !following);
+            },
+        ));
         let (chat_id, call_id, call_name) = (user_id.clone(), user_id.clone(), title.clone());
         actions = actions
-            .child(button("profile-chat", Some("chat_bubble"), "Chat", true, move |s: &mut UiState<A>, tx| {
+            .child(crate::controls::button_with_help::<A>("profile-chat", "Chat", "Start a chat with this person", crate::controls::Variant::Primary, crate::controls::Size::Md, move |s: &mut UiState<A>, tx| {
                 s.profile.open = None;
                 match direct_chat(s, &chat_id) {
                     Some(id) => {
@@ -188,7 +184,7 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                     None => s.actions.open_direct(&chat_id),
                 }
             }))
-            .child(button("profile-call", Some("call"), "Call", false, move |s: &mut UiState<A>, _| {
+            .child(crate::controls::button_with_help::<A>("profile-call", "Call", "Call this person", crate::controls::Variant::Secondary, crate::controls::Size::Md, move |s: &mut UiState<A>, _| {
                 s.profile.open = None;
                 s.actions.call_person(&call_id, &call_name);
             }));
@@ -196,13 +192,13 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if let Some(address) = email.clone() {
         let copied = address.clone();
         actions = actions
-            .child(button("profile-email", None, "Email", false, move |s: &mut UiState<A>, tx| {
+            .child(crate::controls::button::<A>("profile-email", "Email", crate::controls::Variant::Secondary, crate::controls::Size::Md, move |s: &mut UiState<A>, tx| {
                 if let Err(error) = tx.open_url(&format!("mailto:{address}")) {
                     s.toast.show(error.to_string());
                 }
                 s.profile.open = None;
             }))
-            .child(button("profile-copy-email", None, "Copy email", false, move |s: &mut UiState<A>, tx| {
+            .child(crate::controls::button::<A>("profile-copy-email", "Copy email", crate::controls::Variant::Secondary, crate::controls::Size::Md, move |s: &mut UiState<A>, tx| {
                 tx.copy(copied.clone());
                 s.toast.show("Email copied");
                 s.profile.open = None;
@@ -231,12 +227,15 @@ pub fn layer<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
         }
         if let Some(manager) = &p.manager {
             let (id, name) = (manager.id.clone(), manager.display_name.clone().unwrap_or_default());
-            card = card.child(button("profile-manager", None, &format!("Manager: {name}"), false, move |s: &mut UiState<A>, _| visit(s, &id, &name)));
+            let label = format!("Manager: {name}");
+            card = card.child(crate::controls::button::<A>("profile-manager", &label, crate::controls::Variant::Secondary, crate::controls::Size::Md, move |s: &mut UiState<A>, _| visit(s, &id, &name)));
         }
         let mut reports = col().w_full().gap(4.0);
         for (index, report) in p.direct_reports.iter().enumerate() {
             let (id, name) = (report.id.clone(), report.display_name.clone().unwrap_or_default());
-            reports = reports.child(button(&format!("profile-report-{index}"), None, &name.clone(), false,
+            let key = format!("profile-report-{index}");
+            let label = name.clone();
+            reports = reports.child(crate::controls::button::<A>(&key, &label, crate::controls::Variant::Secondary, crate::controls::Size::Md,
                 move |s: &mut UiState<A>, _| visit(s, &id, &name)));
         }
         if !p.direct_reports.is_empty() { card = card.child(col().w_full().max_h(168.0).scroll(ScrollSpec { stick_bottom: false }).child(reports)); }

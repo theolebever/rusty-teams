@@ -19,14 +19,16 @@ pub fn post_indices(rows: &[MessageRow]) -> Vec<usize> {
 pub fn overview<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>) -> rune::El {
     use rune::*;
     use crate::ui::{c, text, ts, UiState};
-    let mut tiles = col().w_full().equal_columns(2).gap(16.0);
+    // Teams lays its cards out three across: avatar and name side by side, the detail beneath.
+    let mut tiles = col().w_full().equal_columns(3).gap(16.0);
     for team in &s.teams {
         let team_id = team.id.clone();
         let channel = team.channels.first().map(|c| c.id.clone());
-        let mut tile = col().key(format!("team-card-{}", team.id)).w_full().min_w(0.0).h(156.0).padding(20.0).gap(12.0)
+        let mut tile = col().key(format!("team-card-{}", team.id)).w_full().min_w(0.0).h(140.0).padding(12.0).gap(12.0)
             .radius(8.0).border(1.0, c("#E0E0E0")).fill(crate::avatar::rgb(app_backend::schemes::active_palette().surface_raised))
-            .child(crate::avatar::avatar(&team.name, 40.0, None))
-            .child(text(team.name.clone()).font(ts(16.0, 600.0)).color(c("#242424")).wrap())
+            .child(row().w_full().gap(12.0).center_y()
+                .child(crate::avatar::avatar(&team.name, 56.0, None))
+                .child(text(team.name.clone()).font(ts(14.0, 400.0)).color(c("#242424")).wrap().grow(1.0).min_w(0.0)))
             .child(text(format!("{} channels", team.channels.len())).font(ts(12.0, 400.0)).color(c("#616161")));
         if let Some(channel) = channel {
             tile = tile.hover(c("#EBEBEB")).on_press_tx(move |s: &mut UiState<A>, tx| {
@@ -37,7 +39,7 @@ pub fn overview<A: crate::types::Actions + 'static>(s: &crate::ui::UiState<A>) -
         tiles = tiles.child(tile);
     }
     col().key("teams-overview").grow(1.0).min_w(0.0).h_full().min_h(0.0).padding(24.0).gap(20.0).fill(c("#FFFFFF"))
-        .child(text("Your teams").font(ts(20.0, 600.0)).color(c("#242424")))
+        .child(text("Teams").font(ts(20.0, 700.0)).color(c("#242424")))
         .children(s.teams.is_empty().then(|| text("Your teams will appear here when connected.").font(ts(14.0, 400.0)).color(c("#616161"))))
         .child(col().grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(tiles))
 }

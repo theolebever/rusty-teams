@@ -122,32 +122,10 @@ pub fn bar<A: Actions + 'static>(s: &UiState<A>) -> El {
                 }),
         )
         .child(text(status).font(ts(12.0, 400.0)).color(c(MUTED)))
-        .child(button("find-prev", "Older", |s: &mut UiState<A>, tx| step(s, -1, tx)))
-        .child(button("find-next", "Newer", |s: &mut UiState<A>, tx| step(s, 1, tx)))
-        .child(
-            row()
-                .key("find-older")
-                .h(28.0)
-                .px(10.0)
-                .center()
-                .radius(6.0)
-                .hover(c(HOVER))
-                .on_press(move |s: &mut UiState<A>| s.actions.load_older(&id))
-                .child(text("Load older messages").font(ts(12.0, 600.0)).color(c(INK))),
-        )
-        .child(button("find-close", "Close", |s: &mut UiState<A>, _| close(s)))
-}
-
-fn button<A: Actions + 'static>(key: &str, label: &str, action: fn(&mut UiState<A>, &mut Tx)) -> El {
-    row()
-        .key(key.to_owned())
-        .h(28.0)
-        .px(10.0)
-        .center()
-        .radius(6.0)
-        .hover(c(HOVER))
-        .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| action(s, tx))
-        .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(c(INK)))
+        .child(crate::controls::button::<A>("find-prev", "Older", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, tx| step(s, -1, tx)))
+        .child(crate::controls::button::<A>("find-next", "Newer", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, tx| step(s, 1, tx)))
+        .child(crate::controls::button::<A>("find-older", "Load older messages", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| s.actions.load_older(&id)))
+        .child(crate::controls::button::<A>("find-close", "Close", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| close(s)))
 }
 
 /// Whether "Jump to latest" shows: the open conversation's last row is out of view.

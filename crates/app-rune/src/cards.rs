@@ -64,7 +64,7 @@ pub fn scoped<A: Actions + 'static>(s: &UiState<A>, card: &AdaptiveCard, scope: 
             }
         }));
         let (scope, action) = (scope.clone(), refresh.action.clone());
-        body = body.child(crate::screens::button("Refresh", &format!("{}-refresh", key), move |s: &mut UiState<A>, _| {
+        body = body.child(crate::controls::button::<A>(&format!("{}-refresh", key), "Refresh", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| {
             if !s.read_only && !s.cards.busy.contains(&scope) { s.cards.busy.insert(scope.clone()); s.actions.refresh_card(scope.clone(), action.clone(), teams_core::ExecuteTrigger::Manual); }
         }));
     }
@@ -146,15 +146,34 @@ fn element<A: Actions + 'static>(s: &UiState<A>, element: &CardElement, scope: &
 fn button<A: Actions + 'static>(s: &UiState<A>, scope: &crate::card_state::Scope, card: &AdaptiveCard, index: usize, action: &CardAction) -> Option<El> {
     if !action.visible { return None; }
     let (scope_copy, card_copy, action_copy) = (scope.clone(), card.clone(), action.clone());
-    let mut button = crate::screens::button(&action.title, &format!("{}-action-{index}", scope.key), move |s: &mut UiState<A>, tx| {
+    let enabled = action.enabled && !s.cards.busy.contains(scope);
+    let destructive = is_destructive(&action.title);
+    let variant = match (enabled, destructive) {
+        (false, _) => crate::controls::Variant::Quiet,
+        (true, true) => crate::controls::Variant::Danger,
+        (true, false) => crate::controls::Variant::Primary,
+    };
+    let mut button = crate::controls::button::<A>(&format!("{}-action-{index}", scope.key), &action.title, variant, crate::controls::Size::Md, move |s, tx| {
         crate::card_state::run(s, scope_copy.clone(), &card_copy, index, action_copy.clone(), tx);
-    }).opacity(if action.enabled && !s.cards.busy.contains(scope) { 1.0 } else { 0.4 });
+    });
+    // A Quiet button attaches no press handler, so swallow the press here or it falls through to the scrim.
+    if !enabled {
+        button = button.on_press(|_: &mut UiState<A>| {});
+    }
     if let CardActionKind::ShowCard(child) = &action.kind
         && s.cards.shown.contains(&(scope.clone(), index)) {
             let child_scope = crate::card_state::Scope { key: format!("{}-show-{index}", scope.key), ..scope.clone() };
             button = col().w_full().child(button).child(scoped(s, child, &child_scope));
         }
     Some(button)
+}
+
+/// Whether a card action title starts a destructive verb. Matches whole words, so "Removed" does
+/// not count. The Adaptive Card model has no `style` field, so the title is the only signal.
+fn is_destructive(title: &str) -> bool {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| matches!(word.to_lowercase().as_str(), "delete" | "remove" | "discard" | "quit" | "leave"))
 }
 
 /// The coloured headline a channel announcement opens with.
@@ -209,5 +228,34 @@ mod tests {
             {"type":"Container","items":[{"type":"Image","url":"https://x.test/b.png"}]}]}"#).unwrap();
         assert_eq!(image_urls(&card), ["https://x.test/a.png", "https://x.test/b.png"]);
         assert_eq!(remote("https://x.test/a.png").url, "https://x.test/a.png");
+    }
+
+    #[test]
+    fn destructive_titles_match_whole_words_only() {
+        assert!(is_destructive("Delete"));
+        assert!(is_destructive("Remove all members"));
+        assert!(!is_destructive("Removed by admin"));
+        assert!(!is_destructive("Quitting soon"));
+        assert!(!is_destructive("Save"));
+    }
+
+    #[test]
+    fn destructive_card_actions_use_the_danger_fill() {
+        use app_backend::schemes::active_palette;
+        use rune::ElementInfo;
+        fn view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
+            let card = AdaptiveCard::parse(r#"{"type":"AdaptiveCard","body":[],"actions":[{"type":"Action.Submit","title":"Delete item"},{"type":"Action.Submit","title":"Save"}]}"#).unwrap();
+            crate::cards::view(s, &card, "danger-card", "message")
+        }
+        let mut rt = Runtime::new(UiState::new(Fake), view, (600.0, 500.0), Env { scale: 1.0, system_dark: false });
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let by_key = |key: &str| -> &ElementInfo {
+            elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"))
+        };
+        let red = rune::color::hex(&format!("#{:06X}", active_palette().red)).expect("red colour");
+        let accent = rune::color::hex(&format!("#{:06X}", active_palette().accent)).expect("accent colour");
+        assert_eq!(by_key("danger-card-action-0").fill, red, "delete is destructive");
+        assert_eq!(by_key("danger-card-action-1").fill, accent, "save is primary");
     }
 }

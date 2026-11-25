@@ -129,7 +129,7 @@ pub fn quick_bar<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> 
         bar = bar.child(button);
     }
     let message_id = message.id.clone();
-    bar.child(crate::screens::button("+", "menu-reaction-more", move |s: &mut UiState<A>, tx| {
+    bar.child(crate::controls::button::<A>("menu-reaction-more", "+", crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, tx| {
         crate::message_menu::close(s);
         s.picker.open = Some(message_id.clone());
         s.picker.all = true;
@@ -198,7 +198,7 @@ pub fn controls<A: Actions + 'static>(s: &UiState<A>, message: &MessageRow) -> E
             );
         }
         column = column.child(quick);
-        column = column.child(crate::screens::button("More emoji", "reaction-more", |s: &mut UiState<A>, tx| {
+        column = column.child(crate::controls::button::<A>("reaction-more", "More emoji", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, tx| {
             s.picker.all = !s.picker.all;
             s.emoji_open = false;
             s.compose.emoji.query.clear();

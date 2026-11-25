@@ -85,6 +85,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
         .child(list)
         .child(choice(
             "account-add",
+            "Add an account",
+            true,
             add,
             |s: &mut UiState<A>, tx: &mut Tx| match s.actions.add_account() {
                 Ok(()) => tx.quit(),
@@ -98,7 +100,7 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 .wrap()
         }))
         .children((!picker.expired).then(|| {
-            crate::screens::button("Cancel", "account-cancel", |s: &mut UiState<A>, _| {
+            crate::controls::button::<A>("account-cancel", "Cancel", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| {
                 s.account_picker = None
             })
         }));
@@ -158,6 +160,8 @@ fn account_row<A: Actions + 'static>(
     let folder = account.folder;
     choice(
         &format!("account-{index}"),
+        &name,
+        true,
         content,
         move |s: &mut UiState<A>, tx: &mut Tx| {
             if is_current {
@@ -178,6 +182,8 @@ fn account_row<A: Actions + 'static>(
 /// A clickable row, found by its key.
 fn choice<A: Actions + 'static>(
     key: &str,
+    label: &str,
+    primary: bool,
     content: El,
     press: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
 ) -> El {
@@ -189,8 +195,13 @@ fn choice<A: Actions + 'static>(
         .px(12.0)
         .gap(10.0)
         .center_y()
-        .radius(8.0)
+        .radius(6.0)
+        .fill(if primary { rgb(palette.accent).alpha(0.14) } else { Color::TRANSPARENT })
         .hover(rgb(palette.row_hover))
+        .role("button")
+        .label(label.to_owned())
+        .focusable(true)
+        .focus_ring(2.0, 1.0, rgb(palette.accent))
         .on_press_tx(press)
         .child(content)
 }

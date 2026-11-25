@@ -3,6 +3,8 @@
 use rune::*;
 use teams_core::{DriveEntry, DriveFolder};
 use app_base::channel_files::{Crumb, LibraryPath};
+use crate::avatar::rgb;
+use crate::icons::sym;
 use crate::types::Actions;
 use crate::ui::{UiState, text, ts};
 
@@ -58,13 +60,13 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let mut crumbs = row().w_full().wrap().gap(6.0);
     if let Some(path) = &s.library.path {
         for (index, crumb) in path.crumbs().iter().enumerate() {
-            crumbs = crumbs.child(crate::screens::button(&crumb.name, &format!("library-crumb-{index}"), move |s: &mut UiState<A>, _| {
+            crumbs = crumbs.child(crate::controls::button::<A>(&format!("library-crumb-{index}"), &crumb.name, crate::controls::Variant::Secondary, crate::controls::Size::Sm, move |s: &mut UiState<A>, _| {
                 if let Some(path) = &mut s.library.path { path.go_to(index); } load(s);
             }));
         }
     }
     body = body.child(text("Channel files").font(ts(18.0, 600.0))).child(crumbs)
-        .child(crate::screens::button("Refresh", "library-refresh", |s: &mut UiState<A>, _| { if s.library.path.is_some() { load(s); } else { start(s); } }));
+        .child(crate::controls::button::<A>("library-refresh", "Refresh", crate::controls::Variant::Secondary, crate::controls::Size::Sm, |s: &mut UiState<A>, _| { if s.library.path.is_some() { load(s); } else { start(s); } }));
     if s.library.loading { return body.child(text("Loading…")); }
     if let Some(error) = &s.library.error { return body.child(text(error.clone()).key("library-error").wrap()); }
     if s.library.rows.is_empty() { body = body.child(text("This folder is empty")); }
@@ -76,7 +78,8 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
                     if let Some(path) = &mut s.library.path { path.enter(&picked); } load(s);
                 } else { crate::rich_text::open(s, tx, &picked.web_url); }
             })
-            .child(text(format!("{} {}", if entry.is_folder() { "▸" } else { "" }, entry.name)).font(ts(14.0, 400.0)).grow(1.0).truncate())
+            .child(if entry.is_folder() { sym("folder", 14.0).color(rgb(app_backend::schemes::active_palette().text_muted)) } else { el() })
+            .child(text(entry.name.clone()).font(ts(14.0, 400.0)).grow(1.0).truncate())
             .child(text(app_base::channel_files::size_label(entry)).font(ts(12.0, 400.0))));
     }
     body
