@@ -499,8 +499,14 @@ impl Render for PrejoinView {
             .unwrap_or_default();
         let audio_on = self.options.audio == AudioChoice::Computer;
         let (cameras, camera) = (self.cameras.clone(), self.camera.clone());
-        let (inputs, input) = (self.devices.input_entries(), self.input.clone());
-        let (outputs, output) = (self.devices.output_entries(), self.output.clone());
+        let (inputs, input) = (
+            self.devices.input_entries_for(&self.input),
+            self.input.clone(),
+        );
+        let (outputs, output) = (
+            self.devices.output_entries_for(&self.output),
+            self.output.clone(),
+        );
         let devices = h_flex()
             .debug_selector(|| "shell/islands/main/prejoin/devices".into())
             .flex_none()

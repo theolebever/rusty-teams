@@ -273,8 +273,8 @@ impl DevicesView {
                 .collect::<Vec<_>>()
         };
         let (outputs, inputs) = (
-            self.audio_devices.output_entries(),
-            self.audio_devices.input_entries(),
+            self.audio_devices.output_entries_for(&output),
+            self.audio_devices.input_entries_for(&input),
         );
         let speaker_label = label_of(&outputs, &output, DEFAULT_DEVICE_LABEL);
         let microphone_label = label_of(&inputs, &input, DEFAULT_DEVICE_LABEL);

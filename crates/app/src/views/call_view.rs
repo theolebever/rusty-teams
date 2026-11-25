@@ -1087,14 +1087,14 @@ fn devices_menu(
     let input_app = app.clone();
     let output_app = app.clone();
     let inputs = device_items(
-        model.devices.input_entries(),
+        model.devices.input_entries_for(&model.input),
         &model.input,
         move |choice, cx| {
             input_app.update(cx, |state, cx| state.select_call_input(choice, cx));
         },
     );
     let outputs = device_items(
-        model.devices.output_entries(),
+        model.devices.output_entries_for(&model.output),
         &model.output,
         move |choice, cx| {
             output_app.update(cx, |state, cx| state.select_call_output(choice, cx));
