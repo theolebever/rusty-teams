@@ -10,16 +10,20 @@ pub enum Reaction {
     Applause,
     Laugh,
     Surprised,
+    Sad,
+    Angry,
     Other(String),
 }
 
 impl Reaction {
-    pub const ALL: [Reaction; 5] = [
+    pub const ALL: [Reaction; 7] = [
         Reaction::Like,
         Reaction::Heart,
         Reaction::Applause,
         Reaction::Laugh,
         Reaction::Surprised,
+        Reaction::Sad,
+        Reaction::Angry,
     ];
 
     pub fn name(&self) -> &str {
@@ -29,6 +33,8 @@ impl Reaction {
             Reaction::Applause => "applause",
             Reaction::Laugh => "laugh",
             Reaction::Surprised => "surprised",
+            Reaction::Sad => "sad",
+            Reaction::Angry => "angry",
             Reaction::Other(name) => name,
         }
     }
@@ -139,6 +145,19 @@ mod tests {
 
     #[test]
     fn every_reaction_name_round_trips() {
+        let names: Vec<&str> = Reaction::ALL.iter().map(Reaction::name).collect();
+        assert_eq!(
+            names,
+            [
+                "like",
+                "heart",
+                "applause",
+                "laugh",
+                "surprised",
+                "sad",
+                "angry"
+            ]
+        );
         for reaction in Reaction::ALL {
             assert_eq!(Reaction::from_name(reaction.name()), Some(reaction));
         }
