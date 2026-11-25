@@ -22,19 +22,18 @@ pub(crate) enum Variant {
     Menu,
 }
 
-/// Geometry of a text button. `Icon` is a 32x32 square for glyph-only labels.
+/// Geometry of a text button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Size {
     Sm,
     Md,
-    Icon,
 }
 
 impl Size {
     fn metrics(self) -> (f32, f32, f32) {
         match self {
             Self::Sm => (24.0, 8.0, 12.0),
-            Self::Md | Self::Icon => (32.0, 12.0, 13.0),
+            Self::Md => (32.0, 12.0, 13.0),
         }
     }
 }
@@ -95,10 +94,6 @@ pub(crate) fn button_with_help<A: Actions + 'static>(
     if !help.is_empty() {
         el = el.help(help.to_owned());
     }
-    el = match size {
-        Size::Icon => el.w(32.0),
-        Size::Sm | Size::Md => el,
-    };
     el.child(ui::text(label.to_owned()).font(ts(font, 600.0)).color(ink))
 }
 
@@ -366,7 +361,7 @@ mod tests {
             ))
             .child(button::<Quiet>("btn-danger", "Delete", Variant::Danger, Size::Md, |_, _| {}))
             .child(button::<Quiet>("btn-quiet", "Cancel", Variant::Quiet, Size::Sm, |_, _| {}))
-            .child(button::<Quiet>("btn-menu-icon", "i", Variant::Menu, Size::Icon, |_, _| {}))
+            .child(button::<Quiet>("btn-menu-icon", "i", Variant::Menu, Size::Md, |_, _| {}))
             .child(icon_button::<Quiet>("icon-settings", "settings", "Settings", true, |_, _| {}))
             .child(icon_button_on_dark::<Quiet>("icon-dark", "call", "Call", true, |_, _| {}))
             .child(menu_item::<Quiet>("menu-item", "Rename", Some("edit"), true, |_| {}))
@@ -453,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_variant_and_icon_size_are_available() {
+    fn menu_variant_is_available() {
         let rt = runtime();
         let elements = rt.elements();
         let e = by_key(&elements, "btn-menu-icon");
