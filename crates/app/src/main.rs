@@ -19,6 +19,7 @@ mod linux_browser;
 mod linux_install;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux_park;
+#[cfg(target_os = "linux")]
 mod linux_update;
 mod main_window;
 pub mod notify;
@@ -411,8 +412,6 @@ fn main() {
             #[cfg(target_os = "linux")]
             if !arguments.demo {
                 linux_install::start(cx);
-            }
-            if !arguments.demo {
                 linux_update::start(cx);
             }
             if !arguments.autostart {
