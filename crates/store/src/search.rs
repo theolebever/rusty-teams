@@ -113,7 +113,7 @@ impl Store {
         let Some(expression) = match_expression(query) else {
             return Ok(Vec::new());
         };
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare_cached(&format!(
             "SELECT k.conversation_id, k.message_id, m.sender_name, m.created_at,
                     snippet(message_search, 0, char({}), char({}), '...', {SNIPPET_TOKENS})
@@ -154,7 +154,7 @@ impl Store {
         let Some(expression) = match_expression(query) else {
             return Ok(Vec::new());
         };
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare_cached(&format!(
             "SELECT k.conversation_id, k.message_id, m.sender_name, m.created_at,
                     snippet(message_search, 0, char({}), char({}), '...', {SNIPPET_TOKENS})
@@ -193,7 +193,7 @@ impl Store {
         else {
             return Ok(Vec::new());
         };
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare_cached(
             "SELECT conversation_id, title FROM title_search WHERE title_search MATCH ?1 ORDER BY rank LIMIT ?2",
         )?;
