@@ -376,6 +376,8 @@ pub trait Actions {
     fn accept_call(&self, _ring_id: u64, _video: bool) {}
     fn decline_call(&self, _ring_id: u64) {}
     fn load_image(&self, _image: teams_core::ImageRef) {}
+    /// Fetch photos of call participants so camera-off tiles can draw them.
+    fn warm_avatars(&self, _user_ids: Vec<String>) {}
     fn download_file(&self, _url: String, _path: std::path::PathBuf) {}
     fn upload_file(&self, _target: SendTarget, _path: std::path::PathBuf) {}
     fn discard_attachment(&self, _uploaded: teams_core::UploadedFile) {}
