@@ -87,7 +87,7 @@ pub use audio_io::AudioMode;
 pub use background::{BackgroundCache, BackgroundChoice, BackgroundPicture, DefaultBackground};
 pub use breakout::BreakoutMove;
 pub use call::{AcceptMode, CallOptions, CallReport, CallSpec, run_test_call};
-pub use camera::{CameraCaptureStats, CameraDevice, camera_entries};
+pub use camera::{CameraCaptureStats, CameraDevice, camera_entries, camera_entries_for};
 pub use captions::{CaptionEntry, CaptionState, SPOKEN_LANGUAGES};
 pub use control::{CallCommand, CallControl, CallHandle, CallUpdate, Progress, call_channel};
 pub use devices::{AudioDevice, DeviceChoice, DeviceEntry, DeviceLists};

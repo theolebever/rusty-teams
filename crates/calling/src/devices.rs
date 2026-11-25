@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use libwebrtc::peer_connection_factory::PeerConnectionFactory;
@@ -50,28 +51,58 @@ impl AudioDevice {
     }
 }
 
-pub fn menu_entries(devices: &[AudioDevice]) -> Vec<DeviceEntry> {
-    let default_entry = DeviceEntry {
+/// Menu rows for `devices`, with one row per friendly name: Windows can expose several endpoints
+/// with the same name (two monitor audio outputs for instance), which showed as identical rows.
+/// When a name repeats, the row points at the currently selected endpoint so the saved key keeps
+/// resolving; otherwise it points at the first one. WebRTC indices in `devices` stay untouched.
+pub fn menu_entries_for(devices: &[AudioDevice], selected: &DeviceChoice) -> Vec<DeviceEntry> {
+    let mut entries = vec![DeviceEntry {
         choice: DeviceChoice::SystemDefault,
         label: DEFAULT_DEVICE_LABEL.to_owned(),
-    };
-    let named = devices
+    }];
+    let mut seen: HashSet<String> = HashSet::new();
+    for device in devices
         .iter()
         .filter(|device| !device.is_system_alias() && !device.name.trim().is_empty())
-        .map(|device| DeviceEntry {
-            choice: DeviceChoice::Device(device.key()),
-            label: device.name.clone(),
+    {
+        let normalized = device.name.trim().to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        let chosen = devices
+            .iter()
+            .find(|candidate| {
+                candidate.name.trim().to_ascii_lowercase() == normalized
+                    && matches!(selected, DeviceChoice::Device(key) if key.eq_ignore_ascii_case(&candidate.key()))
+            })
+            .unwrap_or(device);
+        entries.push(DeviceEntry {
+            choice: DeviceChoice::Device(chosen.key()),
+            label: chosen.name.clone(),
         });
-    std::iter::once(default_entry).chain(named).collect()
+    }
+    entries
+}
+
+pub fn menu_entries(devices: &[AudioDevice]) -> Vec<DeviceEntry> {
+    menu_entries_for(devices, &DeviceChoice::SystemDefault)
 }
 
 impl DeviceLists {
     pub fn input_entries(&self) -> Vec<DeviceEntry> {
-        menu_entries(&self.inputs)
+        self.input_entries_for(&DeviceChoice::SystemDefault)
     }
 
     pub fn output_entries(&self) -> Vec<DeviceEntry> {
-        menu_entries(&self.outputs)
+        self.output_entries_for(&DeviceChoice::SystemDefault)
+    }
+
+    pub fn input_entries_for(&self, selected: &DeviceChoice) -> Vec<DeviceEntry> {
+        menu_entries_for(&self.inputs, selected)
+    }
+
+    pub fn output_entries_for(&self, selected: &DeviceChoice) -> Vec<DeviceEntry> {
+        menu_entries_for(&self.outputs, selected)
     }
 }
 
@@ -370,6 +401,27 @@ mod tests {
         );
         assert_eq!(entries[0].choice, DeviceChoice::SystemDefault);
         assert_eq!(entries[1].choice, DeviceChoice::Device("{b}".into()));
+    }
+
+    #[test]
+    fn duplicate_names_collapse_but_keep_the_selected_endpoint() {
+        let devices = [
+            device(0, "Speakers", "{first}"),
+            device(1, "Speakers", "{second}"),
+            device(2, "Headset", "{headset}"),
+        ];
+        let default = menu_entries_for(&devices, &DeviceChoice::SystemDefault);
+        assert_eq!(
+            default
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Default device", "Speakers", "Headset"]
+        );
+        assert_eq!(default[1].choice, DeviceChoice::Device("{first}".into()));
+        let selected = menu_entries_for(&devices, &DeviceChoice::Device("{second}".into()));
+        assert_eq!(selected[1].choice, DeviceChoice::Device("{second}".into()));
+        assert_eq!(resolve_index(&devices, &selected[1].choice, None), Some(1));
     }
 
     #[test]

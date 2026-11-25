@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::Arc;
@@ -700,18 +701,37 @@ pub fn start_camera(
 pub const DEFAULT_CAMERA_LABEL: &str = "Default camera";
 
 pub fn camera_entries(cameras: &[CameraDevice]) -> Vec<DeviceEntry> {
-    let default_entry = DeviceEntry {
+    camera_entries_for(cameras, &DeviceChoice::SystemDefault)
+}
+
+/// One row per camera name, pointing at the selected device when a name repeats.
+pub fn camera_entries_for(cameras: &[CameraDevice], selected: &DeviceChoice) -> Vec<DeviceEntry> {
+    let mut entries = vec![DeviceEntry {
         choice: DeviceChoice::SystemDefault,
         label: DEFAULT_CAMERA_LABEL.to_owned(),
-    };
-    let named = cameras
+    }];
+    let mut seen: HashSet<String> = HashSet::new();
+    for camera in cameras
         .iter()
         .filter(|camera| !camera.name.trim().is_empty())
-        .map(|camera| DeviceEntry {
-            choice: DeviceChoice::Device(camera.key.clone()),
-            label: camera.name.clone(),
+    {
+        let normalized = camera.name.trim().to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        let chosen = cameras
+            .iter()
+            .find(|candidate| {
+                candidate.name.trim().to_ascii_lowercase() == normalized
+                    && matches!(selected, DeviceChoice::Device(key) if key.eq_ignore_ascii_case(&candidate.key))
+            })
+            .unwrap_or(camera);
+        entries.push(DeviceEntry {
+            choice: DeviceChoice::Device(chosen.key.clone()),
+            label: chosen.name.clone(),
         });
-    std::iter::once(default_entry).chain(named).collect()
+    }
+    entries
 }
 
 #[cfg(test)]
