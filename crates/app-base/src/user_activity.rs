@@ -70,7 +70,11 @@ pub fn input_probe(input: Arc<UserInput>) -> impl gpui_kit::IntoElement {
     )
 }
 
-pub use app_backend::user_activity::{IDLE_AFTER, activity_change, is_active, latest_input, system_idle};
+pub use app_backend::user_activity::{IDLE_AFTER, activity_change, is_active, latest_input};
+#[cfg(not(target_os = "linux"))]
+pub use app_backend::user_activity::system_idle;
+#[cfg(target_os = "linux")]
+pub use crate::linux_idle::system_idle;
 
 pub fn track(input: Arc<UserInput>) -> watch::Receiver<bool> {
     let (sender, receiver) = watch::channel(false);

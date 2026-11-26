@@ -912,8 +912,8 @@ mod tests {
     use store::{ChatRecord, MemberRecord};
 
     use super::{
-        composer_placeholder, enter_action, merge_remote, pick_detail, search_results,
-        suggested_people, EnterAction, Pick,
+        EnterAction, Pick, composer_placeholder, enter_action, merge_remote, pick_detail,
+        search_results, suggested_people,
     };
     use crate::data::{existing_one_on_one, Person};
 
