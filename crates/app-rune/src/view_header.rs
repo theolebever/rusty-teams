@@ -453,7 +453,7 @@ mod tests {
         let mut rt = runtime("c0");
         rt.update(|s, _| {
             set_members(s, 2);
-            s.details.get_mut("c0").expect("details").group_chat = true;
+            s.details.get_mut("c0").expect("details").kind = "group".into();
         });
         rt.frame(1.0 / 60.0);
         assert!(rt.find("participants").is_some(), "a group keeps its member count");

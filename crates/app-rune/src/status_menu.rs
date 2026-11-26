@@ -4,9 +4,12 @@
 //! `Update::OwnStatus`.
 
 use app_backend::schemes::active_palette;
+use state::notify::pause::menu_label as pause_menu_label;
+use state::data::presence_kind_of;
+use state::own_status::{state_summary, work_location_label};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc};
 use rune::*;
-use teams_core::{ForcedAvailability, ForcedKind, PresenceStatus, StatusNote};
+use teams_core::{ForcedAvailability, ForcedKind, PresenceStatus, StatusNote, WorkLocationKind};
 
 use crate::avatar::{Presence, person, rgb};
 use crate::icons::sym;
@@ -15,6 +18,7 @@ use crate::ui::{UiState, text, ts};
 
 pub const NOTE_LIMIT: usize = 280;
 const MENU_WIDTH: f32 = 260.0;
+const VIEW_ACCOUNT_URL: &str = "https://myaccount.microsoft.com";
 const CHOICES: [ForcedKind; 6] = [
     ForcedKind::Available,
     ForcedKind::Busy,
@@ -72,6 +76,15 @@ fn end_of_day<Z: TimeZone>(now: &DateTime<Z>, days_ahead: i64) -> Option<DateTim
     Some(local.map_or_else(|| (now.clone() + Duration::days(days_ahead + 1)).with_timezone(&Utc), |moment| moment.with_timezone(&Utc)))
 }
 
+/// A page below the account menu's top level. `Duration` sits under `Status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Status,
+    Duration,
+    Pause,
+    Location,
+}
+
 pub struct Me {
     pub user_id: String,
     pub name: String,
@@ -80,7 +93,7 @@ pub struct Me {
 
 pub struct State {
     pub paused_until: Option<DateTime<Utc>>,
-    submenu: Option<&'static str>,
+    submenu: Option<Page>,
     pub me: Option<Me>,
     pub status: PresenceStatus,
     pub menu: bool,
@@ -160,6 +173,17 @@ pub(crate) fn set_forced<A: Actions>(s: &mut UiState<A>, forced: Option<ForcedAv
     }
     s.actions.set_availability(forced);
     s.own.menu = false;
+    s.own.submenu = None;
+}
+
+/// The status row: the forced state with its end, else the live presence, worded by `state_summary`.
+fn status_row_label(status: &PresenceStatus) -> String {
+    let live = presence_kind_of(teams_core::Availability::from_service(&status.availability));
+    let summary = state_summary(status, live, &Local::now());
+    match summary.until {
+        Some(until) => format!("{} {until}", summary.label),
+        None => summary.label.to_owned(),
+    }
 }
 
 fn save_note<A: Actions>(s: &mut UiState<A>) {
@@ -184,7 +208,10 @@ pub fn account_button<A: Actions + 'static>(s: &UiState<A>) -> El {
         .radius(18.0)
         .center()
         .hover(rgb(active_palette().row_hover))
-        .on_press(|s: &mut UiState<A>| s.own.menu = !s.own.menu)
+        .on_press(|s: &mut UiState<A>| {
+            s.own.menu = !s.own.menu;
+            s.own.submenu = None;
+        })
         .label("Account and status")
         .child(person(s, name, id, 28.0, own_presence(&s.own.status)))
 }
@@ -223,43 +250,22 @@ fn status_glyph(presence: Presence) -> (&'static str, Color) {
 }
 
 fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
+    if let Some(page) = s.own.submenu {
+        return submenu(s, page);
+    }
     let palette = active_palette();
     let muted = rgb(palette.text_muted);
-    if let Some(page) = s.own.submenu {
-        let mut menu = col().key("status-menu").w(MENU_WIDTH).padding(6.0).gap(2.0).radius(8.0)
-            .fill(rgb(palette.popup)).border(1.0, rgb(palette.border)).anchored("title-account", Side::Bottom, Align::End, 4.0)
-            .modal(true, |s: &mut UiState<A>| { s.own.menu = false; s.own.submenu = None; })
-            .child(item("status-back", Some(("keyboard_arrow_left", muted)), "Back", false, |s: &mut UiState<A>| s.own.submenu = None));
-        if page == "pause" {
-            for (index, span) in STATUS_SPANS.into_iter().enumerate() {
-                menu = menu.child(item(&format!("pause-for-{index}"), None, span.label(), false, move |s: &mut UiState<A>| {
-                    s.actions.set_notification_pause(span.expires_at(Local::now()));
-                    s.own.menu = false; s.own.submenu = None;
-                }));
-            }
-            if app_backend::notify::pause::is_paused(s.own.paused_until, Utc::now()) {
-                menu = menu.child(item("pause-resume", None, "Resume notifications", false, |s: &mut UiState<A>| {
-                    s.actions.set_notification_pause(None); s.own.menu = false; s.own.submenu = None;
-                }));
-            }
-        } else {
-            for (key, label, kind) in [("office", "Office", Some(teams_core::WorkLocationKind::Office)), ("remote", "Remote", Some(teams_core::WorkLocationKind::Remote)), ("clear", "Clear work location", None)] {
-                menu = menu.child(item(&format!("work-location-{key}"), None, label, s.own.status.work_location.map(|location| location.kind) == kind, move |s: &mut UiState<A>| {
-                    let location = kind.and_then(|kind| Span::Today.expires_at(Local::now()).map(|until| (kind, until)));
-                    s.actions.set_work_location(location); s.own.menu = false; s.own.submenu = None;
-                }));
-            }
-        }
-        return menu;
-    }
     let mut header = col().grow(1.0).min_w(0.0);
     let (name, id, email) = s.own.me.as_ref().map_or(("", None, ""), |me| (me.name.as_str(), Some(me.user_id.as_str()), me.email.as_str()));
     header = header
         .child(text(name.to_owned()).font(ts(14.0, 600.0)).color(rgb(palette.foreground)).truncate())
-        .child(text(email.to_owned()).font(ts(12.0, 400.0)).color(muted).truncate());
+        .child(text(email.to_owned()).font(ts(12.0, 400.0)).color(muted).truncate())
+        .child(crate::controls::button::<A>("status-menu-view-account", "View account", crate::controls::Variant::Menu, crate::controls::Size::Sm,
+            |s: &mut UiState<A>, tx: &mut Tx| crate::rich_text::open(s, tx, VIEW_ACCOUNT_URL)));
     if let Some(note) = &s.own.status.note {
         header = header.child(text(note.text.clone()).key("status-current-note").font(ts(12.0, 400.0)).color(rgb(palette.text_soft)).truncate());
     }
+    let presence = own_presence(&s.own.status);
     let mut menu = col()
         .key("status-menu")
         .w(MENU_WIDTH)
@@ -270,41 +276,101 @@ fn menu<A: Actions + 'static>(s: &UiState<A>) -> El {
         .border(1.0, rgb(palette.border))
         .anchored("title-account", Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut UiState<A>| s.own.menu = false)
-        .child(row().w_full().padding(6.0).gap(10.0).center_y().child(person(s, name, id, 40.0, own_presence(&s.own.status))).child(header))
-        .child(el().w_full().h(1.0).fill(rgb(palette.border)));
-    let current = s.own.status.forced.map(|forced| forced.kind);
-    for kind in CHOICES {
-        let (glyph, color) = status_glyph(presence_of_kind(kind));
-        menu = menu.child(item(&format!("status-{}", kind.code()), Some((glyph, color)), label(kind), current == Some(kind), move |s: &mut UiState<A>| {
-            set_forced(s, Some(ForcedAvailability { kind, expires_at: None }));
-        }));
-    }
-    if let Some(kind) = duration_target(&s.own.status) {
-        menu = menu.child(text("Duration").font(ts(11.0, 600.0)).color(muted).px(8.0).pt(6.0));
-        for (index, span) in STATUS_SPANS.into_iter().enumerate() {
-            menu = menu.child(item(&format!("status-for-{index}"), None, span.label(), false, move |s: &mut UiState<A>| {
-                set_forced(s, Some(ForcedAvailability { kind, expires_at: span.expires_at(Local::now()) }));
-            }));
-        }
-    }
-    let paused = s.own.paused_until.filter(|until| Utc::now() < *until);
-    let pause_label = paused.map(|until| format!("Paused until {}", until.with_timezone(&Local).format("%H:%M"))).unwrap_or_else(|| "Pause notifications".into());
-    menu = menu.child(item("status-pause", Some(("notifications_off", muted)), &pause_label, false, |s: &mut UiState<A>| s.own.submenu = Some("pause")));
+        .child(row().w_full().padding(6.0).gap(10.0).center_y().child(person(s, name, id, 40.0, presence)).child(header))
+        .child(el().w_full().h(1.0).fill(rgb(palette.border)))
+        .child(item("status-current", presence.map(status_glyph), &status_row_label(&s.own.status), false, |s: &mut UiState<A>| s.own.submenu = Some(Page::Status)));
+    let paused = app_backend::notify::pause::is_paused(s.own.paused_until, Utc::now());
+    let pause_glyph = if paused { "notifications_off" } else { "notifications" };
+    menu = menu.child(item("status-pause", Some((pause_glyph, muted)), &pause_menu_label(s.own.paused_until, Local::now()), false, |s: &mut UiState<A>| s.own.submenu = Some(Page::Pause)));
     if !s.read_only {
-        menu = menu.child(item("status-work-location", Some(("location_on", muted)), "Set work location for today", false, |s: &mut UiState<A>| s.own.submenu = Some("location")));
+        menu = menu.child(item("status-work-location", Some(("location_on", muted)), work_location_label(s.own.status.work_location), false, |s: &mut UiState<A>| s.own.submenu = Some(Page::Location)));
     }
-    menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
-        .child(item("status-reset", Some(("close", muted)), "Reset status", false, |s: &mut UiState<A>| set_forced(s, None)))
-        .child(item("status-message", Some(("edit", muted)), "Set status message", false, |s: &mut UiState<A>| {
+    menu.child(item("status-message", Some(("edit", muted)), "Set status message", false, |s: &mut UiState<A>| {
             s.own.note = TextEdit::new(s.own.status.note.as_ref().map(|note| note.text.clone()).unwrap_or_default());
             s.own.show_when_messaged = s.own.status.note.as_ref().is_some_and(|note| note.show_when_messaged);
             s.own.menu = false;
             s.own.dialog = true;
         }))
+        .child(el().w_full().h(1.0).fill(rgb(palette.border)))
         .child(item("status-switch-account", None, "Switch account", false, |s: &mut UiState<A>| {
             s.own.menu = false;
             crate::account_picker::open_picker(s, false);
         }))
+}
+
+/// A second-level page: pause, work location, or the status states with Duration and Reset.
+/// Duration is one level further down, so its Back row returns to the status page.
+fn submenu<A: Actions + 'static>(s: &UiState<A>, page: Page) -> El {
+    let palette = active_palette();
+    let muted = rgb(palette.text_muted);
+    let back = (page == Page::Duration).then_some(Page::Status);
+    let mut menu = col().key("status-menu").w(MENU_WIDTH).padding(6.0).gap(2.0).radius(8.0)
+        .fill(rgb(palette.popup)).border(1.0, rgb(palette.border)).anchored("title-account", Side::Bottom, Align::End, 4.0)
+        .modal(true, |s: &mut UiState<A>| { s.own.menu = false; s.own.submenu = None; })
+        .child(item("status-back", Some(("keyboard_arrow_left", muted)), "Back", false, move |s: &mut UiState<A>| s.own.submenu = back));
+    match page {
+        Page::Pause => {
+            for (index, span) in STATUS_SPANS.into_iter().enumerate() {
+                menu = menu.child(item(&format!("pause-for-{index}"), None, span.label(), false, move |s: &mut UiState<A>| {
+                    s.actions.set_notification_pause(span.expires_at(Local::now()));
+                    s.own.menu = false; s.own.submenu = None;
+                }));
+            }
+            if app_backend::notify::pause::is_paused(s.own.paused_until, Utc::now()) {
+                menu = menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
+                    .child(item("pause-resume", None, "Resume notifications", false, |s: &mut UiState<A>| {
+                        s.actions.set_notification_pause(None); s.own.menu = false; s.own.submenu = None;
+                    }));
+            }
+        }
+        Page::Location => {
+            menu = menu.child(text("Set work location for today").font(ts(11.0, 600.0)).color(muted).px(8.0).pt(6.0));
+            for (key, label, kind) in [("office", "Office", WorkLocationKind::Office), ("remote", "Remote", WorkLocationKind::Remote)] {
+                menu = menu.child(item(&format!("work-location-{key}"), None, label, s.own.status.work_location.map(|location| location.kind) == Some(kind), move |s: &mut UiState<A>| {
+                    let location = Span::Today.expires_at(Local::now()).map(|until| (kind, until));
+                    s.actions.set_work_location(location); s.own.menu = false; s.own.submenu = None;
+                }));
+            }
+            if s.own.status.work_location.is_some() {
+                menu = menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
+                    .child(item("work-location-clear", None, "Clear work location", false, |s: &mut UiState<A>| {
+                        s.actions.set_work_location(None); s.own.menu = false; s.own.submenu = None;
+                    }));
+            }
+        }
+        Page::Status => {
+            let current = s.own.status.forced.map(|forced| forced.kind);
+            for kind in CHOICES {
+                let (glyph, color) = status_glyph(presence_of_kind(kind));
+                menu = menu.child(item(&format!("status-{}", kind.code()), Some((glyph, color)), label(kind), current == Some(kind), move |s: &mut UiState<A>| {
+                    set_forced(s, Some(ForcedAvailability { kind, expires_at: None }));
+                }));
+            }
+            // Duration only applies to a forced state, so it is shown disabled without one, as GPUI does.
+            let target = duration_target(&s.own.status);
+            let mut duration = item("status-duration", None, "Duration", false, move |s: &mut UiState<A>| {
+                if target.is_some() {
+                    s.own.submenu = Some(Page::Duration);
+                }
+            });
+            if target.is_none() {
+                duration = duration.opacity(0.4).disabled(true);
+            }
+            menu = menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
+                .child(duration)
+                .child(item("status-reset", Some(("close", muted)), "Reset status", false, |s: &mut UiState<A>| set_forced(s, None)));
+        }
+        Page::Duration => {
+            if let Some(kind) = duration_target(&s.own.status) {
+                for (index, span) in STATUS_SPANS.into_iter().enumerate() {
+                    menu = menu.child(item(&format!("status-for-{index}"), None, span.label(), false, move |s: &mut UiState<A>| {
+                        set_forced(s, Some(ForcedAvailability { kind, expires_at: span.expires_at(Local::now()) }));
+                    }));
+                }
+            }
+        }
+    }
+    menu
 }
 
 fn dialog<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -433,20 +499,57 @@ mod runtime_tests {
         assert!(rt.find("status-menu").is_none());
         click(&mut rt, "title-account");
         assert!(rt.find("status-menu").is_some());
+        click(&mut rt, "status-current");
         click(&mut rt, "status-Busy");
         assert_eq!(calls(&rt), ["availability Some(Busy)"]);
         assert!(rt.find("status-menu").is_none(), "picking closes the menu");
         assert_eq!(rt.state.own.status.availability, "Busy");
         click(&mut rt, "title-account");
+        assert!(rt.find("status-current").is_some(), "reopens at the top level");
+        click(&mut rt, "status-current");
+        click(&mut rt, "status-duration");
         assert!(rt.find("status-for-0").is_some(), "a forced state offers durations");
+        click(&mut rt, "status-back");
+        assert!(rt.find("status-duration").is_some() && rt.find("status-for-0").is_none(), "Back returns to the status page");
         click(&mut rt, "status-reset");
         assert_eq!(calls(&rt)[1], "availability None");
+    }
+
+    #[test]
+    fn the_top_level_menu_lists_status_pause_location_message_then_switch_account() {
+        let mut rt = rt();
+        click(&mut rt, "title-account");
+        let elements = rt.elements();
+        let root = elements.iter().find(|e| e.key.as_deref() == Some("status-menu")).expect("menu");
+        let prefix = format!("{}/", root.path);
+        let rows: Vec<&str> = elements.iter().filter(|e| e.role == "menuitem" && e.path.starts_with(&prefix)).filter_map(|e| e.key.as_deref()).collect();
+        assert_eq!(rows, ["status-current", "status-pause", "status-work-location", "status-message", "status-switch-account"]);
+        let view = elements.iter().find(|e| e.key.as_deref() == Some("status-menu-view-account")).expect("View account link");
+        assert_eq!(view.label.as_deref(), Some("View account"));
+        assert!(view.focusable && view.role == "button", "reachable from the keyboard");
+    }
+
+    #[test]
+    fn the_status_submenu_lists_the_six_states_then_duration_and_reset() {
+        let mut rt = rt();
+        click(&mut rt, "title-account");
+        click(&mut rt, "status-current");
+        let elements = rt.elements();
+        let root = elements.iter().find(|e| e.key.as_deref() == Some("status-menu")).expect("menu");
+        let prefix = format!("{}/", root.path);
+        let rows: Vec<&str> = elements.iter().filter(|e| e.role == "menuitem" && e.path.starts_with(&prefix)).filter_map(|e| e.key.as_deref()).collect();
+        assert_eq!(rows.len(), 9, "Back, six states, Duration, Reset: {rows:?}");
+        assert_eq!(rows.first(), Some(&"status-back"));
+        assert_eq!(&rows[7..], &["status-duration", "status-reset"]);
+        let duration = elements.iter().find(|e| e.key.as_deref() == Some("status-duration")).expect("Duration row");
+        assert!(duration.opacity < 1.0, "Duration is dimmed without a forced state");
     }
 
     #[test]
     fn presence_rows_and_the_submenu_back_row_are_accessible_menu_items() {
         let mut rt = rt();
         click(&mut rt, "title-account");
+        click(&mut rt, "status-current");
         let elements = rt.elements();
         let busy = elements.iter().find(|e| e.key.as_deref() == Some("status-Busy")).expect("Busy row");
         assert_eq!(busy.role, "menuitem");
@@ -456,11 +559,13 @@ mod runtime_tests {
 
         click(&mut rt, "status-Busy");
         click(&mut rt, "title-account");
+        click(&mut rt, "status-current");
         let elements = rt.elements();
         let busy = elements.iter().find(|e| e.key.as_deref() == Some("status-Busy")).expect("Busy row");
         assert!(busy.item_selected, "the checked presence is exposed as a selected row");
 
         // Opening the pause submenu draws a registered back arrow, not a missing glyph.
+        click(&mut rt, "status-back");
         click(&mut rt, "status-pause");
         assert!(rt.find("status-back").is_some(), "pause submenu exposes Back");
         let elements = rt.elements();

@@ -84,6 +84,8 @@ pub struct UiState<A: Actions> {
     pub pin_index: usize,
     /// Member counts by conversation id; the header shows the count when one is known.
     pub member_counts: HashMap<String, usize>,
+    /// Allowed until the account's messaging policy says otherwise, as in GPUI.
+    pub allow_priority_messages: bool,
     pub details: HashMap<String, crate::types::ChatDetails>,
     pub typing: HashMap<(String, String), chatsvc::TypingEvent>,
     pub shared_open: bool,
@@ -201,6 +203,7 @@ impl<A: Actions> UiState<A> {
             pinned: Vec::new(),
             pin_index: 0,
             member_counts: HashMap::new(),
+            allow_priority_messages: true,
             global_search: Default::default(),
             thread_root_id: None,
             expanded_posts: Default::default(),
@@ -356,6 +359,7 @@ impl<A: Actions> UiState<A> {
                 } else if let Err(error) = result { self.toast.show(format!("Could not edit message: {error}")); }
             }
             Update::Live(state) => self.toast.live(state),
+            Update::PriorityPolicy(allowed) => self.allow_priority_messages = allowed,
             Update::LiveRetryReady => self.toast.retry_ready = true,
             Update::Synced(at) => self.toast.last_sync = Some(at),
             Update::Deleted { conversation_id, message_id } => { self.deleted_here.insert((conversation_id, message_id)); }
@@ -710,7 +714,9 @@ pub(crate) fn send<A: Actions>(s: &mut UiState<A>) {
     s.send_error = None;
     crate::view_composer::stop_typing(s);
     s.media.clear(&target);
-    let composed = s.compose.take(text);
+    let importance = crate::view_composer::sendable_importance(s, Some(&target));
+    let mut composed = s.compose.take(text);
+    composed.importance = importance;
     s.actions.send_composed(target, composed, files);
     s.composer.clear();
 }
@@ -1071,7 +1077,7 @@ mod tests {
             avatar_id: None, group: vec![],
             members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
             muted: true, presence: None, importance: Default::default(), desktop_notifications: Default::default(),
-            group_chat: false,
+            kind: String::new(),
         })])));
         assert_eq!(state.member_counts["b"], 1);
         assert!(state.details["b"].muted);

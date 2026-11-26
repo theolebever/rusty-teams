@@ -42,6 +42,7 @@ impl CallWindow {
                 | Update::People { .. }
                 | Update::Me { .. }
                 | Update::Details(_)
+                | Update::PriorityPolicy(_)
                 // The chat panel beside the call: its messages, pictures and unread state.
                 | Update::Messages { .. }
                 | Update::Outbox(_)

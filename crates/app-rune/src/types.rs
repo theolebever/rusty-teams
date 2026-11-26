@@ -80,8 +80,8 @@ pub struct ChatDetails {
     /// Up to two other people of a group chat, drawn as a pair when it has no picture of its own.
     pub group: Vec<store::MemberRecord>,
     pub members: Vec<store::MemberRecord>,
-    /// A group chat, even one down to two people. Unset for a 1:1 and in tests.
-    pub group_chat: bool,
+    /// The kind the store records: "oneOnOne", "group" or "meeting". Empty in most tests.
+    pub kind: String,
     pub muted: bool,
     pub presence: Option<teams_core::Presence>,
 }
@@ -178,6 +178,8 @@ pub enum Update {
     AgentProgress(String),
     /// The GPUI client's stored agent runs (`agent_panel::stored_runs`).
     AgentRuns(Vec<crate::agent_panel::Run>),
+    /// Whether the organization's messaging policy allows Urgent messages.
+    PriorityPolicy(bool),
     Details(std::collections::HashMap<String, ChatDetails>),
     Pinned { conversation_id: String, pins: Vec<PinnedRow> },
     /// Ids of the edited messages of the open conversation (`message_menu.rs`).
@@ -296,6 +298,8 @@ pub trait Actions {
     fn copy_message_link(&self, _conversation: &str, _message: &str) {}
     fn set_notification_pause(&self, _until: Option<chrono::DateTime<chrono::Utc>>) {}
     fn set_work_location(&self, _location: Option<(teams_core::WorkLocationKind, chrono::DateTime<chrono::Utc>)>) {}
+    /// Places the Echo test call (the settings menu's "Make a test call").
+    fn start_test_call(&self) {}
     fn search_switcher(&self, _session: teams_core::substrate_search::SearchSession, _query: String) {}
     fn set_channel_pinned(&self, _id: &str, _pinned: bool) {}
     fn set_channel_shown(&self, _id: &str, _shown: bool) {}

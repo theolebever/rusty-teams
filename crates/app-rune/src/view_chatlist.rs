@@ -443,6 +443,16 @@ pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
             s.chatlist.more = false;
             for chat in s.chats.iter().filter(|chat| chat.unread) { s.actions.set_chat_read(&chat.id, true); }
         }));
+    }
+    menu = menu.child(crate::controls::menu_item::<A>("chats-collapse-all", "Collapse all sections", None, false, |s: &mut UiState<A>| {
+        s.chatlist.more = false;
+        s.chatlist.collapsed = [QUICK_VIEWS, TEAMS, CHATS].map(str::to_owned).to_vec();
+        s.expanded_teams.clear();
+        for folder in s.chatlist.folders.iter().filter(|folder| folder.expanded) { s.actions.set_folder_expanded(&folder.id, false); }
+    }));
+    if !s.read_only {
+        // GPUI: a rule separates the bulk actions from New section.
+        menu = menu.child(el().key("chats-more-rule").w_full().h(1.0).fill(tone(p.border)));
         menu = menu.child(crate::controls::menu_item::<A>("chats-new-section", "New section", None, false, |s: &mut UiState<A>| s.chatlist.new_section = true));
         if s.chatlist.new_section {
             menu = menu.child(text_input(&s.chatlist.section_name, ts(13.0, 400.0)).key("section-name").label("Section name")
@@ -459,12 +469,7 @@ pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
                 }));
         }
     }
-    Some(menu.child(crate::controls::menu_item::<A>("chats-collapse-all", "Collapse all", None, false, |s: &mut UiState<A>| {
-        s.chatlist.more = false;
-        s.chatlist.collapsed = [QUICK_VIEWS, TEAMS, CHATS].map(str::to_owned).to_vec();
-        s.expanded_teams.clear();
-        for folder in s.chatlist.folders.iter().filter(|folder| folder.expanded) { s.actions.set_folder_expanded(&folder.id, false); }
-    })))
+    Some(menu)
 }
 
 fn folder_rows<A: Actions + 'static>(s: &UiState<A>) -> El {
@@ -790,6 +795,31 @@ mod tests {
             assert!((e.rect[3] - 32.0).abs() < 0.5, "{key} height {}", e.rect[3]);
             assert!((e.radius - 6.0).abs() < 0.5, "{key} radius {}", e.radius);
         }
+    }
+
+    fn more_menu_keys(rt: &Runtime<UiState<Quiet>>) -> Vec<String> {
+        rt.elements().iter().filter(|e| e.role == "menuitem" && e.key.as_deref().is_some_and(|k| k.starts_with("chats-") || k.starts_with("section-")))
+            .filter_map(|e| e.key.clone()).collect()
+    }
+
+    #[test]
+    fn chat_more_menu_follows_gpui_order_with_new_section_after_a_rule() {
+        let mut rt = rt();
+        rt.update(|s, _| s.chatlist.more = true);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(more_menu_keys(&rt), ["chats-read-all", "chats-collapse-all", "chats-new-section"]);
+        assert!(rt.find("chats-more-rule").is_some());
+        let collapse = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("chats-collapse-all")).and_then(|e| e.label);
+        assert_eq!(collapse.as_deref(), Some("Collapse all sections"));
+    }
+
+    #[test]
+    fn read_only_chat_more_menu_only_offers_collapse() {
+        let mut rt = rt();
+        rt.update(|s, _| { s.read_only = true; s.chatlist.more = true; });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(more_menu_keys(&rt), ["chats-collapse-all"]);
+        assert!(rt.find("chats-more-rule").is_none());
     }
 
     #[test]

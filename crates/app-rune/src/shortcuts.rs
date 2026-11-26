@@ -269,7 +269,8 @@ pub(crate) fn zoom<A: Actions>(s: &mut UiState<A>, direction: i32) {
 fn close_popups<A: Actions>(s: &mut UiState<A>) {
     s.nav.settings_more = false;
     s.nav.meet_more = false;
-    s.compose.send_menu = false;
+    s.compose.plus_menu = false;
+    s.compose.delivery_menu = false;
     s.nav.switcher = None;
     s.nav.shortcuts_open = false;
 }

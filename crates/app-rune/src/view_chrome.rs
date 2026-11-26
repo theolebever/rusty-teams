@@ -8,6 +8,7 @@ use crate::ui::text;
 
 use crate::icons::sym;
 use crate::screens::{self, Screen};
+use crate::settings::Section;
 use crate::types::Actions;
 use crate::ui::{UiState, c, ts, INK, MUTED};
 
@@ -256,25 +257,72 @@ fn shortcut(screen: Screen) -> &'static str {
     }
 }
 
+/// The "Settings and more" menu, as GPUI's `settings_more_menu`. Keyboard shortcuts is kept from
+/// the Teams web client, which has it; GPUI leaves it out.
 pub fn more_menu<A: Actions + 'static>(s: &UiState<A>) -> Option<El> {
     if !s.nav.settings_more { return None; }
-    Some(col().key("settings-more-menu").w(220.0).padding(6.0).gap(4.0).radius(8.0)
-        .fill(tone(active_palette().popup)).border(1.0, tone(active_palette().border))
+    let palette = active_palette();
+    let zoom = s.appearance.zoom;
+    let mut menu = col().key("settings-more-menu").w(220.0).padding(6.0).gap(4.0).radius(8.0)
+        .fill(tone(palette.popup)).border(1.0, tone(palette.border))
         .anchored("title-more", Side::Bottom, Align::End, 4.0)
         .modal(true, |s: &mut UiState<A>| s.nav.settings_more = false)
-        .child(crate::controls::menu_item::<A>("settings-more-settings", "Settings", None, false, |s: &mut UiState<A>| {
+        .child(settings_item::<A>("settings-more-settings", "Settings", Section::General))
+        .child(el().w_full().h(1.0).fill(tone(palette.border)))
+        .child(settings_item::<A>("settings-more-chats", "Chat list", Section::Chats))
+        .child(settings_item::<A>("settings-more-translation", "Translation", Section::General))
+        .child(settings_item::<A>("settings-more-notifications", "Notification settings", Section::Notifications));
+    if !s.read_only {
+        menu = menu.child(crate::controls::menu_item::<A>("settings-more-test-call", "Make a test call", None, false, |s: &mut UiState<A>| {
             s.nav.settings_more = false;
-            screens::navigate(s, Screen::Settings);
-        }))
-        .child(crate::controls::menu_item::<A>("settings-more-shortcuts", "Keyboard shortcuts", None, false, |s: &mut UiState<A>| {
+            // `start` ignores a second call, so show the running one instead, as GPUI does.
+            if s.calls.state.as_ref().is_some_and(calling::CallState::is_active) {
+                if let Some(window) = &s.call_window { window.open(); }
+            } else {
+                s.actions.start_test_call();
+            }
+        }));
+    }
+    Some(menu.child(crate::controls::menu_item::<A>("settings-more-shortcuts", "Keyboard shortcuts", None, false, |s: &mut UiState<A>| {
             s.nav.settings_more = false;
             s.nav.shortcuts_open = true;
         }))
-        .child(crate::controls::menu_item::<A>("window-zoom-out", "Zoom out", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, -1)))
-        .child(row().w_full().px(10.0).center_y()
-            .child(text(format!("{}%", app_backend::appearance::zoom_percent(s.appearance.zoom))).font(ts(13.0, 400.0)).color(tone(active_palette().foreground))))
-        .child(crate::controls::menu_item::<A>("window-zoom-in", "Zoom in", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, 1)))
-        .child(crate::controls::menu_item::<A>("window-zoom-reset", "Reset", None, false, |s: &mut UiState<A>| crate::shortcuts::zoom(s, 0))))
+        .child(zoom_row::<A>(zoom)))
+}
+
+/// A row that opens the settings screen at `section`, closing the menu.
+fn settings_item<A: Actions + 'static>(key: &str, label: &str, section: Section) -> El {
+    crate::controls::menu_item::<A>(key, label, None, false, move |s: &mut UiState<A>| {
+        s.nav.settings_more = false;
+        s.settings.section = section;
+        screens::navigate(s, Screen::Settings);
+    })
+}
+
+/// "Zoom" with out, the level, in and reset as buttons on one line (GPUI `window_zoom::menu_row`).
+/// Reset is only offered while zoomed.
+fn zoom_row<A: Actions + 'static>(zoom: f32) -> El {
+    let zoomed = app_backend::appearance::zoom_percent(zoom) != 100;
+    row().key("window-zoom").w_full().px(10.0).gap(8.0).center_y().justify_between()
+        .child(text("Zoom").font(ts(13.0, 400.0)).color(tone(active_palette().foreground)))
+        .child(row().gap(2.0).center_y()
+            .child(zoom_button::<A>("window-zoom-out", "\u{2212}", "Zoom out", true, |s| crate::shortcuts::zoom(s, -1)))
+            .child(text(zoom_level(zoom)).key("window-zoom-level").font(ts(13.0, 400.0)).color(tone(active_palette().text_muted)))
+            .child(zoom_button::<A>("window-zoom-in", "+", "Zoom in", true, |s| crate::shortcuts::zoom(s, 1)))
+            .child(zoom_button::<A>("window-zoom-reset", "\u{21ba}", "Reset zoom", zoomed, |s| crate::shortcuts::zoom(s, 0))))
+}
+
+fn zoom_button<A: Actions + 'static>(key: &str, glyph: &str, label: &str, enabled: bool, press: fn(&mut UiState<A>)) -> El {
+    crate::controls::button::<A>(key, glyph, crate::controls::Variant::Menu, crate::controls::Size::Md, move |s, _| press(s))
+        .label(label)
+        .opacity(if enabled { 1.0 } else { 0.4 })
+        .disabled(!enabled)
+}
+
+/// The zoom level in brackets, rounded to five percent as GPUI shows it.
+fn zoom_level(zoom: f32) -> String {
+    let percent = app_backend::appearance::zoom_percent(zoom);
+    format!("({})%", (percent + 2) / 5 * 5)
 }
 
 #[cfg(test)]
@@ -289,6 +337,31 @@ mod tests {
     impl Actions for Quiet {
         fn open(&self, _conversation_id: &str) {}
         fn send(&self, _target: SendTarget, _text: String, _files: Vec<teams_core::FileReference>) {}
+    }
+
+    #[derive(Default)]
+    struct Dialer(std::cell::Cell<u32>);
+
+    impl Actions for Dialer {
+        fn open(&self, _conversation_id: &str) {}
+        fn send(&self, _target: SendTarget, _text: String, _files: Vec<teams_core::FileReference>) {}
+        fn start_test_call(&self) { self.0.set(self.0.get() + 1); }
+    }
+
+    #[test]
+    fn the_test_call_row_dials_only_without_a_running_call() {
+        let env = Env { system_dark: false, scale: 1.0 };
+        let mut rt = Runtime::new(UiState::new(Dialer::default()), crate::ui::view::<Dialer>, (1000.0, 700.0), env);
+        rt.frame(0.0);
+        for state in [None, Some(calling::CallState::Connecting)] {
+            rt.update(move |s, _| { s.calls.state = state; s.nav.settings_more = true; });
+            rt.frame(1.0 / 60.0);
+            let (x, y) = rt.find("settings-more-test-call").expect("test call row");
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+            assert_eq!(rt.state.actions.0.get(), 1, "one dial, none over the running call");
+        }
     }
 
     #[test]
@@ -373,6 +446,7 @@ mod tests {
         let rows: Vec<_> = elements
             .iter()
             .filter(|e| e.path.starts_with(&prefix) && matches!(e.role, "button" | "menuitem"))
+            .filter(|e| !e.key.as_deref().unwrap_or("").starts_with("window-zoom"))
             .collect();
         assert!(!rows.is_empty(), "the menu should expose interactive rows");
         for row in rows {
@@ -390,20 +464,62 @@ mod tests {
     fn zoom_rows_name_their_actions_instead_of_bare_glyphs() {
         let rt = menu_runtime();
         let elements = rt.elements();
-        for (key, label) in [("window-zoom-out", "Zoom out"), ("window-zoom-in", "Zoom in"), ("window-zoom-reset", "Reset")] {
+        for (key, label) in [("window-zoom-out", "Zoom out"), ("window-zoom-in", "Zoom in"), ("window-zoom-reset", "Reset zoom")] {
             let e = by_key(&elements, key);
-            assert_eq!(e.role, "menuitem", "{key}");
+            assert_eq!(e.role, "button", "{key}");
             assert_eq!(e.label.as_deref(), Some(label), "{key}");
-            assert!(e.focusable, "{key}");
         }
-        assert!(
-            elements.iter().all(|e| e.text.as_deref().map_or(true, |t| t != "−" && t != "+")),
-            "bare zoom glyphs must not be the only name in the tree"
-        );
+        assert!(by_key(&elements, "window-zoom-out").focusable);
+        assert!(!by_key(&elements, "window-zoom-reset").focusable, "reset is offered only while zoomed");
         let mut names = Vec::new();
         a11y_names(&rt.accessibility_json(), &mut names);
         assert!(names.iter().any(|name| name == "Zoom out"), "a11y names: {names:?}");
         assert!(names.iter().any(|name| name == "Zoom in"), "a11y names: {names:?}");
+    }
+
+    #[test]
+    fn settings_more_menu_lists_the_gpui_rows_then_shortcuts_then_zoom() {
+        let rt = menu_runtime();
+        let elements = rt.elements();
+        let root = by_key(&elements, "settings-more-menu");
+        let prefix = format!("{}/", root.path);
+        let keys: Vec<&str> = elements
+            .iter()
+            .filter(|e| e.path.starts_with(&prefix) && matches!(e.role, "button" | "menuitem"))
+            .filter_map(|e| e.key.as_deref())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "settings-more-settings",
+                "settings-more-chats",
+                "settings-more-translation",
+                "settings-more-notifications",
+                "settings-more-test-call",
+                "settings-more-shortcuts",
+                "window-zoom-out",
+                "window-zoom-in",
+                "window-zoom-reset",
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_rows_open_their_section_and_the_settings_screen() {
+        for (key, section) in [
+            ("settings-more-chats", Section::Chats),
+            ("settings-more-translation", Section::General),
+            ("settings-more-notifications", Section::Notifications),
+        ] {
+            let mut rt = menu_runtime();
+            let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no element {key}"));
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+            assert_eq!(rt.state.settings.section, section, "{key}");
+            assert_eq!(rt.state.screens.screen, Screen::Settings, "{key}");
+            assert!(!rt.state.nav.settings_more, "{key} closes the menu");
+        }
     }
 
     #[test]

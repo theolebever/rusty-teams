@@ -37,7 +37,7 @@ fn blocker<A: Actions>(s: &UiState<A>) -> Option<&'static str> {
     else if !crate::mentions::resolve(&s.composer.text, &s.compose.mentions.chosen).is_empty() { Some("Can't schedule messages with mentions yet") }
     else if !s.compose.gifs.is_empty() || s.compose.inline.iter().any(|(marker, _)| s.composer.text.contains(marker)) || !s.compose.inline_loading.is_empty() || !s.media.files(&target).is_empty() || s.media.is_uploading(&target) { Some("Can't schedule messages with images or files yet") }
     else if s.compose.reply.is_some() { Some("Can't schedule quoted replies yet") }
-    else if s.compose.importance != store::MessageImportance::Normal { Some("Scheduled messages use standard importance") }
+    else if crate::view_composer::sendable_importance(s, Some(&target)) != store::MessageImportance::Normal { Some("Scheduled messages use standard importance") }
     else if !s.compose.subject.text.trim().is_empty() || !s.compose.headline.text.trim().is_empty() { Some("Can't schedule posts with a subject or headline yet") }
     else { None }
 }

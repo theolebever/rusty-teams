@@ -137,6 +137,10 @@ pub fn refresh(shared: Arc<Shared>, engine: Arc<Engine>) {
             }
             Err(error) => app_backend::diagnostics::record(format!("Rune: sound settings not read: {error}")),
         }
+        match engine.allow_priority_messages().await {
+            Ok(allowed) => shared.publish(Update::PriorityPolicy(allowed)),
+            Err(error) => app_backend::diagnostics::record(format!("Rune: messaging policy not read: {error}")),
+        }
         refresh_translation(&shared, &engine).await;
         shared.publish(Update::Preferences(Box::new(load(&shared.store))));
     });

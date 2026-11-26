@@ -180,7 +180,7 @@ impl Shared {
                     let group = if one_on_one { vec![] } else {
                         chat.members.iter().filter(|m| !m.is_bot() && m.user_id.as_deref() != Some(&me)).take(2).cloned().collect()
                     };
-                    (chat.id.clone(), crate::types::ChatDetails { importance: engine.unread_importance(&chat.id), desktop_notifications: engine.chat_desktop_notifications(&chat.id), avatar_id, group, members: chat.members.clone(), group_chat: chat.kind == "group", muted: chat.muted, presence })
+                    (chat.id.clone(), crate::types::ChatDetails { importance: engine.unread_importance(&chat.id), desktop_notifications: engine.chat_desktop_notifications(&chat.id), avatar_id, group, members: chat.members.clone(), kind: chat.kind.clone(), muted: chat.muted, presence })
                 }).collect();
                 self.publish(Update::Details(details));
                 self.publish(Update::Chats(chat_rows(sidebar.chats, Local::now())));
@@ -684,6 +684,9 @@ impl Actions for Bridge {
     }
     fn set_work_location(&self, location: Option<(teams_core::WorkLocationKind, DateTime<Utc>)>) {
         self.chat_task("", "set work location", move |engine, _| async move { engine.set_own_work_location(location).await });
+    }
+    fn start_test_call(&self) {
+        self.shared.call_control.start(calling::CallSpec::Echo);
     }
     fn search_switcher(&self, session: teams_core::substrate_search::SearchSession, query: String) {
         let Some(engine) = self.shared.engine() else { return };

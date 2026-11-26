@@ -6,6 +6,7 @@
 use app_backend::schemes::active_palette;
 use rune::*;
 use crate::ui::text;
+use state::presence_follow::{NOTIFY_WHEN_AVAILABLE, TURN_OFF_NOTIFICATIONS};
 
 use crate::icons::sym;
 use crate::types::Actions;
@@ -98,7 +99,38 @@ pub fn overlay<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 pub(crate) fn is_group<A: Actions>(s: &UiState<A>, id: &str) -> bool {
-    s.details.get(id).is_some_and(|d| d.group_chat || d.members.iter().filter(|m| !m.is_bot()).count() > 2)
+    s.details.get(id).is_some_and(|d| d.kind == "group" || d.members.iter().filter(|m| !m.is_bot()).count() > 2)
+}
+
+/// Sections a chat can move to: Favorites and user sections, except the ones that already hold it.
+fn move_targets<'a, A: Actions>(s: &'a UiState<A>, id: &'a str) -> impl Iterator<Item = &'a teams_core::ChatFolder> {
+    s.chatlist.folders.iter().filter(move |folder| {
+        matches!(folder.kind, teams_core::FolderKind::Favorites | teams_core::FolderKind::UserCreated)
+            && !folder.conversation_ids.iter().any(|chat| chat == id)
+    })
+}
+
+/// The other person of a one-to-one chat, as (user id, name), for "Notify when available".
+fn one_on_one_partner<A: Actions>(s: &UiState<A>, id: &str) -> Option<(String, String)> {
+    let details = s.details.get(id).filter(|details| details.kind == "oneOnOne")?;
+    // Until the own profile is loaded, the other person cannot be told apart from me.
+    let me = s.own.me.as_ref()?.user_id.as_str();
+    details.members.iter().filter(|member| !member.is_bot()).find_map(|member| {
+        let user = member.user_id.as_deref().filter(|user| *user != me)?;
+        Some((user.to_owned(), member.display_name.clone()))
+    })
+}
+
+/// A non-interactive title inside a submenu.
+fn heading(key: &str, label: &str) -> El {
+    let p = active_palette();
+    row().key(key.to_owned()).w_full().h(ITEM_H).px(10.0).center_y()
+        .child(text(label.to_owned()).font(ts(12.0, 600.0)).color(tone(p.text_soft)))
+}
+
+/// A thin divider between groups of rows.
+fn rule() -> El {
+    el().w_full().h(1.0).fill(tone(active_palette().border))
 }
 
 fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
@@ -111,10 +143,8 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
             .fill(tone(p.popup)).border(1.0, tone(p.border_strong))
             .child(submenu_button::<A>("menu-back", "Back", None));
         if page == "sections" {
-            let current = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id));
-            for folder in s.chatlist.folders.iter().filter(|folder| matches!(folder.kind, teams_core::FolderKind::Favorites | teams_core::FolderKind::UserCreated)) {
+            for folder in move_targets(s, id) {
                 let (chat, target) = (id.to_owned(), folder.id.clone());
-                if current.is_some_and(|current| current.id == folder.id) { continue; }
                 let label = if folder.kind == teams_core::FolderKind::Favorites { "Favorites" } else { &folder.name };
                 panel = panel.child(item(&format!("menu-move-{}", folder.id), "folder", label, false,
                     move |s: &mut UiState<A>| s.actions.move_to_folder(&chat, &target)));
@@ -122,11 +152,13 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
         } else {
             let mode = if muted { teams_core::ChatNotificationMode::Mute } else { teams_core::ChatNotificationMode::AllNewMessages };
             let desktop = s.details.get(id).map(|details| details.desktop_notifications).unwrap_or_default();
+            panel = panel.child(heading("menu-heading-mode", "Chat notification mode"));
             for (key, label, value) in [("all", "All new messages", teams_core::ChatNotificationMode::AllNewMessages), ("mute", "Mute", teams_core::ChatNotificationMode::Mute)] {
                 let chat = id.to_owned();
                 panel = panel.child(item(&format!("menu-notify-{key}"), if value == mode { "check" } else { "notifications" }, label, false,
                     move |s: &mut UiState<A>| s.actions.set_chat_notifications(&chat, value, desktop)));
             }
+            panel = panel.child(rule()).child(heading("menu-heading-desktop", "Set a desktop notification preference"));
             for (key, label, value) in [("match", "Match settings used for all chats", teams_core::DesktopNotifications::MatchAllChats), ("off", "Don't get desktop notifications", teams_core::DesktopNotifications::Off)] {
                 let chat = id.to_owned();
                 panel = panel.child(item(&format!("menu-desktop-{key}"), if value == desktop { "check" } else { "notifications" }, label, false,
@@ -142,26 +174,30 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
         .radius(8.0)
         .fill(tone(p.surface))
         .border(1.0, tone(p.border_strong))
-        .child(item("menu-read", if unread { "done_all" } else { "chat_bubble" }, if unread { "Mark as read" } else { "Mark as unread" }, false, {
+        .child(item("menu-read", if unread { "drafts" } else { "chat_bubble" }, if unread { "Mark as read" } else { "Mark as unread" }, false, {
             let id = id.to_owned();
             move |s: &mut UiState<A>| s.actions.set_chat_read(&id, unread)
         }));
-    let chat = id.to_owned();
-    panel = panel.child(item("menu-pop-out", "right_panel_open", "Pop out chat", false, move |s: &mut UiState<A>| s.actions.pop_out_chat(&chat)));
-    if !s.chatlist.folders.is_empty() {
+    if move_targets(s, id).next().is_some() {
         panel = panel.child(submenu_button::<A>("menu-sections", "Move to section", Some("sections")));
-        if let Some(folder) = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id)) {
-            let (chat, folder) = (id.to_owned(), folder.id.clone());
-            panel = panel.child(item("menu-remove-section", "folder", "Remove from section", false,
-                move |s: &mut UiState<A>| s.actions.remove_from_folder(&chat, &folder)));
-        }
+    }
+    if let Some(folder) = s.chatlist.folders.iter().find(|folder| folder.conversation_ids.iter().any(|chat| chat == id)) {
+        let (chat, folder) = (id.to_owned(), folder.id.clone());
+        panel = panel.child(item("menu-remove-section", "folder", "Remove from section", false,
+            move |s: &mut UiState<A>| s.actions.remove_from_folder(&chat, &folder)));
     }
     if !notes {
-        panel = panel.child(submenu_button::<A>("menu-notifications", "Manage notifications", Some("notifications")));
         panel = panel.child(item("menu-mute", if muted { "notifications" } else { "notifications_off" }, if muted { "Unmute" } else { "Mute" }, false, {
             let id = id.to_owned();
             move |s: &mut UiState<A>| s.actions.set_chat_muted(&id, !muted)
         }));
+        panel = panel.child(submenu_button::<A>("menu-notifications", "Manage notifications", Some("notifications")));
+        if let Some((user, name)) = one_on_one_partner(s, id) {
+            let following = s.profile.followed.iter().any(|person| person.user_id == user);
+            panel = panel.child(item("menu-notify-available", if following { "notifications_off" } else { "notifications" },
+                if following { TURN_OFF_NOTIFICATIONS } else { NOTIFY_WHEN_AVAILABLE }, false,
+                move |s: &mut UiState<A>| s.actions.follow_presence(&user, &name, !following)));
+        }
         let chat = id.to_owned();
         panel = panel.child(crate::controls::menu_item::<A>("menu-copy-link", "Copy link", Some("link"), false, |_| {})
             .on_press_tx(move |s: &mut UiState<A>, tx| {
@@ -169,16 +205,18 @@ fn menu<A: Actions + 'static>(s: &UiState<A>, id: &str, x: f32, y: f32) -> El {
                 s.chatlist.manage.close();
                 s.toast.show("Link copied");
             }));
-        if !is_group(s, id) {
-            let chat = id.to_owned();
-            panel = panel.child(item("menu-remove-history", "delete", "Remove chat history", true,
-                move |s: &mut UiState<A>| s.chatlist.manage.remove_history = Some(chat.clone())));
-        }
     }
-    panel = panel.child(item("menu-hide", "close", "Hide", false, {
+    let chat = id.to_owned();
+    panel = panel.child(item("menu-pop-out", "right_panel_open", "Pop out chat", false, move |s: &mut UiState<A>| s.actions.pop_out_chat(&chat)));
+    panel = panel.child(rule()).child(item("menu-hide", "close", "Hide", false, {
         let id = id.to_owned();
         move |s: &mut UiState<A>| s.actions.hide_chat(&id)
     }));
+    if !notes && !is_group(s, id) {
+        let chat = id.to_owned();
+        panel = panel.child(item("menu-remove-history", "delete", "Remove chat history", false,
+            move |s: &mut UiState<A>| s.chatlist.manage.remove_history = Some(chat.clone())));
+    }
     if is_group(s, id) && !notes {
         panel = panel.child(item("menu-leave", "close", "Leave chat...", true, {
             let id = id.to_owned();
@@ -289,6 +327,17 @@ mod tests {
         }
         fn add_members(&self, id: &str, people: Vec<store::MemberRecord>) { self.log(format!("add {id} {}", people.len())); }
         fn remove_member(&self, id: &str, user: &str) { self.log(format!("remove {id} {user}")); }
+        fn follow_presence(&self, user: &str, name: &str, follow: bool) { self.log(format!("follow-presence {user} {name} {follow}")); }
+    }
+
+    fn keys_of_menu_rows(rt: &Runtime<UiState<Fake>>) -> Vec<String> {
+        rt.elements().iter().filter(|e| e.role == "menuitem" && e.key.as_deref().is_some_and(|k| k.starts_with("menu-")))
+            .filter_map(|e| e.key.clone()).collect()
+    }
+
+    fn sign_in_as_me(rt: &mut Runtime<UiState<Fake>>) {
+        rt.update(|s, _| s.own.me = Some(crate::status_menu::Me { user_id: "me".into(), name: "Me".into(), email: String::new() }));
+        rt.frame(1.0 / 60.0);
     }
 
     fn member(id: &str) -> store::MemberRecord {
@@ -303,8 +352,8 @@ mod tests {
             let row = |id: &str, unread| ChatRow { id: id.into(), title: id.into(), preview: String::new(), unread, when: String::new() };
             s.apply(Update::Chats(vec![row("duo", true), row("crew", false)]));
             s.apply(Update::Details(HashMap::from([
-                ("duo".into(), ChatDetails { members: vec![member("me"), member("ann")], ..Default::default() }),
-                ("crew".into(), ChatDetails { members: vec![member("me"), member("ann"), member("bob")], muted: true, ..Default::default() }),
+                ("duo".into(), ChatDetails { members: vec![member("me"), member("ann")], kind: "oneOnOne".into(), ..Default::default() }),
+                ("crew".into(), ChatDetails { members: vec![member("me"), member("ann"), member("bob")], muted: true, kind: "group".into(), ..Default::default() }),
             ])));
         });
         rt.frame(1.0 / 60.0);
@@ -443,6 +492,70 @@ mod tests {
         assert!(!rt.state.chatlist.manage.new_chat.creating);
         assert_eq!(rt.state.chatlist.manage.new_chat.error.as_deref(), Some("offline"));
         assert!(rt.state.chatlist.manage.new_chat_open, "a failed creation keeps the panel open for a retry");
+    }
+
+    #[test]
+    fn chat_menu_entries_follow_gpui_order() {
+        let mut rt = rt();
+        sign_in_as_me(&mut rt);
+        right_click(&mut rt, "chat-duo");
+        assert_eq!(keys_of_menu_rows(&rt), ["menu-read", "menu-mute", "menu-notifications", "menu-notify-available", "menu-copy-link", "menu-pop-out", "menu-hide", "menu-remove-history"]);
+        let notify = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("menu-notify-available")).and_then(|e| e.label);
+        assert_eq!(notify.as_deref(), Some("Notify when available"));
+    }
+
+    #[test]
+    fn move_entries_appear_only_with_another_section_to_move_to() {
+        let mut rt = rt();
+        let favorites = |id: &str, chats: Vec<String>| teams_core::ChatFolder {
+            id: id.into(), name: "Favorites".into(), kind: teams_core::FolderKind::Favorites, expanded: true, conversation_ids: chats,
+        };
+        rt.update(|s, _| s.chatlist.folders.push(favorites("f", vec!["duo".into()])));
+        rt.frame(1.0 / 60.0);
+        right_click(&mut rt, "chat-duo");
+        assert!(rt.find("menu-sections").is_none(), "its only section is the one it is in");
+        assert!(rt.find("menu-remove-section").is_some());
+        click(&mut rt, "overlay-backdrop");
+
+        rt.update(|s, _| s.chatlist.folders.push(teams_core::ChatFolder {
+            id: "g".into(), name: "Work".into(), kind: teams_core::FolderKind::UserCreated, expanded: false, conversation_ids: vec![],
+        }));
+        rt.frame(1.0 / 60.0);
+        right_click(&mut rt, "chat-duo");
+        assert!(rt.find("menu-sections").is_some());
+    }
+
+    #[test]
+    fn manage_notifications_has_both_section_titles() {
+        let mut rt = rt();
+        right_click(&mut rt, "chat-duo");
+        click(&mut rt, "menu-notifications");
+        assert!(rt.find("menu-heading-mode").is_some());
+        assert!(rt.find("menu-heading-desktop").is_some());
+    }
+
+    #[test]
+    fn notify_when_available_follows_the_one_to_one_partner_only() {
+        let mut rt = rt();
+        sign_in_as_me(&mut rt);
+        right_click(&mut rt, "chat-duo");
+        click(&mut rt, "menu-notify-available");
+        assert_eq!(calls(&rt).last().unwrap(), "follow-presence ann ANN true");
+        right_click(&mut rt, "chat-crew");
+        assert!(rt.find("menu-notify-available").is_none(), "a group has no presence to follow");
+    }
+
+    #[test]
+    fn notify_when_available_needs_a_real_one_to_one_and_a_known_own_profile() {
+        let mut rt = rt();
+        right_click(&mut rt, "chat-duo");
+        assert!(rt.find("menu-notify-available").is_none(), "the own profile is not loaded yet");
+        click(&mut rt, "overlay-backdrop");
+        sign_in_as_me(&mut rt);
+        rt.update(|s, _| s.details.get_mut("duo").expect("duo").kind = "meeting".into());
+        rt.frame(1.0 / 60.0);
+        right_click(&mut rt, "chat-duo");
+        assert!(rt.find("menu-notify-available").is_none(), "a meeting chat of two is not a 1:1");
     }
 
     #[test]

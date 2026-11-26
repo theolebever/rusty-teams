@@ -9,7 +9,8 @@ use crate::ui::text;
 
 use crate::avatar::rgb;
 use crate::types::{Actions, MessageRow};
-use crate::ui::{UiState, active_target, ts};
+use crate::ui::{UiState, active_target, select_thread, ts};
+use state::post_follow::follow_label;
 
 const MENU_W: f32 = 200.0;
 
@@ -37,6 +38,15 @@ pub struct MenuState {
     pub(crate) forward_error: Option<String>,
     /// Window point of a right-click: the menu opens there instead of at the "more" button.
     pub(crate) at: Option<(f32, f32)>,
+    /// The page that replaces the list.
+    pub(crate) submenu: Option<Page>,
+}
+
+/// A page of the message menu below its list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Page {
+    Forward,
+    Translation,
 }
 
 /// Opens the menu of `id` at the pointer, as a right-click does.
@@ -51,6 +61,7 @@ pub(crate) fn close<A: Actions>(s: &mut UiState<A>) {
     s.menu.at = None;
     s.picker.close();
     s.confirm_delete = None;
+    s.menu.submenu = None;
     s.menu.forward = None;
     s.menu.forward_search.clear();
     s.menu.forward_comment.clear();
@@ -267,48 +278,112 @@ fn forward_dialog<A: Actions + 'static>(s: &UiState<A>, id: &str) -> El {
     crate::shortcuts::card("forward-dialog", 480.0, body, close::<A>)
 }
 
+/// A row that opens a submenu page in place of the list.
+fn submenu_item<A: Actions + 'static>(key: String, label: &str, page: Page) -> El {
+    crate::controls::menu_item::<A>(&key, label, Some("keyboard_arrow_right"), false, move |s: &mut UiState<A>| s.menu.submenu = Some(page))
+}
+
+/// The row that returns from a submenu page to the list.
+fn back_row<A: Actions + 'static>(id: &str) -> El {
+    crate::controls::menu_item::<A>(&format!("menu-back-{id}"), "Back", Some("keyboard_arrow_left"), false, |s: &mut UiState<A>| s.menu.submenu = None)
+}
+
+/// Forwards one message: the single-message dialog opens with it.
+fn forward_this<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
+    close(s);
+    s.menu.forward = Some(id.to_owned());
+    tx.focus("forward-search", false);
+}
+
+/// Selects `id` for forwarding, five at most, or takes it out again; the selection bar forwards them.
+fn toggle_forward_selection<A: Actions>(s: &mut UiState<A>, id: &str) {
+    if !s.menu.selected.remove(id) {
+        if s.menu.selected.len() == 5 { s.toast.show("Select up to five messages"); return; }
+        s.menu.selected.insert(id.to_owned());
+    }
+    close(s);
+}
+
 fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
     let palette = active_palette();
     let id = m.id.clone();
     let conversation = s.selected.clone().unwrap_or_default();
     let channel = active_target(s).is_some_and(|target| target.channel);
     let root = m.reply_to_id.clone().unwrap_or_else(|| id.clone());
-    let saved_message = m.clone();
-    let saved_conversation = conversation.clone();
     let mut list = col().key(format!("menu-{id}")).w_full().gap(1.0).padding(4.0).radius(8.0)
         .fill(rgb(palette.popup)).border(1.0, rgb(palette.border_strong));
+    let rule = || el().w_full().h(1.0).mx(6.0).fill(rgb(palette.popup_hover));
 
-    if !channel {
+    // Forward in a chat offers one message or several; a channel post only forwards singly (GPUI).
+    match s.menu.submenu {
+        Some(Page::Forward) => {
+            let (single, multiple) = (id.clone(), id.clone());
+            return list.child(back_row::<A>(&id))
+                .child(item(format!("menu-forward-this-{id}"), "This message", move |s: &mut UiState<A>, tx| forward_this(s, &single, tx)))
+                .child(item(format!("menu-forward-multiple-{id}"), "Multiple messages", move |s: &mut UiState<A>, _| toggle_forward_selection(s, &multiple)));
+        }
+        Some(Page::Translation) => {
+            let translation_id = id.clone();
+            return list.child(back_row::<A>(&id))
+                .child(item(format!("menu-translate-{id}"), "Translate", move |s: &mut UiState<A>, tx| {
+                    close(s); s.translation.dialog = Some(translation_id.clone()); tx.focus("translation-language", false);
+                }));
+        }
+        None => {}
+    }
+
+    // Reply is on the hover bar, so the "more" menu repeats it only where the bar has none: channel replies.
+    // The right-click menu always has it.
+    if s.menu.at.is_some() || (channel && m.reply_to_id.is_some()) {
         let reply = crate::types::ReplyReference { message_id: id.clone(), sender: m.sender.clone(), text: m.text.clone() };
+        let thread = root.clone();
         list = list.child(item(format!("menu-reply-{id}"), "Reply", move |s: &mut UiState<A>, tx| {
-            s.compose.reply = Some(reply.clone());
             close(s);
+            if channel { select_thread(s, Some(thread.clone())); } else { s.compose.reply = Some(reply.clone()); }
             tx.focus("composer", false);
         }));
     }
-    let body = m.text.clone();
-    list = list.child(item(format!("menu-copy-{id}"), "Copy text", move |s: &mut UiState<A>, tx| {
-        tx.copy(body.clone());
-        close(s);
-    }));
-    list = list.child(item(format!("menu-save-{id}"), "Save this message", move |s: &mut UiState<A>, _| {
-        s.actions.save_message(&saved_conversation, &saved_message.id, saved_message.reply_to_id.clone());
-        close(s);
-    }));
+    if channel {
+        let forward_id = id.clone();
+        list = list.child(item(format!("menu-forward-{id}"), "Forward", move |s: &mut UiState<A>, tx| forward_this(s, &forward_id, tx)));
+    } else {
+        list = list.child(submenu_item::<A>(format!("menu-forward-{id}"), "Forward", Page::Forward));
+    }
     let (link_id, link_conversation) = (id.clone(), conversation.clone());
     list = list.child(item(format!("menu-link-{id}"), "Copy link", move |s: &mut UiState<A>, _| {
         s.actions.copy_message_link(&link_conversation, &link_id);
         close(s);
     }));
-    let share = teams_core::outlook_compose_link(&format!("Message from {}", m.sender), &m.text);
-    list = list.child(item(format!("menu-outlook-{id}"), "Share to Outlook", move |s: &mut UiState<A>, tx| {
-        crate::rich_text::open(s, tx, &share);
+    let body = m.text.clone();
+    list = list.child(item(format!("menu-copy-{id}"), "Copy text", move |s: &mut UiState<A>, tx| {
+        tx.copy(body.clone());
         close(s);
     }));
+    let saved_message = m.clone();
+    let saved_conversation = conversation.clone();
+    list = list.child(item(format!("menu-save-{id}"), "Save this message", move |s: &mut UiState<A>, _| {
+        s.actions.save_message(&saved_conversation, &saved_message.id, saved_message.reply_to_id.clone());
+        close(s);
+    }));
+    // GPUI offers Pin for everyone in a chat and on a channel root post, never on a channel reply.
+    if !channel || m.reply_to_id.is_none() {
+        let pinned = s.pinned.iter().any(|pin| pin.message_id == m.id);
+        let (pin_id, conversation) = (id.clone(), conversation.clone());
+        list = list.child(item(format!("menu-pin-{id}"), if pinned { "Unpin" } else { "Pin for everyone" }, move |s: &mut UiState<A>, _| {
+            s.actions.pin_message(&conversation, &pin_id, !pinned);
+            close(s);
+        }));
+    }
+    if m.mine {
+        let message = m.clone();
+        list = list.child(item(format!("menu-edit-{id}"), "Edit", move |s: &mut UiState<A>, tx| {
+            begin_edit(s, &message, tx);
+        }));
+    }
     if channel {
         let followed = s.menu.followed.get(&root).copied().unwrap_or(false);
         let (follow_id, follow_conversation) = (root.clone(), conversation.clone());
-        list = list.child(item(format!("menu-follow-{id}"), if followed { "Unfollow post" } else { "Follow post" }, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("menu-follow-{id}"), follow_label(followed), move |s: &mut UiState<A>, _| {
             s.actions.set_post_followed(&follow_conversation, &follow_id, !followed);
             close(s);
         }));
@@ -325,49 +400,22 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
             s.actions.load_reaction_people(&conversation, &message);
         }));
     }
-    let translation_id = id.clone();
-    list = list.child(item(format!("menu-translate-{id}"), "Translate", move |s: &mut UiState<A>, tx| {
-        close(s); s.translation.dialog = Some(translation_id.clone()); tx.focus("translation-language", false);
-    }));
-    if m.mine {
-        let message = m.clone();
-        list = list.child(item(format!("menu-edit-{id}"), "Edit", move |s: &mut UiState<A>, tx| {
-            begin_edit(s, &message, tx);
-        }));
-    }
-    let pinned = s.pinned.iter().any(|pin| pin.message_id == m.id);
-    {
-        let (pin_id, conversation) = (id.clone(), conversation.clone());
-        list = list.child(item(format!("menu-pin-{id}"), if pinned { "Unpin" } else { "Pin" }, move |s: &mut UiState<A>, _| {
-            s.actions.pin_message(&conversation, &pin_id, !pinned);
-            close(s);
-        }));
-    }
-    {
-        let selected = s.menu.selected.contains(&id);
-        let select_id = id.clone();
-        list = list.child(item(format!("menu-select-{id}"), if selected { "Deselect" } else { "Select for forwarding" }, move |s: &mut UiState<A>, _| {
-            if !s.menu.selected.remove(&select_id) {
-                if s.menu.selected.len() == 5 { s.toast.show("Select up to five messages"); return; }
-                s.menu.selected.insert(select_id.clone());
-            }
-            close(s);
-        }));
-        let fwd_id = id.clone();
-        list = list.child(item(format!("menu-forward-{id}"), "Forward", move |s: &mut UiState<A>, tx| {
-            close(s);
-            s.menu.forward = Some(fwd_id.clone());
-            tx.focus("forward-search", false);
-        }));
-    }
-    if !channel {
+    list = list.child(rule());
+    if !channel && !m.mine {
         let unread_id = id.clone();
         list = list.child(item(format!("menu-unread-{id}"), "Mark as unread", move |s: &mut UiState<A>, _| {
             s.actions.mark_unread_from(&conversation, &unread_id);
             close(s);
         }));
     }
+    let share = teams_core::outlook_compose_link(&format!("Message from {}", m.sender), &m.text);
+    list = list.child(item(format!("menu-outlook-{id}"), "Share to Outlook", move |s: &mut UiState<A>, tx| {
+        crate::rich_text::open(s, tx, &share);
+        close(s);
+    }));
+    list = list.child(submenu_item::<A>(format!("menu-translation-{id}"), "Translation", Page::Translation));
     if m.can_delete {
+        list = list.child(rule());
         let conversation = s.selected.clone().unwrap_or_default();
         let confirming = s.confirm_delete.as_deref() == Some(id.as_str());
         let delete_id = id.clone();
@@ -442,6 +490,21 @@ mod tests {
         assert!(rt.find(&format!("menu-{id}")).is_some());
     }
 
+    /// Opens the menu with a right-click on the message, which also offers Reply.
+    fn open_context_menu(rt: &mut Runtime<UiState<Fake>>, id: &str) {
+        let (x, y) = rt.find(&format!("bubble-{id}")).unwrap_or_else(|| panic!("no bubble {id}"));
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find(&format!("menu-{id}")).is_some());
+    }
+
+    /// The keys of the menu's rows in order, as the window lays them out.
+    fn menu_row_keys(rt: &Runtime<UiState<Fake>>) -> Vec<String> {
+        rt.elements().iter().filter(|e| e.role == "menuitem" && e.key.as_deref().is_some_and(|k| k.starts_with("menu-") || k.starts_with("delete-")))
+            .filter_map(|e| e.key.clone()).collect()
+    }
+
     fn last_call(rt: &Runtime<UiState<Fake>>) -> String {
         rt.state.actions.calls.borrow().last().cloned().unwrap_or_default()
     }
@@ -451,7 +514,7 @@ mod tests {
         let mut message = msg("m1", false, "hi");
         message.can_delete = true;
         let mut rt = show(vec![message]);
-        open_menu(&mut rt, "m1");
+        open_context_menu(&mut rt, "m1");
         let elements = rt.elements();
         for key in ["menu-reply-m1", "menu-copy-m1", "menu-save-m1", "delete-m1"] {
             let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no element {key}"));
@@ -575,14 +638,14 @@ mod tests {
     fn reply_uses_a_cancellable_reference_and_sends_its_message_id() {
         let mut rt = show(vec![msg("m1", false, "hi there")]);
         rt.update(|s, _| s.composer = TextEdit::new("my answer"));
-        open_menu(&mut rt, "m1");
+        open_context_menu(&mut rt, "m1");
         click(&mut rt, "menu-reply-m1");
         assert_eq!(rt.state.composer.text, "my answer");
         assert!(rt.find("reply-reference").is_some());
         assert!(rt.find("menu-m1").is_none());
         click(&mut rt, "reply-cancel");
         assert!(rt.find("reply-reference").is_none());
-        open_menu(&mut rt, "m1");
+        open_context_menu(&mut rt, "m1");
         click(&mut rt, "menu-reply-m1");
         rt.update(|s, tx| crate::ui::open_chat(s, "b", tx));
         assert!(rt.state.compose.reply.is_none());
@@ -663,6 +726,7 @@ mod tests {
         let mut rt = show(vec![msg("m1", false, "hi")]);
         open_menu(&mut rt, "m1");
         click(&mut rt, "menu-forward-m1");
+        click(&mut rt, "menu-forward-this-m1");
         click(&mut rt, "forward-to-b");
         assert!(rt.state.actions.calls.borrow().is_empty());
         click(&mut rt, "forward-send");
@@ -677,9 +741,11 @@ mod tests {
     fn selected_messages_are_forwarded_together_in_conversation_order() {
         let mut rt = show(vec![msg("m1", false, "first"), msg("m2", false, "second")]);
         open_menu(&mut rt, "m2");
-        click(&mut rt, "menu-select-m2");
+        click(&mut rt, "menu-forward-m2");
+        click(&mut rt, "menu-forward-multiple-m2");
         open_menu(&mut rt, "m1");
-        click(&mut rt, "menu-select-m1");
+        click(&mut rt, "menu-forward-m1");
+        click(&mut rt, "menu-forward-multiple-m1");
         click(&mut rt, "forward-selected");
         click(&mut rt, "forward-to-b");
         click(&mut rt, "forward-send");
@@ -697,6 +763,7 @@ mod tests {
         });
         open_menu(&mut rt, "m1");
         click(&mut rt, "menu-forward-m1");
+        click(&mut rt, "menu-forward-this-m1");
         click(&mut rt, "forward-send");
         assert!(rt.state.actions.calls.borrow().is_empty());
         click(&mut rt, "forward-search");
@@ -747,6 +814,7 @@ mod tests {
         assert!(presented(&rt, "menu-react-m1")[1] < presented(&rt, "menu-m1")[1], "not upside down");
 
         click(&mut rt, "menu-forward-m1");
+        click(&mut rt, "menu-forward-this-m1");
         assert!(rt.find("forward-dialog").is_some());
         assert!(rt.find("message-menu").is_none());
         click(&mut rt, "forward-to-b");
@@ -763,6 +831,79 @@ mod tests {
         rt.pointer_up(500.0, 20.0);
         rt.frame(1.0 / 60.0);
         assert!(rt.find("menu-m1").is_none());
+    }
+
+    #[test]
+    fn choosing_multiple_messages_again_takes_the_message_out() {
+        let mut rt = show(vec![msg("m1", false, "hi")]);
+        for selected in [1, 0] {
+            open_menu(&mut rt, "m1");
+            click(&mut rt, "menu-forward-m1");
+            click(&mut rt, "menu-forward-multiple-m1");
+            assert_eq!(rt.state.menu.selected.len(), selected);
+        }
+    }
+
+    #[test]
+    fn a_message_that_cannot_be_deleted_ends_its_menu_on_a_row() {
+        let mut rt = show(vec![msg("m1", false, "hi")]);
+        open_menu(&mut rt, "m1");
+        let elements = rt.elements();
+        let root = elements.iter().position(|e| e.key.as_deref() == Some("menu-m1")).expect("menu");
+        let last = elements.iter().rfind(|e| e.parent == Some(root)).expect("rows");
+        assert_eq!(last.role, "menuitem", "no rule after the last row");
+    }
+
+    #[test]
+    fn chat_message_menu_follows_gpui_order() {
+        let mut rt = show(vec![msg("m1", false, "hi")]);
+        open_context_menu(&mut rt, "m1");
+        assert_eq!(menu_row_keys(&rt), [
+            "menu-reply-m1", "menu-forward-m1", "menu-link-m1", "menu-copy-m1", "menu-save-m1", "menu-pin-m1",
+            "menu-unread-m1", "menu-outlook-m1", "menu-translation-m1",
+        ]);
+    }
+
+    #[test]
+    fn own_messages_get_edit_and_no_mark_unread_and_delete_comes_last() {
+        let mut message = msg("m1", true, "hi");
+        message.can_delete = true;
+        let mut rt = show(vec![message]);
+        open_context_menu(&mut rt, "m1");
+        assert_eq!(menu_row_keys(&rt), [
+            "menu-reply-m1", "menu-forward-m1", "menu-link-m1", "menu-copy-m1", "menu-save-m1", "menu-pin-m1",
+            "menu-edit-m1", "menu-outlook-m1", "menu-translation-m1", "delete-m1",
+        ]);
+        assert!(rt.find("menu-unread-m1").is_none());
+    }
+
+    #[test]
+    fn the_more_menu_leaves_reply_to_the_hover_bar_but_chat_forward_opens_a_submenu() {
+        let mut rt = show(vec![msg("m1", false, "hi")]);
+        open_menu(&mut rt, "m1");
+        assert!(rt.find("menu-reply-m1").is_none(), "the hover bar has Reply");
+        click(&mut rt, "menu-forward-m1");
+        assert_eq!(menu_row_keys(&rt), ["menu-back-m1", "menu-forward-this-m1", "menu-forward-multiple-m1"]);
+    }
+
+    #[test]
+    fn channel_reply_has_no_pin_or_mark_unread_and_keeps_reply() {
+        let mut reply = msg("reply", false, "answer");
+        reply.reply_to_id = Some("post".into());
+        let mut rt = show(vec![msg("post", false, "root"), reply]);
+        rt.update(|s, _| {
+            s.teams = vec![crate::types::TeamRow { id: "team".into(), name: "Team".into(), channels: vec![crate::types::ChannelRow { id: "a".into(), name: "General".into(), hidden: false, unread: false }] }];
+        });
+        rt.frame(1.0 / 60.0);
+        let (x, y) = rt.find("post-reply-reply").expect("channel reply");
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        rt.frame(1.0 / 60.0);
+        let keys = menu_row_keys(&rt);
+        assert!(keys.contains(&"menu-reply-reply".to_owned()), "{keys:?}");
+        assert!(rt.find("menu-pin-reply").is_none());
+        assert!(rt.find("menu-unread-reply").is_none());
+        assert!(rt.find("menu-forward-reply").is_some(), "a channel forward is a plain item");
     }
 
     #[test]
