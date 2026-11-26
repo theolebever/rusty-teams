@@ -1321,7 +1321,7 @@ impl AppState {
             let _ = held.commands.send(CallCommand::Hangup);
         }
         self.signal_ring(ring_id, RingSignal::Accept, cx);
-        let conversation_id = self.ring_conversation(&entry.ring);
+        let conversation_id = self.conversation_of_ring(&entry.ring);
         let title = conversation_id
             .as_deref()
             .and_then(|id| self.sidebar.chats.iter().find(|chat| chat.id == id))
@@ -1376,8 +1376,7 @@ impl AppState {
         self.one_on_one_chat_with_mri(&missed.caller_mri)
     }
 
-    /// The chat a ring belongs to: its thread, else the 1:1 chat with the caller.
-    fn ring_conversation(&self, ring: &calling::IncomingRing) -> Option<String> {
+    fn conversation_of_ring(&self, ring: &calling::IncomingRing) -> Option<String> {
         ring.thread_id.clone().or_else(|| {
             (!ring.is_group)
                 .then(|| self.one_on_one_chat_with_mri(&ring.caller.mri))
@@ -2780,8 +2779,6 @@ mod tests {
         let app = app_with_chats(cx);
         cx.update(|cx| {
             app.update(cx, |state, _| {
-                // Accepting a demo ring would spawn the demo call on tokio, and its
-                // updates trip the test scheduler's thread check; test the lookup only.
                 let ring = calling::IncomingRing {
                     caller: calling::Caller {
                         mri: "8:orgid:bea-id".into(),
@@ -2791,9 +2788,14 @@ mod tests {
                     ..demo_ring()
                 };
                 assert_eq!(
-                    state.ring_conversation(&ring).as_deref(),
+                    state.conversation_of_ring(&ring).as_deref(),
                     Some("19:dm@unq.gbl.spaces")
                 );
+                let group = calling::IncomingRing {
+                    is_group: true,
+                    ..ring
+                };
+                assert_eq!(state.conversation_of_ring(&group), None);
             })
         });
     }
