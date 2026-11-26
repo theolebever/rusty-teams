@@ -871,15 +871,10 @@ mod tests {
     fn system_default_uses_the_first_remaining_capture_node() {
         assert_eq!(first_listed_index(&[(0, Some(false)), (1, Some(true))]), 1);
         let (index, _) = resolve_camera(&DeviceChoice::SystemDefault);
-        let expected = list_cameras()
+        // Not the listed key: on Windows that is the device path, not the index.
+        let expected = query_camera_infos()
             .first()
-            .map(|camera| {
-                camera.key.parse().map_or_else(
-                    |_| CameraIndex::String(camera.key.clone()),
-                    CameraIndex::Index,
-                )
-            })
-            .unwrap_or(CameraIndex::Index(0));
+            .map_or(CameraIndex::Index(0), |info| info.index().clone());
         assert_eq!(index, expected);
     }
 
