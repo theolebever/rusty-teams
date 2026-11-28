@@ -54,9 +54,7 @@ fn badge_text(count: usize) -> Option<String> {
     }
 }
 
-fn tone(value: u32) -> Color {
-    rune::color::hex(&format!("#{value:06X}")).expect("palette colour")
-}
+use crate::avatar::rgb as tone;
 
 /// The title bar across the top. `trailing` is the width the window's caption buttons take on the
 /// right (`Cx::chrome_insets`), kept clear of the controls.

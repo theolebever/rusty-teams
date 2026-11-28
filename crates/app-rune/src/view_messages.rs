@@ -720,7 +720,7 @@ mod tests {
     }
 
     fn toolbar_view(s: &UiState<Fake>, _cx: &mut Cx<UiState<Fake>>) -> El {
-        toolbar(s, &s.messages[0]).unwrap_or_else(|| col())
+        toolbar(s, &s.messages[0]).unwrap_or_else(col)
     }
 
     fn element<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {

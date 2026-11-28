@@ -1,7 +1,6 @@
 //! Calendar and activity screens backed by the same account data as the main application.
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
-use rune::tok::Family;
 use rune::*;
 use crate::ui::text;
 use teams_core::{ActivityItem, ActivitySnapshot};
@@ -261,13 +260,9 @@ pub(crate) fn select_date<A: Actions>(s: &mut UiState<A>, date: NaiveDate) {
     reload_calendar(s);
 }
 
-pub(crate) fn color(hex: &str) -> Color {
-    crate::settings::color(hex)
-}
+pub(crate) use crate::settings::color;
 
-pub(crate) fn style(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
-}
+pub(crate) use crate::ui::ts as style;
 
 pub(crate) fn button<A: Actions + 'static>(
     label: &str,

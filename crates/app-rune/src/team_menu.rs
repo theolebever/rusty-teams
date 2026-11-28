@@ -247,7 +247,6 @@ mod tests {
                 notifications: store::ChannelNotifications {
                     level: store::ChannelNotificationLevel::BannerAndFeed,
                     include_replies: true,
-                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -265,7 +264,7 @@ mod tests {
             assert_eq!(e.fill.a, 0.0, "{key} is filled at rest");
         }
         assert!(
-            elements.iter().all(|e| e.text.as_deref().map_or(true, |text| !text.contains('✓'))),
+            elements.iter().all(|e| e.text.as_deref().is_none_or(|text| !text.contains('✓'))),
             "no textual checkmarks in the menu"
         );
     }

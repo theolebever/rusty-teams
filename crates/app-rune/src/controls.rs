@@ -38,9 +38,7 @@ impl Size {
     }
 }
 
-fn tone(value: u32) -> Color {
-    rune::color::hex(&format!("#{value:06X}")).expect("palette colour")
-}
+use crate::avatar::rgb as tone;
 
 /// A text button with a role, accessible name, keyboard focus and a palette fill.
 ///
@@ -524,7 +522,7 @@ mod tests {
         assert_eq!(on.label.as_deref(), Some("Light"));
         assert!(on.focusable);
         assert!(
-            elements.iter().all(|e| e.text.as_deref().map_or(true, |t| !t.contains('●') && !t.contains('○'))),
+            elements.iter().all(|e| e.text.as_deref().is_none_or(|t| !t.contains('●') && !t.contains('○'))),
             "no text radio dots anywhere in the tree"
         );
         let tree = rt.accessibility_json();

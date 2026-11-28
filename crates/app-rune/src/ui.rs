@@ -14,9 +14,7 @@ pub(crate) const MUTED: &str = "#616161";
 pub(crate) const WHITE: &str = "#FFFFFF";
 
 
-pub(crate) fn c(s: &str) -> Color {
-    crate::settings::color(s)
-}
+pub(crate) use crate::settings::color as c;
 
 pub(crate) fn ts(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).family(Family::Named("Segoe UI"))

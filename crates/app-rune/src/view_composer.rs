@@ -258,10 +258,6 @@ fn delivery_menu<A: Actions + 'static>(s: &UiState<A>) -> El {
     menu
 }
 
-/// Rune's icon set lacks GPUI's `notification_important`; `notifications` is the nearest.
-fn glyph(symbol: &'static str) -> &'static str {
-    if symbol == "notification_important" { "notifications" } else { symbol }
-}
 
 fn delivery_row<A: Actions + 'static>(option: DeliveryOption, enabled: bool, selected: bool) -> El {
     let palette = active_palette();
@@ -270,7 +266,7 @@ fn delivery_row<A: Actions + 'static>(option: DeliveryOption, enabled: bool, sel
         .role("menuitem")
         .label(option.header)
         .focus_selected(selected)
-        .child(sym(glyph(option.symbol), 20.0).color(accent))
+        .child(sym(if option.symbol == "notification_important" { "notifications" } else { option.symbol }, 20.0).color(accent))
         .child(col().grow(1.0).min_w(0.0).gap(2.0)
             .child(text(option.header).font(ts(13.0, 600.0)).color(rgb(palette.foreground)))
             .child(text(option.content).font(ts(12.0, 400.0)).color(rgb(palette.text_muted)).wrap()))

@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(on.label.as_deref(), Some("Light"));
         assert!(on.focusable);
         assert!(
-            elements.iter().all(|e| e.text.as_deref().map_or(true, |t| !t.contains('●') && !t.contains('○'))),
+            elements.iter().all(|e| e.text.as_deref().is_none_or(|t| !t.contains('●') && !t.contains('○'))),
             "radio dots must be drawn, not text glyphs"
         );
         let tree = rt.accessibility_json();

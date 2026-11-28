@@ -209,9 +209,7 @@ fn title_of<A: Actions>(s: &UiState<A>, id: &str) -> String {
         .unwrap_or_else(|| "Conversation".into())
 }
 
-fn c(s: &str) -> Color {
-    crate::settings::color(s)
-}
+use crate::settings::color as c;
 
 #[cfg(test)]
 mod tests {

@@ -155,10 +155,7 @@ fn is_meeting(id: &str) -> bool {
     id.starts_with(MEETING_PREFIX)
 }
 
-/// Colour from the active palette, as an rune colour.
-pub(crate) fn tone(value: u32) -> Color {
-    crate::avatar::rgb(value)
-}
+pub(crate) use crate::avatar::rgb as tone;
 
 fn flip<T: PartialEq + Clone>(items: &mut Vec<T>, item: &T) {
     match items.iter().position(|existing| existing == item) {

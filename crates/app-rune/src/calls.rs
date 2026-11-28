@@ -6,7 +6,6 @@ use calling::{
     VideoKey, VideoPicture,
 };
 use rune::native_surface::{ByteFrame, ColorInfo, Format};
-use rune::tok::Family;
 use rune::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1236,12 +1235,8 @@ fn end_reason(reason: &calling::EndReason) -> String {
     }
 }
 
-fn color(hex: &str) -> Color {
-    crate::settings::color(hex)
-}
-fn style(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight).family(Family::Named("Segoe UI"))
-}
+use crate::settings::color;
+use crate::ui::ts as style;
 
 fn record_key(label: &str) -> String {
     format!("call-record-{}", label.to_lowercase().replace(' ', "-"))

@@ -346,7 +346,7 @@ mod tests {
         let other = by_key(&elements, "picker-date-2026-11-16");
         assert_ne!(other.fill, accent, "other days stay secondary");
         assert!(
-            elements.iter().all(|e| e.text.as_deref().map_or(true, |text| !text.contains('‹') && !text.contains('›'))),
+            elements.iter().all(|e| e.text.as_deref().is_none_or(|text| !text.contains('‹') && !text.contains('›'))),
             "text chevrons must not be used as state"
         );
     }
