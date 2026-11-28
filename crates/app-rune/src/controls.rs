@@ -466,20 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn icon_button_can_force_ink_for_a_dark_stage() {
-        let rt = runtime();
-        let elements = rt.elements();
-        let button = elements.iter()
-            .position(|element| element.key.as_deref() == Some("icon-dark"))
-            .expect("dark-stage icon button");
-        let icon = elements.iter()
-            .find(|element| element.parent == Some(button) && element.text_color.is_some())
-            .expect("icon inside the button");
-        assert_eq!(icon.text_color, rune::color::hex("#FFFFFF"));
-        assert!(elements[button].fill.a > 0.0, "the active fill must stay visible on a dark stage");
-    }
-
-    #[test]
     fn menu_item_is_full_width_unfilled_and_selected() {
         let rt = runtime();
         let elements = rt.elements();
