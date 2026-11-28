@@ -37,7 +37,6 @@ fn blocker<A: Actions>(s: &UiState<A>) -> Option<&'static str> {
     else if !crate::mentions::resolve(&s.composer.text, &s.compose.mentions.chosen).is_empty() { Some("Can't schedule messages with mentions yet") }
     else if !s.compose.gifs.is_empty() || s.compose.inline.iter().any(|(marker, _)| s.composer.text.contains(marker)) || !s.compose.inline_loading.is_empty() || !s.media.files(&target).is_empty() || s.media.is_uploading(&target) { Some("Can't schedule messages with images or files yet") }
     else if s.compose.reply.is_some() { Some("Can't schedule quoted replies yet") }
-    else if crate::view_composer::sendable_importance(s, Some(&target)) != store::MessageImportance::Normal { Some("Scheduled messages use standard importance") }
     else if !s.compose.subject.text.trim().is_empty() || !s.compose.headline.text.trim().is_empty() { Some("Can't schedule posts with a subject or headline yet") }
     else { None }
 }
@@ -47,6 +46,8 @@ pub fn submit<A: Actions>(s: &mut UiState<A>, at: DateTime<Local>) {
     if let Err(error) = app_base::schedule_time::validate(at, Local::now()) { s.schedule.error = Some(error.message().into()); return; }
     let Some(target) = crate::ui::active_target(s) else { return };
     let text = s.composer.text.clone();
+    // Scheduled messages go out as standard, as GPUI's `schedule_at` does.
+    s.compose.importance = store::MessageImportance::Normal;
     s.schedule.pending = Some((target.clone(), text.clone()));
     s.schedule.error = None;
     s.actions.schedule_message(target, text, at.with_timezone(&Utc));
@@ -203,6 +204,17 @@ mod tests {
         s.apply(crate::types::Update::Scheduled { target, text, result: Ok(()) });
         assert_eq!(s.composer.text, "new draft");
         assert!(s.actions.saved.borrow().is_empty(), "do not erase the new persisted draft");
+    }
+
+    #[test]
+    fn an_urgent_draft_is_scheduled_as_standard_as_in_gpui() {
+        let mut s = UiState::new(Fake::default());
+        s.selected = Some("chat".into());
+        s.composer = TextEdit::new("hello");
+        s.compose.importance = store::MessageImportance::Urgent;
+        submit(&mut s, Local::now() + chrono::Duration::hours(1));
+        assert_eq!(*s.actions.scheduled.borrow(), ["hello"], "importance does not block scheduling");
+        assert_eq!(s.compose.importance, store::MessageImportance::Normal);
     }
 
     #[test]

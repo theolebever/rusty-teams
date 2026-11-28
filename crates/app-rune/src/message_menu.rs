@@ -156,25 +156,6 @@ fn item<A: Actions + 'static>(key: String, label: &str, on_press: impl Fn(&mut U
     crate::controls::menu_item::<A>(&key, label, None, false, |_| {}).on_press_tx(on_press)
 }
 
-/// `controls::menu_item` has no danger-ink variant: same geometry and hover, red ink only.
-fn danger_item<A: Actions + 'static>(key: String, label: &str, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
-    let palette = active_palette();
-    let ink = rgb(palette.red);
-    row()
-        .key(key)
-        .w_full()
-        .h(32.0)
-        .px(10.0)
-        .center_y()
-        .radius(6.0)
-        .hover(rgb(palette.popup_hover))
-        .role("menuitem")
-        .label(label.to_owned())
-        .focusable(true)
-        .on_press_tx(on_press)
-        .child(text(label.to_owned()).font(ts(13.0, 400.0)).color(ink))
-}
-
 /// The open message menu, floating over the window: at the right-click point, or under the
 /// message's "more" button. Quick reactions head it; Forward opens a modal dialog.
 /// The menu flips when it would leave the window (`El::anchored`).
@@ -419,7 +400,7 @@ fn list<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow) -> El {
         let conversation = s.selected.clone().unwrap_or_default();
         let confirming = s.confirm_delete.as_deref() == Some(id.as_str());
         let delete_id = id.clone();
-        list = list.child(danger_item(format!("delete-{id}"), if confirming { "Confirm delete" } else { "Delete" }, move |s: &mut UiState<A>, _| {
+        list = list.child(item(format!("delete-{id}"), if confirming { "Confirm delete" } else { "Delete" }, move |s: &mut UiState<A>, _| {
             if confirming {
                 s.actions.delete_message(&conversation, &delete_id);
                 close(s);
