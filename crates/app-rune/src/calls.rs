@@ -29,6 +29,33 @@ enum Layout {
     Content,
 }
 
+use crate::settings::Device;
+
+/// What a toolbar chevron opens, as GPUI's mic and camera menus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DevicePanel {
+    Microphone,
+    Camera,
+}
+
+impl DevicePanel {
+    /// The mic menu lists the microphones and speakers, the camera menu the cameras.
+    fn devices(self) -> &'static [Device] {
+        match self {
+            Self::Microphone => &[Device::Microphone, Device::Speaker],
+            Self::Camera => &[Device::Camera],
+        }
+    }
+}
+
+/// The toolbar menu open under the controls: reactions, the View layouts or More.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Reactions,
+    View,
+    More,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
     Accept(bool),
@@ -84,7 +111,7 @@ pub fn shortcut<A: Actions>(s: &mut UiState<A>, action: Shortcut) -> bool {
             } else {
                 s.calls.show_shares = !s.calls.show_shares;
                 s.calls.show_people = false;
-                s.calls.show_devices = false;
+                s.calls.show_devices = None;
                 s.calls.show_captions = false;
                 if s.calls.show_shares {
                     s.actions.call_command(CallCommand::RefreshShareSources);
@@ -170,133 +197,193 @@ fn release(capture: Option<calling::capture::Capture>) {
     }
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryFilter {
-    #[default]
-    All,
-    Missed,
-    Incoming,
-    Outgoing,
+pub use state::call::HistoryFilter;
+use state::call::{AudioChoice, CallRow, CallsList, ListEntry};
+
+const CALLS_HEADER_HEIGHT: f32 = 60.0;
+const DIAL_WIDTH: f32 = 340.0;
+const PAGE_PADDING: f32 = 20.0;
+const HISTORY_HEADER_HEIGHT: f32 = 52.0;
+const HISTORY_AVATAR: f32 = 36.0;
+
+/// GPUI's `chat_of_call_row`: a meeting's own chat, else the 1:1 chat with the person called.
+fn chat_of_call_row<A: Actions>(s: &UiState<A>, row: &CallRow) -> Option<String> {
+    match (&row.thread_id, &row.user_id) {
+        (Some(thread), _) => s.chats.iter().any(|chat| &chat.id == thread).then(|| thread.clone()),
+        (None, Some(user)) => s
+            .chats
+            .iter()
+            .find(|chat| {
+                s.details.get(&chat.id).is_some_and(|details| {
+                    details.kind == "oneOnOne" && details.members.iter().any(|member| member.user_id.as_deref() == Some(user))
+                })
+            })
+            .map(|chat| chat.id.clone()),
+        (None, None) => None,
+    }
 }
 
-impl HistoryFilter {
-    fn includes(self, entry: &chatsvc::CallLogEntry) -> bool {
-        match self {
-            Self::All => true,
-            Self::Missed => entry.missed(),
-            Self::Incoming => entry.direction == chatsvc::CallDirection::Incoming,
-            Self::Outgoing => entry.direction == chatsvc::CallDirection::Outgoing,
-        }
+/// The log entry GPUI's "Call back" rings again: a call (not a meeting) with a known person.
+fn call_back_entry<A: Actions>(s: &UiState<A>, row: &CallRow) -> Option<chatsvc::CallLogEntry> {
+    if s.read_only || row.meeting || row.user_id.is_none() {
+        return None;
     }
+    s.calls.history.iter().find(|entry| entry.call_id == row.key).cloned()
+}
+
+fn dial_draft<A: Actions>(s: &mut UiState<A>) -> &mut crate::new_chat::Draft {
+    &mut s.calls.dial
+}
+
+/// GPUI's dial column calls only when exactly one person is picked.
+fn call_picked<A: Actions>(s: &mut UiState<A>) {
+    let [person] = s.calls.dial.chips.as_slice() else { return };
+    if s.read_only {
+        return;
+    }
+    let (user_id, name) = (person.user_id.clone(), person.name.clone());
+    s.calls.dial = crate::new_chat::Draft::default();
+    s.actions.call_person(&user_id, &name);
+}
+
+fn dial_column<A: Actions + 'static>(s: &UiState<A>) -> El {
+    use crate::controls::Variant;
+    let (variant, help) = match s.calls.dial.chips.len() {
+        1 => (Variant::Primary, ""),
+        0 => (Variant::Quiet, ""),
+        _ => (Variant::Quiet, "Pick one person to call"),
+    };
+    col()
+        .key("call-dial")
+        .w(DIAL_WIDTH)
+        .h_full()
+        .padding(PAGE_PADDING)
+        .gap(12.0)
+        .child(crate::new_chat::picker(s, &s.calls.dial, "call-dial", dial_draft::<A>, &[]))
+        .child(crate::controls::button_with_help::<A>(
+            "call-dial-call",
+            "Call",
+            help,
+            variant,
+            crate::controls::Size::Md,
+            |s, _| call_picked(s),
+        ))
+}
+
+fn meeting_avatar() -> El {
+    el().size(HISTORY_AVATAR, HISTORY_AVATAR)
+        .radius(HISTORY_AVATAR / 2.0)
+        .center()
+        .fill(color("#E0E0E0"))
+        .child(crate::icons::sym("videocam", 16.0).color(color("#242424")))
+}
+
+fn open_chat_screen<A: Actions>(s: &mut UiState<A>, id: &str, tx: &mut Tx) {
+    s.screens.screen = crate::screens::Screen::Chat;
+    crate::ui::open_chat(s, id, tx);
+}
+
+fn history_row<A: Actions + 'static>(s: &UiState<A>, entry_row: &CallRow) -> El {
+    let palette = app_backend::schemes::active_palette();
+    let avatar = if entry_row.meeting {
+        meeting_avatar()
+    } else {
+        crate::avatar::person(s, &entry_row.title, entry_row.user_id.as_deref(), HISTORY_AVATAR, None)
+    };
+    let tone = color(if entry_row.missed { "#C4314B" } else { "#242424" });
+    let sub_tone = color(if entry_row.missed { "#C4314B" } else { "#616161" });
+    let mut item = row()
+        .key(format!("history-call-{}", entry_row.key))
+        .w_full()
+        .min_h(54.0)
+        .px(10.0)
+        .gap(12.0)
+        .center_y()
+        .radius(8.0)
+        .hover(color("#EBEBEB"))
+        .child(avatar)
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(text(entry_row.title.clone()).font(style(14.0, 400.0)).color(tone).truncate())
+                .child(text(entry_row.subline.clone()).font(style(12.5, 400.0)).color(sub_tone).truncate()),
+        )
+        .child(text(entry_row.time_label.clone()).font(style(11.0, 400.0)).color(color("#616161")));
+    let chat = chat_of_call_row(s, entry_row);
+    let entry = call_back_entry(s, entry_row);
+    // GPUI's `activate_call_row`: a meeting opens its chat, a call rings the person back.
+    let pressable = if entry_row.meeting { chat.is_some() } else { entry.is_some() };
+    if pressable {
+        let (chat, entry) = (chat.clone(), entry.clone());
+        item = item
+            .role("button")
+            .label(format!("{}, {}", entry_row.title, entry_row.subline))
+            .focusable(true)
+            .focus_ring(2.0, 1.0, crate::view_chatlist::tone(palette.accent))
+            .on_press_tx(move |s: &mut UiState<A>, tx| {
+                if let Some(entry) = &entry {
+                    s.actions.call_back(entry);
+                } else if let Some(id) = &chat {
+                    open_chat_screen(s, id, tx);
+                }
+            });
+    }
+    if entry.is_some() || chat.is_some() {
+        let toggle = |key: String| move |s: &mut UiState<A>, _: &mut Tx| {
+            s.calls.history_menu = (s.calls.history_menu.as_deref() != Some(key.as_str())).then(|| key.clone());
+        };
+        let secondary_key = entry_row.key.clone();
+        item = item
+            .on_secondary_press(move |s: &mut UiState<A>, _, _| s.calls.history_menu = Some(secondary_key.clone()))
+            .child(crate::controls::icon_button::<A>(
+                &format!("history-more-{}", entry_row.key),
+                "more_horiz",
+                "More options",
+                s.calls.history_menu.as_deref() == Some(entry_row.key.as_str()),
+                toggle(entry_row.key.clone()),
+            ));
+    }
+    item
+}
+
+/// The menu of the row whose "More options" is open: GPUI's "Call back" and "Open chat". "Add to
+/// speed dial" has no counterpart: Rune keeps no speed dial.
+fn history_menu<A: Actions + 'static>(s: &UiState<A>, row: &CallRow) -> El {
+    use crate::controls::{button, Size, Variant};
+    let mut menu = col().key(format!("history-menu-{}", row.key)).w_full().padding(6.0).gap(2.0).radius(8.0).fill(color("#F5F5F5"));
+    if let Some(entry) = call_back_entry(s, row) {
+        menu = menu.child(button::<A>("history-menu-call-back", "Call back", Variant::Menu, Size::Md, move |s, _| {
+            s.calls.history_menu = None;
+            s.actions.call_back(&entry);
+        }));
+    }
+    if let Some(id) = chat_of_call_row(s, row) {
+        menu = menu.child(button::<A>("history-menu-open-chat", "Open chat", Variant::Menu, Size::Md, move |s, tx| {
+            s.calls.history_menu = None;
+            open_chat_screen(s, &id, tx);
+        }));
+    }
+    menu
 }
 
 fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
     let call = &s.calls;
-    let mut contacts = col()
-        .key("call-contacts")
-        .w(260.0)
-        .h_full()
-        .padding(20.0)
-        .gap(12.0)
-        .fill(color("#FFFFFF"))
-        .child(
-            text("Make a call")
-                .font(style(18.0, 600.0))
-                .color(color("#242424")),
-        )
-        .child(
-            text_input(&call.contact_search, style(14.0, 400.0))
-                .key("call-contact-search")
-                .label("Find a contact")
-                .placeholder("Type a name", color("#616161"))
-                .min_h(36.0)
-                .w_full()
-                .on_edit(|s: &mut UiState<A>| &mut s.calls.contact_search),
-        )
-        .child(button(
-            "Join a meeting",
-            "open-prejoin",
-            |s: &mut UiState<A>, _| {
-                s.calls.prejoin_open = true;
-                if matches!(s.calls.state, Some(CallState::Ended { .. })) {
-                    s.calls.state = None;
-                }
-            },
-        ))
-        .child(
-            text("Contacts")
-                .font(style(14.0, 600.0))
-                .color(color("#242424")),
-        );
-    let query = call.contact_search.text.trim().to_lowercase();
-    let mut people = col().w_full().gap(4.0);
-    for chat in s
-        .chats
-        .iter()
-        .filter(|chat| {
-            s.details
-                .get(&chat.id)
-                .is_some_and(|d| d.members.len() == 2)
-                && chat.title.to_lowercase().contains(&query)
-        })
-        .take(30)
-    {
-        let id = chat.id.clone();
-        let mut person = row()
-            .key(format!("call-contact-{}", chat.id))
-            .w_full()
-            .min_h(44.0)
-            .gap(8.0)
-            .center_y()
-            .child(crate::avatar::chat(s, &chat.title, &chat.id, 32.0))
-            .child(
-                text(chat.title.clone())
-                    .font(style(13.0, 400.0))
-                    .color(color("#242424"))
-                    .truncate()
-                    .grow(1.0)
-                    .min_w(0.0),
-            );
-        if !s.read_only {
-            person = person.child(crate::view_messages::action_button(
-                format!("contact-call-{}", chat.id),
-                "call",
-                move |s: &mut UiState<A>, _| s.actions.meet_now(&id),
-            ));
-        }
-        people = people.child(person);
+    let mut filters = row().gap(6.0).center_y();
+    for filter in HistoryFilter::ALL {
+        let label = filter.label();
+        filters = filters.child(crate::controls::chip::<A>(
+            &format!("history-{label}"),
+            label,
+            call.history_filter == filter,
+            move |s| s.calls.history_filter = filter,
+        ));
     }
-    contacts = contacts.child(
-        col()
-            .grow(1.0)
-            .min_h(0.0)
-            .w_full()
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .child(people),
-    );
-    let mut filters = row().w_full().gap(8.0).center_y();
-    for (label, filter) in [
-        ("All", HistoryFilter::All),
-        ("Missed", HistoryFilter::Missed),
-        ("Incoming", HistoryFilter::Incoming),
-        ("Outgoing", HistoryFilter::Outgoing),
-    ] {
-        filters = filters.child(
-            button(
-                label,
-                &format!("history-{label}"),
-                move |s: &mut UiState<A>, _| s.calls.history_filter = filter,
-            )
-            .fill(color(if call.history_filter == filter {
-                "#E8EBFA"
-            } else {
-                "#FFFFFF"
-            })),
-        );
-    }
-    let mut list = col().w_full().gap(2.0);
+    // ponytail: rebuilt on every frame; the call log is short. Cache it if a profile says so.
+    let mut calls = CallsList::default();
+    calls.set_filter(call.history_filter);
+    calls.rebuild(&call.history, &[], chrono::Utc::now(), app_base::format::Zone::Local);
+    let mut list = col().w_full().px(PAGE_PADDING - 10.0).py(8.0);
     if call.history_loading {
         list = list.child(
             text("Loading call history…")
@@ -316,102 +403,44 @@ fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 s.calls.history_loading = true;
                 s.actions.load_call_history();
             }));
-    } else if !call
-        .history
-        .iter()
-        .any(|entry| call.history_filter.includes(entry))
-    {
-        list = list.child(
-            text("No calls to show")
-                .key("history-empty")
-                .font(style(14.0, 400.0))
-                .color(color("#616161")),
-        );
-    }
-    for entry in call
-        .history
-        .iter()
-        .filter(|entry| call.history_filter.includes(entry))
-    {
-        let name = entry
-            .peer_name
-            .as_deref()
-            .or(entry.peer_id.as_deref())
-            .unwrap_or("Meeting");
-        let label = if entry.missed() {
-            "Missed call"
-        } else if entry.direction == chatsvc::CallDirection::Outgoing {
-            "Outgoing call"
-        } else {
-            "Incoming call"
-        };
-        let mut item = row()
-            .key(format!("history-call-{}", entry.call_id))
-            .w_full()
-            .min_h(64.0)
-            .px(12.0)
-            .gap(12.0)
-            .center_y()
-            .hover(color("#EBEBEB"))
-            .child(crate::avatar::person(
-                s,
-                name,
-                entry.peer_id.as_deref(),
-                36.0,
-                None,
-            ))
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .child(
-                        text(name.to_owned())
-                            .font(style(14.0, 600.0))
-                            .color(color(if entry.missed() { "#C4314B" } else { "#242424" }))
-                            .truncate(),
-                    )
-                    .child(text(label).font(style(12.0, 400.0)).color(color("#616161"))),
-            )
-            .child(
-                text(
-                    entry
-                        .started_at
-                        .with_timezone(&chrono::Local)
-                        .format("%d/%m %H:%M")
-                        .to_string(),
-                )
-                .font(style(12.0, 400.0))
-                .color(color("#616161")),
-            );
-        if !s.read_only && !entry.is_meeting && entry.peer_id.is_some() {
-            let entry = entry.clone();
-            item = item.child(crate::view_messages::action_button(
-                format!("history-call-back-{}", entry.call_id),
-                "call",
-                move |s: &mut UiState<A>, _| s.actions.call_back(&entry),
-            ));
+    } else {
+        for entry in calls.entries() {
+            match entry {
+                ListEntry::Empty(message) => {
+                    list = list.child(
+                        text(*message)
+                            .key("history-empty")
+                            .font(style(13.0, 400.0))
+                            .color(color("#616161")),
+                    );
+                }
+                ListEntry::Call(row) => {
+                    list = list.child(history_row(s, row));
+                    if call.history_menu.as_deref() == Some(row.key.as_str()) {
+                        list = list.child(history_menu(s, row));
+                    }
+                }
+            }
         }
-        list = list.child(item);
     }
     let history = col()
         .key("call-history")
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .padding(24.0)
-        .gap(16.0)
-        .fill(color("#FFFFFF"))
         .child(
-            text("Calls")
-                .font(style(20.0, 600.0))
-                .color(color("#242424")),
+            row()
+                .h(HISTORY_HEADER_HEIGHT)
+                .px(PAGE_PADDING)
+                .gap(16.0)
+                .center_y()
+                .child(
+                    text("History")
+                        .font(style(14.0, 600.0))
+                        .color(color("#242424")),
+                )
+                .child(filters),
         )
-        .child(
-            text("History")
-                .font(style(16.0, 600.0))
-                .color(color("#242424")),
-        )
-        .child(filters)
         .child(
             col()
                 .grow(1.0)
@@ -422,14 +451,30 @@ fn history_view<A: Actions + 'static>(s: &UiState<A>) -> El {
                 })
                 .child(list),
         );
-    row()
+    // GPUI's page: a 60 px "Calls" header, then Dial and History. Speed dial has no data in Rune.
+    col()
         .key("calls")
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .child(contacts)
-        .child(el().w(1.0).h_full().fill(color("#E0E0E0")))
-        .child(history)
+        .fill(color("#FFFFFF"))
+        .child(
+            row()
+                .h(CALLS_HEADER_HEIGHT)
+                .px(PAGE_PADDING)
+                .center_y()
+                .child(text("Calls").font(style(16.0, 700.0)).color(color("#242424"))),
+        )
+        .child(el().w_full().h(1.0).fill(color("#E0E0E0")))
+        .child(
+            row()
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(dial_column(s))
+                .child(el().w(1.0).h_full().fill(color("#E0E0E0")))
+                .child(history),
+        )
 }
 
 /// How a call started, as GPUI's `CallModel` constructors (`people`, `meeting`, `incoming`)
@@ -476,8 +521,15 @@ pub struct CallView {
     pub history_loading: bool,
     pub history_error: Option<String>,
     pub history_filter: HistoryFilter,
-    pub contact_search: TextEdit,
+    /// The people picked in the Calls page's dial column.
+    pub(crate) dial: crate::new_chat::Draft,
+    /// The history row (its call id) whose menu is open.
+    history_menu: Option<String>,
     people_search: TextEdit,
+    /// The prejoin device list that is open, as GPUI's Camera, Microphone and Speaker selects.
+    prejoin_select: Option<crate::settings::Device>,
+    prejoin_effects: bool,
+    prejoin_audio: AudioChoice,
     pub link: TextEdit,
     pub video: bool,
     pub pending: bool,
@@ -519,9 +571,9 @@ pub struct CallView {
     show_people: bool,
     invite_open: bool,
     confirm: Option<CallCommand>,
-    show_reactions: bool,
+    menu: Option<Menu>,
     show_meeting_info: bool,
-    show_devices: bool,
+    show_devices: Option<DevicePanel>,
     show_shares: bool,
     hand: bool,
     captions: calling::CaptionState,
@@ -560,8 +612,12 @@ impl Default for CallView {
             history_loading: false,
             history_error: None,
             history_filter: HistoryFilter::All,
-            contact_search: TextEdit::default(),
+            dial: crate::new_chat::Draft::default(),
+            history_menu: None,
             people_search: TextEdit::default(),
+            prejoin_select: None,
+            prejoin_effects: false,
+            prejoin_audio: AudioChoice::Computer,
             link: TextEdit::new(""),
             video: false,
             pending: false,
@@ -603,9 +659,9 @@ impl Default for CallView {
             show_people: false,
             invite_open: false,
             confirm: None,
-            show_reactions: false,
+            menu: None,
             show_meeting_info: false,
-            show_devices: false,
+            show_devices: None,
             show_shares: false,
             hand: false,
             captions: calling::CaptionState::Off,
@@ -641,7 +697,7 @@ impl CallView {
     }
 
     fn prejoin_commands(&self) -> Vec<CallCommand> {
-        vec![
+        let mut commands = vec![
             CallCommand::SelectInput(self.selected_input.clone()),
             CallCommand::SelectOutput(self.selected_output.clone()),
             CallCommand::SelectCamera(self.selected_camera.clone()),
@@ -656,7 +712,21 @@ impl CallView {
             } else {
                 MuteCommand::Mute
             }),
-        ]
+        ];
+        if self.prejoin_audio == AudioChoice::NoAudio {
+            commands.push(CallCommand::DisableAudio);
+        }
+        commands
+    }
+
+    /// Cancel on the prejoin screen: back to the Calls page without touching the call.
+    fn cancel_prejoin(&mut self) {
+        self.prejoin_open = false;
+        self.link.clear();
+        self.video = false;
+        self.prejoin_select = None;
+        self.prejoin_effects = false;
+        self.stop_preview();
     }
 
     /// Records how a call starts; joining a meeting chimes as in GPUI (`join_tone`).
@@ -756,9 +826,9 @@ impl CallView {
                     self.show_people = false;
                     self.invite_open = false;
                     self.confirm = None;
-                    self.show_devices = false;
+                    self.show_devices = None;
                     self.show_shares = false;
-                    self.show_reactions = false;
+                    self.menu = None;
                     self.notice = None;
                     self.muted = true;
                     self.camera = self.video;
@@ -1211,34 +1281,83 @@ fn button<A: Actions + 'static>(
 ) -> El {
     use crate::controls::{self, Size, Variant};
 
-    // Icon controls keep their keys so call sites and tests keep addressing them, but their
-    // accessible name is now explicit rather than borrowed from a 22px glyph.
-    let (glyph, accessible) = match key {
-        "call-mute" => (Some(if label == "Unmute" { "mic_off" } else { "mic" }), "Mute"),
-        "call-camera" => (Some("videocam"), label),
-        "call-devices" => (Some("settings"), "Devices"),
-        "call-share" => (Some("share"), "Share screen"),
-        "stop-share" => (Some("share"), "Stop sharing screen"),
-        "call-people" => (Some("group"), "People"),
-        "call-more" => (Some("more_horiz"), "More"),
-        "call-chat" => (Some("chat_bubble"), "Chat"),
-        _ => (None, label),
-    };
-    if let Some(glyph) = glyph {
-        let active = match key {
-            "call-mute" => label == "Unmute",
-            "call-camera" => label == "Camera on",
-            "stop-share" => true,
-            _ => false,
-        };
-        return controls::icon_button_on_dark::<A>(key, glyph, accessible, active, action);
-    }
     let variant = match key {
         "call-leave" | "call-decline" => Variant::Danger,
         "call-answer" | "call-answer-video" | "call-end-rejoin" => Variant::Primary,
         _ => Variant::Secondary,
     };
     controls::button::<A>(key, label, variant, Size::Md, action)
+}
+
+const TOOL_WIDTH: f32 = 42.0;
+const CHEVRON_WIDTH: f32 = 16.0;
+
+/// GPUI's `tool_face`: a glyph over a short label, white ink on the dark stage.
+fn tool<A: Actions + 'static>(
+    key: &str,
+    glyph: &str,
+    label: &str,
+    active: bool,
+    action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
+) -> El {
+    col()
+        .key(key.to_owned())
+        .w(TOOL_WIDTH)
+        .h(48.0)
+        .center()
+        .gap(3.0)
+        .radius(6.0)
+        .fill(if active { Color::WHITE.alpha(0.18) } else { Color::TRANSPARENT })
+        .hover(Color::WHITE.alpha(0.12))
+        .role("button")
+        .label(label.to_owned())
+        .checked(active)
+        .focusable(true)
+        .focus_ring(2.0, 1.0, Color::WHITE.alpha(0.7))
+        .on_press_tx(action)
+        .child(crate::icons::sym(glyph, 20.0).color(Color::WHITE))
+        .child(text(label.to_owned()).font(style(10.0, 400.0)).color(Color::WHITE))
+}
+
+/// The chevron beside Mic and Camera that opens their device choice.
+fn chevron<A: Actions + 'static>(key: &str, label: &str, open: bool, action: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
+    row()
+        .key(key.to_owned())
+        .w(CHEVRON_WIDTH)
+        .h(48.0)
+        .center()
+        .radius(6.0)
+        .fill(if open { Color::WHITE.alpha(0.18) } else { Color::TRANSPARENT })
+        .hover(Color::WHITE.alpha(0.12))
+        .role("button")
+        .label(label.to_owned())
+        .checked(open)
+        .focusable(true)
+        .focus_ring(2.0, 1.0, Color::WHITE.alpha(0.7))
+        .on_press_tx(action)
+        .child(crate::icons::sym("keyboard_arrow_down", 12.0).color(Color::WHITE))
+}
+
+fn group_divider() -> El {
+    el().w(1.0).h(32.0).fill(Color::WHITE.alpha(0.3))
+}
+
+/// Opens one device list, or closes it when already open; the other side panels close.
+fn toggle_devices<A: Actions>(s: &mut UiState<A>, panel: DevicePanel) {
+    let open = s.calls.show_devices != Some(panel);
+    s.calls.show_devices = open.then_some(panel);
+    s.calls.show_people = false;
+    s.calls.show_shares = false;
+    s.calls.show_captions = false;
+    s.calls.show_meeting_info = false;
+    if open {
+        s.actions.call_command(CallCommand::RefreshDevices);
+    }
+}
+
+/// Opens one toolbar menu, or closes it when already open.
+fn toggle_menu<A: Actions>(s: &mut UiState<A>, menu: Menu) {
+    s.calls.menu = (s.calls.menu != Some(menu)).then_some(menu);
 }
 
 /// GPUI's `MeetingInfoDialog::copy_text`: the join link + dial-in from the calendar event
@@ -1334,14 +1453,16 @@ fn health_indicator<A: Actions + 'static>(call: &CallView) -> El {
     bars
 }
 
-fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
+fn device_panel<A: Actions + 'static>(call: &CallView, shown: &[Device], prejoin: bool) -> El {
     let mut panel = col().key("call-device-list").gap(4.0);
-    use crate::settings::Device;
     for (device, kind, title, entries, selected) in [
         (Device::Microphone, "input", "Microphone", call.devices.input_entries_for(&call.selected_input), &call.selected_input),
         (Device::Speaker, "output", "Speaker", call.devices.output_entries_for(&call.selected_output), &call.selected_output),
         (Device::Camera, "camera", "Camera", calling::camera_entries_for(&call.cameras, &call.selected_camera), &call.selected_camera),
     ] {
+        if !shown.contains(&device) {
+            continue;
+        }
         panel = panel.child(text(title).font(style(13.0, 600.0)).color(color("#242424")));
         for entry in entries {
             let choice = entry.choice;
@@ -1374,6 +1495,49 @@ fn device_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
         }
     }
     panel
+}
+
+/// GPUI's prejoin select: the chosen device on a button that lists the choices when pressed.
+fn device_select<A: Actions + 'static>(call: &CallView, device: Device, enabled: bool) -> El {
+    let (key, title, entries, selected) = match device {
+        Device::Camera => ("prejoin-camera-select", "Camera", calling::camera_entries_for(&call.cameras, &call.selected_camera), &call.selected_camera),
+        Device::Microphone => ("prejoin-mic-select", "Microphone", call.devices.input_entries_for(&call.selected_input), &call.selected_input),
+        Device::Speaker => ("prejoin-speaker-select", "Speaker", call.devices.output_entries_for(&call.selected_output), &call.selected_output),
+    };
+    let current = entries
+        .into_iter()
+        .find(|entry| &entry.choice == selected)
+        .map_or_else(|| "Default device".to_owned(), |entry| entry.label);
+    let open = enabled && call.prejoin_select == Some(device);
+    let mut face = row()
+        .key(key)
+        .w_full()
+        .h(32.0)
+        .px(12.0)
+        .gap(8.0)
+        .center_y()
+        .radius(6.0)
+        .border(1.0, color("#D1D1D1"))
+        .role("button")
+        .label(format!("{title}: {current}"))
+        .checked(open)
+        .focusable(enabled)
+        .focus_ring(2.0, 1.0, color("#5B5FC7"))
+        .child(text(current).font(style(13.0, 400.0)).color(color("#242424")).truncate().grow(1.0).min_w(0.0))
+        .child(crate::icons::sym("keyboard_arrow_down", 14.0).color(color("#242424")));
+    face = if enabled {
+        face.hover(color("#EBEBEB")).on_press(move |s: &mut UiState<A>| {
+            s.calls.prejoin_select = (s.calls.prejoin_select != Some(device)).then_some(device);
+        })
+    } else {
+        face.opacity(0.4).disabled(true)
+    };
+    col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .child(text(title).font(style(12.0, 400.0)).color(color("#616161")))
+        .child(face)
 }
 
 fn effects_panel<A: Actions + 'static>(call: &CallView, prejoin: bool) -> El {
@@ -1719,7 +1883,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             .w_full()
             .min_h(72.0)
             .px(16.0)
-            .gap(8.0)
+            .gap(4.0)
             .flex_wrap()
             .center_y()
             .fill(color("#292929"))
@@ -1736,64 +1900,65 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     )
                     .child(health_indicator::<A>(call)),
             );
-        controls = controls.child(button::<A>(
-            if call.muted { "Unmute" } else { "Mute" },
-            "call-mute",
-            |s, _| {
-                s.actions
-                    .call_command(CallCommand::Mute(MuteCommand::Toggle));
-            },
-        ));
-        let camera = call.camera;
-        controls = controls.child(button::<A>(
-            if camera { "Camera on" } else { "Camera off" },
-            "call-camera",
-            move |s, _| {
-                s.actions.call_command(CallCommand::SetCamera(!camera));
-            },
-        ));
-        controls = controls.child(button::<A>("Devices", "call-devices", |s, _| {
-            s.calls.show_devices = !s.calls.show_devices;
-            s.calls.show_people = false;
-            s.calls.show_shares = false;
-            s.calls.show_captions = false;
-            s.calls.show_meeting_info = false;
-            if s.calls.show_devices {
-                s.actions.call_command(CallCommand::RefreshDevices);
-            }
-        }));
-        if call.local_share.is_some() {
-            controls = controls.child(button::<A>("Stop sharing", "stop-share", |s, _| {
+        // GPUI's order: Mic and Camera with their device chevrons, Share | Reactions, Chat,
+        // People | View, More, then Leave. Rune has no pop-out stage and no Return-to-main
+        // (breakout rooms), so those two have no control here.
+        let model = call.record_model();
+        let (muted, camera) = (call.muted, call.camera);
+        controls = controls
+            .child(tool::<A>("call-mute", if muted { "mic_off" } else { "mic" }, "Mic", muted, |s, _| {
+                s.actions.call_command(CallCommand::Mute(MuteCommand::Toggle));
+            }))
+            .child(chevron::<A>(
+                "call-mic-menu",
+                "Microphone and speaker",
+                call.show_devices == Some(DevicePanel::Microphone),
+                |s, _| toggle_devices(s, DevicePanel::Microphone),
+            ))
+            .child(tool::<A>(
+                "call-camera",
+                if camera { "videocam" } else { "videocam_off" },
+                "Camera",
+                camera,
+                move |s, _| s.actions.call_command(CallCommand::SetCamera(!camera)),
+            ))
+            .child(chevron::<A>(
+                "call-camera-menu",
+                "Camera and effects",
+                call.show_devices == Some(DevicePanel::Camera),
+                |s, _| toggle_devices(s, DevicePanel::Camera),
+            ));
+        controls = controls.child(if call.local_share.is_some() {
+            tool::<A>("stop-share", "share", "Stop", true, |s, _| {
                 s.actions.call_command(CallCommand::StopShare)
-            }));
+            })
         } else {
-            controls = controls.child(button::<A>("Share", "call-share", |s, _| {
+            tool::<A>("call-share", "share", "Share", call.show_shares, |s, _| {
                 s.calls.show_shares = !s.calls.show_shares;
                 s.calls.show_people = false;
-                s.calls.show_devices = false;
+                s.calls.show_devices = None;
                 s.calls.show_captions = false;
                 s.calls.show_meeting_info = false;
                 if s.calls.show_shares {
                     s.actions.call_command(CallCommand::RefreshShareSources);
                 }
-            }));
+            })
+        });
+        controls = controls.child(group_divider());
+        if model.has_reaction_controls() {
+            controls = controls.child(tool::<A>(
+                "call-reactions",
+                "mood",
+                "React",
+                call.hand || call.menu == Some(Menu::Reactions),
+                |s, _| toggle_menu(s, Menu::Reactions),
+            ));
         }
-        controls = controls
-            .child(button::<A>("People", "call-people", |s, _| {
-                s.calls.show_people = !s.calls.show_people;
-                s.calls.show_devices = false;
-                s.calls.show_shares = false;
-                s.calls.show_captions = false;
-                s.calls.show_meeting_info = false;
-            }))
-            .child(button::<A>("More", "call-more", |s, _| {
-                s.calls.show_reactions = !s.calls.show_reactions;
-            }));
         if let Some(thread) = call.chat_thread() {
             let thread = thread.to_owned();
             // GPUI's `call_chat_unread`: Rune knows whether the chat is unread, not how much.
             let unread = !call.show_chat && s.chats.iter().any(|chat| chat.id == thread && chat.unread);
-            let chat = button::<A>("Chat", "call-chat", move |s, tx| {
+            let chat = tool::<A>("call-chat", "chat_bubble", "Chat", call.show_chat, move |s, tx| {
                 s.calls.show_chat = !s.calls.show_chat;
                 // The panel reuses the selected-chat views. The call window has its own selection
                 // and its bridge follows the chat apart (`Bridge::open`); inline (demo) calls
@@ -1815,9 +1980,32 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 chat
             });
         }
-        controls = controls.child(button::<A>("Leave", "call-leave", |s, _| {
-            s.actions.call_command(CallCommand::Hangup)
-        }));
+        controls = controls
+            .child(tool::<A>("call-people", "group", "People", call.show_people, |s, _| {
+                s.calls.show_people = !s.calls.show_people;
+                s.calls.show_devices = None;
+                s.calls.show_shares = false;
+                s.calls.show_captions = false;
+                s.calls.show_meeting_info = false;
+            }))
+            .child(group_divider())
+            .child(tool::<A>("call-view", "grid_view", "View", call.menu == Some(Menu::View), |s, _| {
+                toggle_menu(s, Menu::View)
+            }));
+        if model.kind != CallKind::Test {
+            controls = controls.child(tool::<A>(
+                "call-more",
+                "more_horiz",
+                "More",
+                call.menu == Some(Menu::More),
+                |s, _| toggle_menu(s, Menu::More),
+            ));
+        }
+        controls = controls.child(button::<A>(
+            if model.is_connecting() { "Cancel" } else { "Leave" },
+            "call-leave",
+            |s, _| s.actions.call_command(CallCommand::Hangup),
+        ));
         body = body.child(controls);
         if call.recording || call.transcribing || call.recording_pending {
             let label = if call.recording_pending {
@@ -1892,7 +2080,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     )
                     .child(button::<A>("View lobby", "call-open-lobby", |s, _| {
                         s.calls.show_people = true;
-                        s.calls.show_devices = false;
+                        s.calls.show_devices = None;
                         s.calls.show_shares = false;
                     }))
                     .child(button::<A>("Admit all", "lobby-admit-all", |s, _| {
@@ -1933,20 +2121,33 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
             body = body.child(incoming);
         }
         let hand = call.hand;
+        // GPUI's reactions popover: the emoji row, then Raise hand.
+        let mut reactions = row().gap(8.0);
+        for reaction in calling::Reaction::ALL {
+            let label = reaction_glyph(&reaction);
+            reactions = reactions.child(button::<A>(
+                &label,
+                &format!("reaction-{}", reaction.name()),
+                move |s, _| {
+                    s.actions
+                        .call_command(CallCommand::SendReaction(reaction.clone()))
+                },
+            ));
+        }
+        reactions = reactions.child(button::<A>(
+            if hand { "Lower hand" } else { "Raise hand" },
+            "call-hand",
+            move |s, _| s.actions.call_command(CallCommand::SetHand(!hand)),
+        ));
         let mut features = row()
             .gap(8.0)
             .child(button::<A>("Meeting info", "call-meeting-info", |s, _| {
                 s.calls.show_meeting_info = !s.calls.show_meeting_info;
                 s.calls.show_people = false;
-                s.calls.show_devices = false;
+                s.calls.show_devices = None;
                 s.calls.show_shares = false;
                 s.calls.show_captions = false;
-            }))
-            .child(button::<A>(
-                if hand { "Lower hand" } else { "Raise hand" },
-                "call-hand",
-                move |s, _| s.actions.call_command(CallCommand::SetHand(!hand)),
-            ));
+            }));
         if !matches!(call.captions, calling::CaptionState::Starting) {
             let enabled = matches!(call.captions, calling::CaptionState::On);
             features = features.child(button::<A>(
@@ -1981,34 +2182,31 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                 }
             }
         }
-        for reaction in calling::Reaction::ALL {
-            let label = reaction_glyph(&reaction);
-            features = features.child(button::<A>(
-                &label,
-                &format!("reaction-{}", reaction.name()),
-                move |s, _| {
-                    s.actions
-                        .call_command(CallCommand::SendReaction(reaction.clone()))
-                },
-            ));
-        }
-        if call.show_reactions {
+        let open_menu = match call.menu {
+            Some(Menu::Reactions) if model.has_reaction_controls() => Some(reactions),
+            Some(Menu::More) => Some(features),
+            _ => None,
+        };
+        if let Some(menu) = open_menu {
             body = body.child(
                 row()
+                    .key("call-menu")
                     .w_full()
                     .padding(8.0)
                     .scroll(ScrollSpec {
                         stick_bottom: false,
                     })
-                    .child(features),
+                    .child(menu),
             );
+        }
+        if call.menu == Some(Menu::More) {
             body = body.child(button::<A>(
                 "Captions history",
                 "call-caption-history",
                 |s, _| {
                     s.calls.show_captions = !s.calls.show_captions;
                     s.calls.show_people = false;
-                    s.calls.show_devices = false;
+                    s.calls.show_devices = None;
                     s.calls.show_shares = false;
                 },
             ));
@@ -2039,10 +2237,11 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         if call.show_meeting_info {
             panels = panels.child(meeting_info_panel::<A>(s));
         }
-        if call.show_devices {
-            panels = panels
-                .child(device_panel::<A>(call, false))
-                .child(effects_panel::<A>(call, false));
+        if let Some(which) = call.show_devices {
+            panels = panels.child(device_panel::<A>(call, which.devices(), false));
+            if which == DevicePanel::Camera {
+                panels = panels.child(effects_panel::<A>(call, false));
+            }
         }
         if call.show_captions {
             panels = panels.child(
@@ -2132,25 +2331,33 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     ),
             );
         }
-        if call.show_reactions {
-            let mut layouts = row().gap(8.0);
+        if call.menu == Some(Menu::View) {
+            let mut layouts = row().key("call-view-menu").gap(8.0).center_y().child(
+                text("Layout").font(style(13.0, 600.0)).color(rgb(0xFFFFFF)),
+            );
             for (label, layout) in [
                 ("Gallery", Layout::Gallery),
                 ("Speaker", Layout::Speaker),
                 ("Content", Layout::Content),
             ] {
+                let key = format!("layout-{label}");
+                // As in GPUI, Content is listed but unavailable until someone shares.
                 if layout == Layout::Content && !call.has_content() {
+                    layouts = layouts.child(crate::controls::button_with_help::<A>(
+                        &key,
+                        label,
+                        "Only while someone shares",
+                        crate::controls::Variant::Quiet,
+                        crate::controls::Size::Md,
+                        |_, _| {},
+                    ).disabled(true));
                     continue;
                 }
-                layouts = layouts.child(button::<A>(
-                    label,
-                    &format!("layout-{label}"),
-                    move |s, _| {
-                        s.calls.layout = layout;
-                        s.calls.page = 0;
-                        sync_video(s);
-                    },
-                ));
+                layouts = layouts.child(button::<A>(label, &key, move |s, _| {
+                    s.calls.layout = layout;
+                    s.calls.page = 0;
+                    sync_video(s);
+                }));
             }
             stage = stage.child(layouts);
         }
@@ -2508,7 +2715,7 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         }
         let mut content = row().w_full().grow(1.0).min_h(0.0).child(stage);
         if call.show_people
-            || call.show_devices
+            || call.show_devices.is_some()
             || call.show_captions
             || (call.show_shares && call.local_share.is_none())
         {
@@ -2531,21 +2738,32 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
         }
         return body.child(content);
     } else if call.ring.is_none() {
-        body = body
+        // GPUI's prejoin: title, preview, camera and microphone buttons with Background, the
+        // Camera / Microphone / Speaker selects, the audio choice, then Cancel and Join now.
+        // Rune also takes the meeting link here, as it has no pending join to read it from.
+        body = col()
+            .key("calls")
+            .w_full()
+            .padding(24.0)
+            .gap(16.0)
+            .fill(color("#FFFFFF"))
             .child(
-                text("Join a meeting")
-                    .font(style(16.0, 600.0))
-                    .color(color("#242424")),
+                col()
+                    .gap(2.0)
+                    .child(text("Join a meeting").font(style(20.0, 600.0)).color(color("#242424")))
+                    .child(
+                        text("Choose your video and audio settings, then join")
+                            .font(style(13.0, 400.0))
+                            .color(color("#616161")),
+                    ),
             )
-            .child(
-                text(if call.prejoin_mic {
-                    "Your microphone is on"
-                } else {
-                    "Your microphone starts muted"
-                })
-                .font(style(13.0, 400.0))
-                .color(color("#616161")),
-            )
+            .children(call.notice.as_ref().map(|notice| {
+                text(notice.clone())
+                    .key("call-notice")
+                    .font(style(13.0, 400.0))
+                    .color(color("#C4314B"))
+                    .wrap()
+            }))
             .child(
                 text_input(&call.link, style(14.0, 400.0))
                     .key("meeting-link")
@@ -2556,77 +2774,120 @@ pub fn view_with_motion<A: Actions + 'static>(s: &UiState<A>, reduced_motion: bo
                     .on_edit(|s: &mut UiState<A>| &mut s.calls.link),
             );
         if !s.read_only {
-            if call.video {
-                let preview = el()
-                    .key("prejoin-preview")
-                    .w_full()
-                    .h(220.0)
-                    .fill(color("#292929"));
-                body = body.child(
-                    if let Some(surface) = call.surfaces.get(&VideoKey::LocalCamera) {
-                        preview.native_surface(surface, SurfaceFit::Fit)
-                    } else {
-                        preview.child(text("Starting camera…").color(rgb(0xFFFFFF)))
-                    },
-                );
-            }
-            body = body
-                .child(button::<A>(
-                    if call.video {
-                        "Camera on"
-                    } else {
-                        "Camera off"
-                    },
-                    "prejoin-camera",
-                    |s, _| {
-                        s.calls.video = !s.calls.video;
-                        if !s.calls.video {
-                            s.calls.stop_preview();
-                        }
-                    },
-                ))
-                .child(button::<A>(
-                    if call.prejoin_mic {
-                        "Microphone on"
-                    } else {
-                        "Microphone off"
-                    },
+            let preview = el()
+                .key("prejoin-preview")
+                .w_full()
+                .h(180.0)
+                .center()
+                .fill(color("#292929"));
+            body = body.child(if !call.video {
+                preview.child(text("Your camera is off").color(rgb(0xFFFFFF)))
+            } else if let Some(surface) = call.surfaces.get(&VideoKey::LocalCamera) {
+                preview.native_surface(surface, SurfaceFit::Fit)
+            } else {
+                preview.child(text("Starting camera…").color(rgb(0xFFFFFF)))
+            });
+            let audio_on = call.prejoin_audio == AudioChoice::Computer;
+            // Without audio there is no microphone to turn on: the button stays, dimmed and inert.
+            let mic = if audio_on {
+                crate::controls::icon_button::<A>(
                     "prejoin-mic",
-                    |s, _| {
-                        s.calls.prejoin_mic = !s.calls.prejoin_mic;
-                    },
-                ))
-                .child(button::<A>(
-                    "Device settings and effects",
-                    "prejoin-devices",
-                    |s, _| {
-                        s.calls.show_devices = !s.calls.show_devices;
-                    },
-                ));
-            if !call.pending {
-                body = body.child(button::<A>("Join now", "join-call", |s, _| {
-                    if !s.calls.link.text.trim().is_empty() {
-                        s.calls.pending = true;
-                        s.calls.notice = None;
-                        s.calls.stop_preview();
-                        for command in s.calls.prejoin_commands() {
-                            s.actions.call_command(command);
-                        }
-                        s.actions.join_call(&s.calls.link.text, s.calls.video);
+                    if call.prejoin_mic { "mic" } else { "mic_off" },
+                    "Microphone",
+                    call.prejoin_mic,
+                    |s, _| s.calls.prejoin_mic = !s.calls.prejoin_mic,
+                )
+            } else {
+                row()
+                    .key("prejoin-mic")
+                    .size(32.0, 32.0)
+                    .center()
+                    .opacity(0.4)
+                    .role("button")
+                    .label("Microphone")
+                    .disabled(true)
+                    .child(crate::icons::sym("mic_off", 18.0).color(color("#242424")))
+            };
+            body = body.child(
+                row()
+                    .gap(10.0)
+                    .center_y()
+                    .child(crate::controls::icon_button::<A>(
+                        "prejoin-camera",
+                        if call.video { "videocam" } else { "videocam_off" },
+                        "Camera",
+                        call.video,
+                        |s, _| {
+                            s.calls.video = !s.calls.video;
+                            if !s.calls.video {
+                                s.calls.stop_preview();
+                            }
+                        },
+                    ))
+                    .child(mic)
+                    .child(crate::controls::chip::<A>(
+                        "prejoin-background",
+                        "Background",
+                        call.prejoin_effects,
+                        |s| s.calls.prejoin_effects = !s.calls.prejoin_effects,
+                    )),
+            );
+            if call.prejoin_effects {
+                body = body.child(effects_panel::<A>(call, true));
+            }
+            let mut selects = row().w_full().gap(10.0);
+            for (device, enabled) in [
+                (Device::Camera, true),
+                (Device::Microphone, audio_on),
+                (Device::Speaker, audio_on),
+            ] {
+                selects = selects.child(device_select::<A>(call, device, enabled));
+            }
+            body = body.child(selects);
+            if let Some(device) = call.prejoin_select.filter(|device| *device == Device::Camera || audio_on) {
+                body = body.child(device_panel::<A>(call, &[device], true));
+            }
+            let mut audio = row().gap(8.0).wrap();
+            for (key, choice) in [("prejoin-audio-computer", AudioChoice::Computer), ("prejoin-audio-none", AudioChoice::NoAudio)] {
+                audio = audio.child(crate::controls::chip::<A>(key, choice.label(), call.prejoin_audio == choice, move |s| {
+                    s.calls.prejoin_audio = choice;
+                    if choice == AudioChoice::NoAudio && s.calls.prejoin_select.is_some_and(|device| device != Device::Camera) {
+                        s.calls.prejoin_select = None;
                     }
                 }));
+            }
+            body = body.child(audio);
+            let mut actions = row().gap(8.0).center_y().child(el().grow(1.0)).child(button::<A>(
+                "Cancel",
+                "prejoin-cancel",
+                |s, _| s.calls.cancel_prejoin(),
+            ));
+            if !call.pending {
+                actions = actions.child(crate::controls::button::<A>(
+                    "join-call",
+                    "Join now",
+                    crate::controls::Variant::Primary,
+                    crate::controls::Size::Md,
+                    |s, _| {
+                        if !s.calls.link.text.trim().is_empty() {
+                            s.calls.pending = true;
+                            s.calls.notice = None;
+                            s.calls.stop_preview();
+                            for command in s.calls.prejoin_commands() {
+                                s.actions.call_command(command);
+                            }
+                            s.actions.join_call(&s.calls.link.text, s.calls.video);
+                        }
+                    },
+                ));
             } else {
-                body = body.child(
+                actions = actions.child(
                     text("Joining…")
                         .font(style(13.0, 400.0))
                         .color(color("#616161")),
                 );
             }
-            if call.show_devices {
-                body = body
-                    .child(device_panel::<A>(call, true))
-                    .child(effects_panel::<A>(call, true));
-            }
+            body = body.child(actions);
         }
     }
     col()
@@ -2660,6 +2921,9 @@ mod tests {
                 .push(format!("call back {}", entry.call_id));
         }
         fn open(&self, _: &str) {}
+        fn call_person(&self, user_id: &str, name: &str) {
+            self.actions.borrow_mut().push(format!("call person {user_id} {name}"));
+        }
         fn send(&self, target: crate::types::SendTarget, text: String, _: Vec<teams_core::FileReference>) {
             self.actions.borrow_mut().push(format!("send {} {text}", target.conversation_id));
         }
@@ -2793,7 +3057,7 @@ mod tests {
         }
         click(&mut rt, "call-health");
         assert!(rt.find("call-health-details").is_some());
-        click(&mut rt, "call-devices");
+        click(&mut rt, "call-mic-menu");
         rt.state.calls.apply(CallUpdate::Selected {
             input: calling::DeviceChoice::Device("mic".into()),
             output: calling::DeviceChoice::SystemDefault,
@@ -2914,7 +3178,7 @@ mod tests {
         state.calls.link = TextEdit::new("https://teams.microsoft.com/meet/1234");
         let mut rt = runtime(state);
         click(&mut rt, "prejoin-mic");
-        click(&mut rt, "prejoin-devices");
+        click(&mut rt, "prejoin-mic-select");
         click(&mut rt, "input-Default device");
         assert!(rt.state.actions.actions.borrow().is_empty());
         assert!(rt.state.calls.preview.is_none());
@@ -3318,7 +3582,7 @@ mod tests {
             direction,
             outcome,
             is_meeting: false,
-            peer_id: Some("ada".into()),
+            peer_id: Some("8:orgid:ada".into()),
             peer_name: Some("Ada".into()),
             thread_id: Some("chat".into()),
         };
@@ -3351,14 +3615,140 @@ mod tests {
         rt.frame(2.0);
         assert!(rt.find("history-call-missed").is_some());
         assert!(rt.find("history-call-outgoing").is_none());
-        let (x, y) = rt.find("history-call-back-missed").unwrap();
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        rt.frame(3.0);
+        // GPUI's "Incoming" lists the calls that were answered; a missed one is under "Missed".
+        click(&mut rt, "history-Incoming");
+        assert!(rt.find("history-call-missed").is_none());
+        click(&mut rt, "history-Missed");
+        // Pressing a row calls the person back, as GPUI's `activate_call_row`.
+        click(&mut rt, "history-call-missed");
         assert_eq!(
             rt.state.actions.actions.borrow().last().unwrap(),
             "call back missed"
         );
+    }
+
+    #[test]
+    fn a_history_row_menu_offers_call_back_and_open_chat_only_when_they_can_work() {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = crate::screens::Screen::Calls;
+        state.calls.history = vec![chatsvc::CallLogEntry {
+            call_id: "c1".into(),
+            started_at: chrono::Utc::now(),
+            duration_seconds: Some(60),
+            direction: chatsvc::CallDirection::Outgoing,
+            outcome: chatsvc::CallOutcome::Accepted,
+            is_meeting: false,
+            peer_id: Some("8:orgid:ada".into()),
+            peer_name: Some("Ada".into()),
+            thread_id: None,
+        }];
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1280.0, 800.0), Env::default());
+        rt.frame(1.0);
+        click(&mut rt, "history-more-c1");
+        assert!(rt.find("history-menu-call-back").is_some());
+        assert!(rt.find("history-menu-open-chat").is_none(), "no chat with Ada is known yet");
+        rt.update(|s, _| {
+            s.chats.push(crate::types::ChatRow { id: "19:ada".into(), title: "Ada".into(), preview: String::new(), unread: false, when: String::new() });
+            s.details.insert("19:ada".into(), crate::types::ChatDetails {
+                kind: "oneOnOne".into(),
+                members: vec![store::MemberRecord { user_id: Some("ada".into()), display_name: "Ada".into() }],
+                ..Default::default()
+            });
+        });
+        rt.frame(2.0);
+        click(&mut rt, "history-menu-open-chat");
+        assert_eq!(rt.state.selected.as_deref(), Some("19:ada"));
+        assert!(rt.state.screens.screen == crate::screens::Screen::Chat);
+        assert!(rt.state.calls.history_menu.is_none());
+    }
+
+    #[test]
+    fn the_dial_column_calls_only_when_exactly_one_person_is_picked() {
+        let person = |id: &str| crate::types::Person { user_id: id.into(), name: id.to_uppercase(), mail: None };
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = crate::screens::Screen::Calls;
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1280.0, 800.0), Env::default());
+        rt.frame(1.0);
+        assert!(rt.find("history-All").is_some(), "the History column and its filters are on the page");
+        assert!(rt.find("open-prejoin").is_none(), "GPUI's Calls page has no Join a meeting button");
+        click(&mut rt, "call-dial-call");
+        assert!(rt.state.actions.actions.borrow().is_empty(), "nobody picked");
+        rt.update(|s, _| s.calls.dial.chips = vec![person("ada"), person("bo")]);
+        rt.frame(2.0);
+        click(&mut rt, "call-dial-call");
+        assert!(rt.state.actions.actions.borrow().is_empty(), "two people are not one call");
+        rt.update(|s, _| s.calls.dial.chips = vec![person("ada")]);
+        rt.frame(3.0);
+        click(&mut rt, "call-dial-call");
+        assert_eq!(rt.state.actions.actions.borrow().last().map(String::as_str), Some("call person ada ADA"));
+        assert!(rt.state.calls.dial.chips.is_empty());
+    }
+
+    #[test]
+    fn cancel_leaves_the_prejoin_without_calling_anything() {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = crate::screens::Screen::Calls;
+        state.calls.prejoin_open = true;
+        state.calls.link = TextEdit::new("https://teams.microsoft.com/meet/1234");
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env::default());
+        rt.frame(1.0);
+        assert!(rt.find("prejoin-cancel").is_some());
+        click(&mut rt, "prejoin-cancel");
+        assert!(rt.state.actions.actions.borrow().is_empty());
+        assert!(!rt.state.calls.prejoin_open && rt.state.calls.link.text.is_empty());
+        assert!(rt.find("join-call").is_none() && rt.find("history-All").is_some());
+    }
+
+    #[test]
+    fn prejoin_without_audio_disables_the_microphone_and_asks_the_engine() {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = crate::screens::Screen::Calls;
+        state.calls.prejoin_open = true;
+        state.calls.link = TextEdit::new("https://teams.microsoft.com/meet/1234");
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1000.0, 700.0), Env::default());
+        rt.frame(1.0);
+        for key in ["prejoin-camera", "prejoin-mic", "prejoin-background", "prejoin-camera-select", "prejoin-mic-select", "prejoin-speaker-select"] {
+            assert!(rt.find(key).is_some(), "{key}");
+        }
+        click(&mut rt, "prejoin-audio-none");
+        click(&mut rt, "prejoin-mic");
+        assert!(!rt.state.calls.prejoin_mic, "the microphone button is off when there is no audio");
+        click(&mut rt, "join-call");
+        assert!(rt.state.actions.actions.borrow().iter().any(|action| action == "DisableAudio"));
+    }
+
+    #[test]
+    fn the_toolbar_follows_the_gpui_order_and_the_mic_chevron_lists_the_microphones() {
+        let mut state = connected(1);
+        state.calls.apply(CallUpdate::MeetingChat("19:meeting".into()));
+        state.chats.push(crate::types::ChatRow { id: "19:meeting".into(), title: "Sync".into(), preview: String::new(), unread: false, when: String::new() });
+        state.calls.devices.inputs = vec![calling::AudioDevice { index: 0, guid: "mic-1".into(), name: "Headset".into() }];
+        let mut rt = runtime(state);
+        let elements = rt.elements();
+        let order = ["call-mute", "call-mic-menu", "call-camera", "call-camera-menu", "call-share", "call-reactions", "call-chat", "call-people", "call-view", "call-more", "call-leave"];
+        let xs: Vec<f32> = order.iter().map(|key| by_key(&elements, key).rect[0]).collect();
+        assert!(xs.windows(2).all(|pair| pair[0] < pair[1]), "toolbar order {order:?} at {xs:?}");
+        assert!(rt.find("input-Headset").is_none());
+        click(&mut rt, "call-mic-menu");
+        assert!(rt.find("input-Headset").is_some(), "the chevron lists the microphones");
+        assert!(rt.find("output-Default device").is_some(), "and the speakers, as GPUI's mic menu");
+        assert!(rt.find("camera-Default device").is_none(), "the cameras are under the camera chevron");
+        click(&mut rt, "call-camera-menu");
+        assert!(rt.find("input-Headset").is_none());
+        assert!(rt.find("effect-mirror").is_some());
+        click(&mut rt, "call-reactions");
+        assert!(rt.find("reaction-heart").is_some() && rt.find("call-hand").is_some());
+        assert!(rt.find("call-meeting-info").is_none(), "meeting info lives under More");
+    }
+
+    #[test]
+    fn leaving_a_call_that_is_still_connecting_reads_cancel() {
+        let mut state = UiState::new(Fake::default());
+        state.calls.apply(CallUpdate::State(CallState::Connecting));
+        let rt = runtime(state);
+        assert_eq!(by_key(&rt.elements(), "call-leave").label.as_deref(), Some("Cancel"));
+        let rt = runtime(connected(1));
+        assert_eq!(by_key(&rt.elements(), "call-leave").label.as_deref(), Some("Leave"));
     }
 
     #[test]
@@ -3496,7 +3886,7 @@ mod tests {
             "no calendar match yet"
         );
         assert!(rt.state.calls.show_meeting_info);
-        click(&mut rt, "call-devices");
+        click(&mut rt, "call-mic-menu");
         assert!(
             !rt.state.calls.show_meeting_info,
             "switching panels closes meeting info"
@@ -3581,9 +3971,12 @@ mod tests {
         for key in [
             "call-mute",
             "call-camera",
-            "call-devices",
+            "call-mic-menu",
+            "call-camera-menu",
             "stop-share",
+            "call-reactions",
             "call-people",
+            "call-view",
             "call-more",
             "call-chat",
             "call-leave",
@@ -3613,7 +4006,7 @@ mod tests {
     #[test]
     fn device_and_effect_panels_use_widget_states_instead_of_text_ticks() {
         fn devices_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
-            device_panel::<Fake>(&s.calls, false)
+            device_panel::<Fake>(&s.calls, &[Device::Microphone], false)
         }
         fn effects_view(s: &UiState<Fake>, _: &mut Cx<UiState<Fake>>) -> El {
             effects_panel::<Fake>(&s.calls, false)

@@ -253,7 +253,6 @@ fn shortcut(screen: Screen) -> &'static str {
         Screen::Calendar => "Ctrl+Shift+4",
         Screen::Calls => "Ctrl+5",
         Screen::Settings => "Ctrl+,",
-        Screen::Agenda => "",
     }
 }
 

@@ -11,7 +11,7 @@ use rune::*;
 use crate::ui::text;
 
 use crate::avatar::rgb;
-use crate::controls;
+
 use crate::icons::sym;
 use crate::types::{Actions, MessageRow};
 use crate::ui::{UiState, active_target, select_thread, ts};
@@ -365,21 +365,6 @@ fn bubble<A: Actions + 'static>(s: &UiState<A>, m: &MessageRow, own: bool, has_p
         .children(undo(s, m))
         .child(crate::media::view(s, &m.media, &m.id))
         .children(crate::message_menu::edited_mark(s, m))
-}
-
-/// One icon button of the hover toolbar. Its press goes to `on_press`.
-///
-/// Callers in `calls.rs` keep the old `(key, glyph, press)` signature; the
-/// accessible name is derived from what the key (or glyph) says the button does, so every call
-/// site gets a role, a name and a Tab stop from the shared primitive without touching its file.
-pub(crate) fn action_button<A: Actions + 'static>(key: String, glyph: &str, on_press: impl Fn(&mut UiState<A>, &mut Tx) + 'static) -> El {
-    let label = match glyph {
-        "reply" => "Reply",
-        "more_horiz" => "More actions",
-        "call" => "Call",
-        _ => "React",
-    };
-    controls::icon_button::<A>(&key, glyph, label, false, on_press)
 }
 
 /// One square button of the hover toolbar, named for assistive tech and reachable by Tab.
@@ -788,35 +773,5 @@ mod tests {
         click(&mut rt, "reply-m1");
         let reply = rt.state.compose.reply.as_ref().expect("quoted");
         assert_eq!((reply.message_id.as_str(), reply.sender.as_str()), ("m1", "Ada"));
-    }
-
-    #[test]
-    fn action_button_names_its_intent_from_the_glyph() {
-        fn buttons_view(_s: &UiState<Fake>, _cx: &mut Cx<UiState<Fake>>) -> El {
-            col()
-                .child(action_button::<Fake>("react-m1".into(), "mood", |_, _| {}))
-                .child(action_button::<Fake>("reply-m1".into(), "reply", |_, _| {}))
-                .child(action_button::<Fake>("more-m1".into(), "more_horiz", |_, _| {}))
-                .child(action_button::<Fake>("contact-call-b".into(), "call", |_, _| {}))
-        }
-        let mut rt = Runtime::new(
-            UiState::new(Fake),
-            buttons_view as fn(&UiState<Fake>, &mut Cx<UiState<Fake>>) -> El,
-            (1000.0, 700.0),
-            Env { system_dark: false, scale: 1.0 },
-        );
-        rt.frame(0.0);
-        let elements = rt.elements();
-        for (key, label) in [
-            ("react-m1", "React"),
-            ("reply-m1", "Reply"),
-            ("more-m1", "More actions"),
-            ("contact-call-b", "Call"),
-        ] {
-            let e = element(&elements, key);
-            assert_eq!(e.role, "button", "{key}");
-            assert_eq!(e.label.as_deref(), Some(label), "{key}");
-            assert!(e.focusable, "{key}");
-        }
     }
 }

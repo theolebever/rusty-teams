@@ -128,22 +128,6 @@ pub(crate) fn icon_button_with_ink<A: Actions + 'static>(
     )
 }
 
-/// An icon button on a surface whose colour is fixed by the scene rather than the theme — the
-/// dark stage of a call. White ink and a translucent white active/hover fill keep it readable
-/// even when the user forces the light theme, while the geometry and a11y stay shared.
-pub(crate) fn icon_button_on_dark<A: Actions + 'static>(
-    key: &str,
-    glyph: &str,
-    label: &str,
-    active: bool,
-    action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
-) -> El {
-    icon_button_base(
-        key, glyph, label, active, Color::WHITE,
-        (Color::WHITE.alpha(0.18), Color::WHITE.alpha(0.12), Color::WHITE.alpha(0.7)), action,
-    )
-}
-
 fn icon_button_base<A: Actions + 'static>(
     key: &str,
     glyph: &str,
@@ -363,7 +347,6 @@ mod tests {
             .child(button::<Quiet>("btn-quiet", "Cancel", Variant::Quiet, Size::Sm, |_, _| {}))
             .child(button::<Quiet>("btn-menu-icon", "i", Variant::Menu, Size::Md, |_, _| {}))
             .child(icon_button::<Quiet>("icon-settings", "settings", "Settings", true, |_, _| {}))
-            .child(icon_button_on_dark::<Quiet>("icon-dark", "call", "Call", true, |_, _| {}))
             .child(menu_item::<Quiet>("menu-item", "Rename", Some("edit"), true, |_| {}))
             .child(switch_item::<Quiet>("switch-on", "Notifications", true, true, |_| {}))
             .child(switch_item::<Quiet>("switch-off", "Do not disturb", false, false, |_| {}))

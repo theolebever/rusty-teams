@@ -96,6 +96,10 @@ pub fn load_camera_effects(store: &store::Store) -> CameraEffects {
         })
 }
 
+pub fn save_camera_effects(store: &store::Store, effects: CameraEffects) {
+    let _ = store.set_meta(EFFECTS_META_KEY, &effects.to_meta());
+}
+
 pub fn load_video_quality(store: &store::Store) -> calling::VideoQuality {
     store
         .meta(VIDEO_QUALITY_META_KEY)
@@ -1044,7 +1048,7 @@ impl AppState {
     }
 
     pub fn set_call_effects(&mut self, effects: CameraEffects, cx: &mut dyn Host) {
-        let _ = self.store.set_meta(EFFECTS_META_KEY, &effects.to_meta());
+        save_camera_effects(&self.store, effects);
         self.call_effects = effects;
         self.send_call_command(CallCommand::SetCameraEffects(effects));
         cx.notify();

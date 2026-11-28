@@ -372,7 +372,6 @@ pub trait Actions {
     fn load_devices(&self) {}
     fn load_calendar(&self, _week: chrono::NaiveDate) {}
     fn load_calendar_range(&self, start: chrono::NaiveDate, _end: chrono::NaiveDate) { self.load_calendar(start); }
-    fn load_agenda(&self) {}
     fn respond_event(&self, _id: &str, _ical_uid: Option<&str>, _reply: chatsvc::Reply, _send_response: bool) {}
     fn mark_activity_read(&self, _id: &str) {}
     fn mark_all_activity_read(&self) {}

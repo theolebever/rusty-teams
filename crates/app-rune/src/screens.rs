@@ -18,7 +18,6 @@ pub enum Screen {
     Agents,
     Activity,
     Calendar,
-    Agenda,
     Calls,
     Settings,
 }
@@ -61,6 +60,20 @@ pub enum CalendarView {
 
 impl CalendarView {
     pub fn days(self) -> usize { match self { Self::Day => 1, Self::WorkWeek => 5, Self::Week => 7, Self::Month => 42 } }
+    const ALL: [Self; 4] = [Self::Day, Self::WorkWeek, Self::Week, Self::Month];
+    /// The shared model's span, which names the view and its previous/next tooltips.
+    fn span(self) -> crate::calendar_grid::model::CalendarSpan {
+        use crate::calendar_grid::model::CalendarSpan;
+        match self { Self::Day => CalendarSpan::Day, Self::WorkWeek => CalendarSpan::WorkWeek, Self::Week => CalendarSpan::Week, Self::Month => CalendarSpan::Month }
+    }
+    /// What the previous and next buttons move by, named as GPUI's tooltips do.
+    fn step_tips(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Day => ("calendar.view.previous_day", "calendar.view.next_day"),
+            Self::Month => ("calendar.view.previous_month", "calendar.view.next_month"),
+            Self::WorkWeek | Self::Week => ("calendar.view.previous_week", "calendar.view.next_week"),
+        }
+    }
     fn start(self, date: NaiveDate) -> NaiveDate {
         match self { Self::Day => date, Self::Month => monday(date.with_day(1).unwrap_or(date)), _ => monday(date) }
     }
@@ -91,6 +104,10 @@ pub struct ScreenState {
     pub selected_event: Option<String>,
     pub event_menu: Option<String>,
     pub send_response: bool,
+    /// The calendar's view menu is open.
+    pub span_menu: bool,
+    /// The right-click menu of an event: its id and the pointer position.
+    pub event_context: Option<(String, f32, f32)>,
 }
 
 impl Default for ScreenState {
@@ -118,6 +135,8 @@ impl Default for ScreenState {
             selected_event: None,
             event_menu: None,
             send_response: true,
+            span_menu: false,
+            event_context: None,
         }
     }
 }
@@ -213,11 +232,17 @@ pub fn navigate_tab<A: Actions>(s: &mut UiState<A>, screen: Screen, tx: &mut Tx)
     if let Some(id) = remembered.filter(|id| s.selected.as_ref() != Some(id)) { ui::open_chat(s, &id, tx); }
 }
 
-fn shift_week<A: Actions>(s: &mut UiState<A>, days: i64) {
+/// One step back (`-1`) or forward (`1`): a day, a week, or a month, by the current view.
+fn shift_view<A: Actions>(s: &mut UiState<A>, direction: i64) {
     let date = s.screens.calendar_date;
-    let next = if s.screens.calendar_view == CalendarView::Month {
-        if days < 0 { date.checked_sub_months(chrono::Months::new(1)) } else { date.checked_add_months(chrono::Months::new(1)) }.unwrap_or(date)
-    } else { date + Duration::days(if s.screens.calendar_view == CalendarView::Day { days.signum() } else { days }) };
+    let next = match s.screens.calendar_view {
+        CalendarView::Month => {
+            let months = chrono::Months::new(1);
+            if direction < 0 { date.checked_sub_months(months) } else { date.checked_add_months(months) }.unwrap_or(date)
+        }
+        CalendarView::Day => date + Duration::days(direction),
+        CalendarView::WorkWeek | CalendarView::Week => date + Duration::days(7 * direction),
+    };
     select_date(s, next);
 }
 
@@ -231,6 +256,8 @@ pub(crate) fn select_date<A: Actions>(s: &mut UiState<A>, date: NaiveDate) {
     s.screens.calendar.clear();
     s.screens.selected_event = None;
     s.screens.date_picker = false;
+    s.screens.event_context = None;
+    s.screens.picker_month = date.with_day(1).unwrap_or(date);
     reload_calendar(s);
 }
 
@@ -258,7 +285,6 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     match s.screens.screen {
         Screen::Activity => activity(s),
         Screen::Calendar => calendar(s),
-        Screen::Agenda => crate::agenda::view(s),
         Screen::Calls => crate::calls::view(s),
         Screen::Settings => crate::settings::view(s),
         Screen::Chat => col(),
@@ -287,65 +313,81 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     }
 }
 
+/// A header button: an optional leading icon (`"#"` is drawn as text, the icon set has no hash) and a label.
+fn header_action<A: Actions + 'static>(
+    key: &str,
+    glyph: Option<&str>,
+    label: &str,
+    primary: bool,
+    action: impl Fn(&mut UiState<A>, &mut Tx) + 'static,
+) -> El {
+    let palette = app_backend::schemes::active_palette();
+    let rgb = crate::avatar::rgb;
+    let (fill, hover, ink) = if primary {
+        (palette.accent, palette.accent_strong, rgb(palette.on_accent))
+    } else {
+        (palette.surface_raised, palette.row_hover, rgb(palette.foreground))
+    };
+    let icon = glyph.map(|glyph| if glyph == "#" {
+        text("#").font(style(13.0, 600.0)).color(ink)
+    } else {
+        crate::icons::sym(glyph, 16.0).color(ink)
+    });
+    row().key(key.to_owned()).h(32.0).px(12.0).gap(6.0).center().radius(6.0)
+        .fill(rgb(fill)).hover(rgb(hover))
+        .role("button").label(label.to_owned()).focusable(true)
+        .focus_ring(2.0, 1.0, rgb(palette.accent))
+        .on_press_tx(action)
+        .children(icon)
+        .child(text(label.to_owned()).font(style(13.0, 600.0)).color(ink))
+}
+
+/// The left pane: the title and a month to jump by. GPUI also lists the connected calendars
+/// there; Rune has no calendar list, so it has neither that nor "Add calendar".
+fn calendar_pane<A: Actions + 'static>(s: &UiState<A>) -> El {
+    col().key("calendar-pane").w(240.0).h_full().min_h(0.0).padding(12.0).gap(8.0)
+        .child(text("Calendar").font(style(18.0, 600.0)).color(color("#242424")))
+        .child(crate::calendar_grid::month_grid(s, "mini"))
+}
+
 fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
+    let view = s.screens.calendar_view;
+    let (previous_tip, next_tip) = view.step_tips();
+    let (previous_tip, next_tip) = (app_backend::ui_locale::tr(previous_tip), app_backend::ui_locale::tr(next_tip));
     let mut header = row()
         .w_full()
-        .min_h(56.0)
+        .min_h(52.0)
         .wrap()
         .py(8.0)
-        .px(20.0)
+        .px(16.0)
         .gap(8.0)
         .center_y()
-        .child(
-            text("Calendar")
-                .font(style(18.0, 600.0))
-                .color(color("#242424")),
-        )
-        .child(button::<A>("Today", "calendar-today", |s, _| {
+        .child(header_action::<A>("calendar-today", Some("calendar_month"), "Today", false, |s, _| {
             select_date(s, Local::now().date_naive());
         }))
-        .child(crate::controls::icon_button::<A>("calendar-previous", "keyboard_arrow_left", "Previous week", false, |s, _| {
-            shift_week(s, -7)
-        }))
-        .child(crate::controls::icon_button::<A>("calendar-next", "keyboard_arrow_right", "Next week", false, |s, _| shift_week(s, 7)))
+        .child(crate::controls::icon_button::<A>("calendar-previous", "keyboard_arrow_left", &previous_tip, false, |s, _| shift_view(s, -1)))
+        .child(crate::controls::icon_button::<A>("calendar-next", "keyboard_arrow_right", &next_tip, false, |s, _| shift_view(s, 1)))
         .child(crate::controls::button::<A>("calendar-date-picker", &format!("{} ▾", s.screens.calendar_date.format("%B %Y")), Variant::Menu, Size::Md, |s, _| {
             s.screens.picker_month = s.screens.calendar_date.with_day(1).unwrap_or(s.screens.calendar_date);
             s.screens.date_picker = !s.screens.date_picker;
         }))
-        // Pushes the views and actions to the right edge.
-        .child(el().grow(1.0));
-    // Views as one segmented control: the selected one filled, the rest flat inside a shared track.
-    let palette = app_backend::schemes::active_palette();
-    let mut views = row().key("calendar-views").padding(2.0).gap(2.0).radius(8.0).center_y()
-        .fill(crate::avatar::rgb(palette.surface_raised))
-        .child(crate::controls::button::<A>("calendar-agenda", "Agenda", Variant::Menu, Size::Sm, |s, _| {
-            s.screens.screen = Screen::Agenda;
-            s.actions.load_agenda();
+        // Pushes the view menu and the actions to the right edge.
+        .child(el().grow(1.0))
+        // One menu for the views, as GPUI's `calendar-span` dropdown.
+        .child(crate::controls::button::<A>("calendar-span", &format!("{} ▾", view.span().label()), Variant::Menu, Size::Md, |s, _| {
+            s.screens.span_menu = !s.screens.span_menu;
         }));
-    for (label, mode) in [("Day", CalendarView::Day), ("Work week", CalendarView::WorkWeek), ("Week", CalendarView::Week), ("Month", CalendarView::Month)] {
-        let selected = s.screens.calendar_view == mode;
-        views = views.child(crate::controls::button::<A>(
-            &format!("calendar-view-{mode:?}"),
-            label,
-            if selected { Variant::Primary } else { Variant::Menu },
-            Size::Sm,
-            move |s, _| {
-                s.screens.calendar_view = mode;
-                select_date(s, s.screens.calendar_date);
-            },
-        ).checked(selected));
-    }
-    header = header.child(views);
     if !s.read_only {
-        header = header.child(el().w(8.0))
-            .child(crate::controls::button::<A>("calendar-join-id", "Join with an ID", Variant::Menu, Size::Md, |s, _| s.screens.join_id_open = true))
-            .child(button::<A>("Meet now", "calendar-meet-now", |s, _| s.actions.meet_now("")))
-            .child(crate::controls::button::<A>("calendar-new-meeting", "New meeting", Variant::Primary, Size::Md, |s, tx| { crate::meeting_form::open(s); tx.focus("meeting-title", false); }));
+        header = header
+            .child(header_action::<A>("calendar-join-id", Some("#"), "Join with an ID", false, |s, _| s.screens.join_id_open = true))
+            .child(header_action::<A>("calendar-meet-now", Some("videocam"), "Meet now", false, |s, _| s.actions.meet_now("")))
+            .child(header_action::<A>("calendar-new-meeting", Some("add"), "New meeting", true, |s, tx| { crate::meeting_form::open(s); tx.focus("meeting-title", false); }));
     }
     let body = row()
         .grow(1.0)
         .min_h(0.0)
         .w_full()
+        .child(calendar_pane(s))
         .child(if s.screens.calendar_view == CalendarView::Month { crate::calendar_grid::month(s) } else { crate::calendar_grid::week(s) });
     col()
         .key("calendar")
@@ -357,6 +399,77 @@ fn calendar<A: Actions + 'static>(s: &UiState<A>) -> El {
         .instant_changes()
         .child(header)
         .child(body)
+}
+
+fn join_event<A: Actions>(s: &mut UiState<A>, url: &str) {
+    s.screens.event_menu = None;
+    s.screens.event_context = None;
+    s.calls.link = TextEdit::new(url);
+    s.calls.prejoin_open = true;
+    s.screens.screen = Screen::Calls;
+}
+
+fn open_event_chat<A: Actions>(s: &mut UiState<A>, thread: &str, tx: &mut Tx) {
+    s.screens.event_menu = None;
+    s.screens.event_context = None;
+    s.screens.screen = Screen::Chat;
+    ui::open_chat(s, thread, tx);
+}
+
+/// GPUI offers a response only on a live event somebody else organises.
+fn can_respond<A: Actions>(s: &UiState<A>, event: &CalendarRow) -> bool {
+    !s.read_only && !event.cancelled && event.response != chatsvc::ResponseType::Organizer && event.organizer.is_some()
+}
+
+const RESPONSES: [(&str, chatsvc::Reply, chatsvc::ResponseType); 3] = [
+    ("Accept", chatsvc::Reply::Accept, chatsvc::ResponseType::Accepted),
+    ("Tentative", chatsvc::Reply::Tentative, chatsvc::ResponseType::Tentative),
+    ("Decline", chatsvc::Reply::Decline, chatsvc::ResponseType::Declined),
+];
+
+/// The right-click menu of an event, as GPUI's `event_menu`: Join, Copy join info, Chat with
+/// participants, then the responses and the "Send a response" switch.
+fn event_context_menu<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -> El {
+    let palette = app_backend::schemes::active_palette();
+    let rgb = crate::avatar::rgb;
+    use crate::controls::menu_item as item;
+    let mut menu = col().key("calendar-event-context").w(240.0).padding(6.0).gap(2.0).radius(8.0)
+        .fill(rgb(palette.popup)).border(1.0, rgb(palette.border));
+    if let Some(url) = &event.join_url {
+        if !s.read_only && !event.cancelled {
+            let url = url.clone();
+            menu = menu.child(item("calendar-context-join", "Join", Some("videocam"), false, move |s: &mut UiState<A>| join_event(s, &url)));
+        }
+        let info = chatsvc::join_info_text(url, event.dial_in.as_ref());
+        menu = menu.child(item("calendar-context-copy-info", "Copy join info", Some("link"), false, |_: &mut UiState<A>| {})
+            .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| {
+                s.screens.event_context = None;
+                tx.copy(info.clone());
+                s.toast.show("Join info copied");
+            }));
+    }
+    if let Some(thread) = &event.thread_id {
+        let thread = thread.clone();
+        menu = menu.child(item("calendar-context-chat", "Chat with participants", Some("chat_bubble"), false, |_: &mut UiState<A>| {})
+            .on_press_tx(move |s: &mut UiState<A>, tx: &mut Tx| open_event_chat(s, &thread, tx)));
+    }
+    if can_respond(s, event) {
+        if event.join_url.is_some() || event.thread_id.is_some() {
+            menu = menu.child(el().w_full().h(1.0).fill(rgb(palette.border)));
+        }
+        for (label, reply, response) in RESPONSES {
+            let (id, uid) = (event.id.clone(), event.ical_uid.clone());
+            menu = menu.child(item(&format!("calendar-context-{label}"), label, (event.response == response).then_some("check"), event.response == response, move |s: &mut UiState<A>| {
+                s.screens.event_context = None;
+                s.actions.respond_event(&id, uid.as_deref(), reply, s.screens.send_response);
+            }));
+        }
+        menu = menu.child(el().w_full().h(1.0).fill(rgb(palette.border)))
+            .child(item("calendar-context-send-response", "Send a response", s.screens.send_response.then_some("check"), s.screens.send_response, |s: &mut UiState<A>| {
+                s.screens.send_response = !s.screens.send_response;
+            }));
+    }
+    menu
 }
 
 fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -> El {
@@ -394,12 +507,7 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
         && !event.cancelled
     {
         let url = url.clone();
-        details = details.child(button::<A>("Join", "calendar-join", move |s, _| {
-            s.screens.event_menu = None;
-            s.calls.link = TextEdit::new(&url);
-            s.calls.prejoin_open = true;
-            s.screens.screen = Screen::Calls;
-        }));
+        details = details.child(button::<A>("Join", "calendar-join", move |s, _| join_event(s, &url)));
     }
     if let Some(url) = &event.join_url {
         let info = chatsvc::join_info_text(url, event.dial_in.as_ref());
@@ -410,27 +518,19 @@ fn calendar_details<A: Actions + 'static>(s: &UiState<A>, event: &CalendarRow) -
     }
     if let Some(thread) = &event.thread_id {
         let thread = thread.clone();
-        details = details.child(button::<A>("Chat", "calendar-chat", move |s, tx| {
-            s.screens.event_menu = None;
-            s.screens.screen = Screen::Chat;
-            ui::open_chat(s, &thread, tx);
-        }));
+        details = details.child(button::<A>("Chat with participants", "calendar-chat", move |s, tx| open_event_chat(s, &thread, tx)));
     }
-    if !s.read_only && !event.cancelled && event.response != chatsvc::ResponseType::Organizer {
+    if can_respond(s, event) {
         let send_response = s.screens.send_response;
         details = details.child(crate::controls::button::<A>(
             "calendar-send-response",
-            "Send response",
+            "Send a response",
             if send_response { crate::controls::Variant::Primary } else { crate::controls::Variant::Secondary },
             crate::controls::Size::Md,
             |s, _| s.screens.send_response = !s.screens.send_response,
         ));
         let mut choices = row().gap(8.0);
-        for (label, reply, response) in [
-            ("Accept", chatsvc::Reply::Accept, chatsvc::ResponseType::Accepted),
-            ("Tentative", chatsvc::Reply::Tentative, chatsvc::ResponseType::Tentative),
-            ("Decline", chatsvc::Reply::Decline, chatsvc::ResponseType::Declined),
-        ] {
+        for (label, reply, response) in RESPONSES {
             let id = event.id.clone();
             let uid = event.ical_uid.clone();
             let key = format!("calendar-rsvp-{label}");
@@ -650,6 +750,38 @@ pub fn overlays<A: Actions + 'static>(s: &UiState<A>) -> Vec<El> {
                     .child(card),
             );
         }
+    if s.screens.screen == Screen::Calendar
+        && let Some((id, x, y)) = &s.screens.event_context
+        && let Some(event) = s.screens.calendar.iter().find(|event| &event.id == id) {
+            let close = |s: &mut UiState<A>| s.screens.event_context = None;
+            layers.push(el().key("calendar-event-context-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .child(el().key("calendar-event-context-backdrop").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).on_press(close))
+                .child(el().key("calendar-event-context-at").size(1.0, 1.0).pin(Some(*x), Some(*y), None, None))
+                .child(event_context_menu(s, event)
+                    .anchored("calendar-event-context-at", Side::Bottom, Align::Start, 4.0)));
+        }
+    if s.screens.span_menu && s.screens.screen == Screen::Calendar {
+        let palette = app_backend::schemes::active_palette();
+        let mut menu = col().key("calendar-span-menu").w(180.0).padding(6.0).gap(2.0).radius(8.0)
+            .fill(crate::avatar::rgb(palette.popup)).border(1.0, crate::avatar::rgb(palette.border))
+            .anchored("calendar-span", Side::Bottom, Align::End, 4.0)
+            .modal(true, |s: &mut UiState<A>| s.screens.span_menu = false);
+        for choice in CalendarView::ALL {
+            let selected = s.screens.calendar_view == choice;
+            menu = menu.child(crate::controls::menu_item::<A>(
+                &format!("calendar-view-{choice:?}"),
+                &choice.span().label(),
+                selected.then_some("check"),
+                selected,
+                move |s| {
+                    s.screens.span_menu = false;
+                    s.screens.calendar_view = choice;
+                    select_date(s, s.screens.calendar_date);
+                },
+            ));
+        }
+        layers.push(menu);
+    }
     if s.screens.date_picker && s.screens.screen == Screen::Calendar { layers.push(crate::calendar_grid::date_picker(s)); }
     if s.screens.join_id_open {
         let input = |edit: &TextEdit, key: &str, label: &str| text_input(edit, style(14.0, 400.0)).key(key.to_owned()).w_full().label(label.to_owned())
@@ -708,15 +840,114 @@ mod tests {
         let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1100.0, 800.0), Env { system_dark: false, scale: 1.0 });
         rt.frame(0.0);
         let elements = rt.elements();
-        for (key, label) in [("calendar-previous", "Previous week"), ("calendar-next", "Next week")] {
+        for (key, label) in [("calendar-previous", "Go to previous week"), ("calendar-next", "Go to next week")] {
             let found = elements.iter().find(|element| element.key.as_deref() == Some(key))
                 .unwrap_or_else(|| panic!("missing {key}"));
             assert_eq!(found.label.as_deref(), Some(label));
             assert!(!elements.iter().any(|element| element.text.as_deref() == Some("‹") || element.text.as_deref() == Some("›")));
         }
-        let selected = elements.iter().find(|element| element.key.as_deref() == Some("calendar-view-Week")).expect("selected view");
-        let other = elements.iter().find(|element| element.key.as_deref() == Some("calendar-view-Day")).expect("other view");
-        assert_ne!(selected.fill, other.fill, "the chosen view must be marked by fill, not a text tick");
+    }
+
+    fn calendar_runtime() -> Runtime<UiState<Fake>> {
+        let mut state = UiState::new(Fake::default());
+        state.screens.screen = Screen::Calendar;
+        let mut rt = Runtime::new(state, crate::ui::view::<Fake>, (1100.0, 800.0), Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        rt
+    }
+
+    fn press(rt: &mut Runtime<UiState<Fake>>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("missing {key}"));
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    }
+
+    #[test]
+    fn calendar_header_has_gpui_order_and_one_view_menu() {
+        let mut rt = calendar_runtime();
+        let elements = rt.elements();
+        let x = |key: &str| elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("missing {key}")).rect[0];
+        let order = ["calendar-today", "calendar-previous", "calendar-next", "calendar-date-picker", "calendar-span", "calendar-join-id", "calendar-meet-now", "calendar-new-meeting"];
+        for pair in order.windows(2) {
+            assert!(x(pair[0]) < x(pair[1]), "{} must come before {}", pair[0], pair[1]);
+        }
+        for gone in ["calendar-agenda", "calendar-views", "calendar-view-Day", "calendar-view-Month"] {
+            assert!(rt.find(gone).is_none(), "{gone} is not in GPUI's header");
+        }
+        press(&mut rt, "calendar-span");
+        let labels: Vec<_> = ["Day", "Work week", "Week", "Month"].into_iter()
+            .zip(["calendar-view-Day", "calendar-view-WorkWeek", "calendar-view-Week", "calendar-view-Month"])
+            .map(|(label, key)| (label, rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("missing {key}")).label))
+            .collect();
+        for (label, found) in labels { assert_eq!(found.as_deref(), Some(label)); }
+        press(&mut rt, "calendar-view-Month");
+        assert_eq!(rt.state.screens.calendar_view, CalendarView::Month);
+        assert!(!rt.state.screens.span_menu);
+    }
+
+    #[test]
+    fn previous_and_next_move_by_the_view_and_say_so() {
+        let mut rt = calendar_runtime();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        for (view, tips, next) in [
+            (CalendarView::Day, ("Go to previous day", "Go to next day"), NaiveDate::from_ymd_opt(2026, 11, 19).unwrap()),
+            (CalendarView::WorkWeek, ("Go to previous week", "Go to next week"), NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            (CalendarView::Week, ("Go to previous week", "Go to next week"), NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            (CalendarView::Month, ("Go to previous month", "Go to next month"), NaiveDate::from_ymd_opt(2026, 12, 18).unwrap()),
+        ] {
+            rt.update(move |s, _| { s.screens.calendar_view = view; select_date(s, date); });
+            rt.frame(1.0 / 60.0);
+            let labels: Vec<_> = ["calendar-previous", "calendar-next"].into_iter()
+                .map(|key| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().label.unwrap()).collect();
+            assert_eq!(labels, [tips.0, tips.1], "{view:?}");
+            press(&mut rt, "calendar-next");
+            assert_eq!(rt.state.screens.calendar_date, next, "{view:?}");
+            press(&mut rt, "calendar-previous");
+            assert_eq!(rt.state.screens.calendar_date, date, "{view:?}");
+        }
+    }
+
+    #[test]
+    fn the_left_pane_has_a_mini_month_that_jumps_to_a_day() {
+        let mut rt = calendar_runtime();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        rt.update(move |s, _| select_date(s, date));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("calendar-pane").is_some());
+        press(&mut rt, "mini-date-2026-11-20");
+        assert_eq!(rt.state.screens.calendar_date, NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+    }
+
+    #[test]
+    fn right_click_opens_the_event_menu_with_gpui_labels() {
+        use chrono::TimeZone;
+        let date = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let start = Local.from_local_datetime(&date.and_hms_opt(9, 0, 0).unwrap()).single().unwrap().with_timezone(&Utc);
+        let mut rt = calendar_runtime();
+        rt.update(move |s, _| {
+            s.screens.week = date;
+            s.screens.calendar = vec![CalendarRow {
+                id: "meeting".into(), subject: "Meeting".into(), start, end: start + Duration::hours(1),
+                cancelled: false, all_day: false, organizer: Some("Ada".into()), ical_uid: None, dial_in: None,
+                join_url: Some("https://teams.microsoft.com/l/meetup-join/x".into()), thread_id: Some("chat".into()),
+                response: chatsvc::ResponseType::NotResponded,
+            }];
+        });
+        rt.frame(1.0);
+        let (x, y) = rt.find("calendar-meeting-2026-11-02").expect("event");
+        rt.secondary_down(x, y);
+        rt.secondary_up(x, y);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("calendar-event-menu-host").is_none(), "right-click is a menu, not the details dialog");
+        for key in ["calendar-context-join", "calendar-context-copy-info", "calendar-context-chat", "calendar-context-Accept", "calendar-context-Tentative", "calendar-context-Decline", "calendar-context-send-response"] {
+            assert!(rt.find(key).is_some(), "missing {key}");
+        }
+        let chat = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("calendar-context-chat")).unwrap();
+        assert_eq!(chat.label.as_deref(), Some("Chat with participants"));
+        press(&mut rt, "calendar-context-Decline");
+        assert_eq!(*rt.state.actions.responses.borrow(), [("meeting".into(), chatsvc::Reply::Decline, true)]);
+        assert!(rt.state.screens.event_context.is_none());
     }
 
     #[test]
@@ -737,7 +968,7 @@ mod tests {
                 end: Utc::now(),
                 cancelled: false,
                 all_day: false,
-                organizer: None,
+                organizer: Some("Ada".into()),
                 ical_uid: None,
                 dial_in: None,
                 join_url: None,
@@ -911,7 +1142,7 @@ mod tests {
             end: start + Duration::hours(1),
             cancelled: false,
             all_day: false,
-            organizer: None,
+            organizer: Some("Ada".into()),
             ical_uid: None, dial_in: None,
             join_url: None,
             thread_id: None,

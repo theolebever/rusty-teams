@@ -63,7 +63,7 @@ fn event<A: Actions + 'static>(s: &UiState<A>, e: &CalendarRow, date: chrono::Na
             s.screens.selected_event = Some(selected.clone());
             s.screens.event_menu = Some(menu_id_for_press.clone());
         })
-        .on_secondary_press(move |s: &mut UiState<A>, _, _| s.screens.event_menu = Some(menu_id.clone()));
+        .on_secondary_press(move |s: &mut UiState<A>, at, _| s.screens.event_context = Some((menu_id.clone(), at.x, at.y)));
     let title = text(title).font(style(12.0, 600.0)).color(color("#242424"));
     let title = if compact { title.truncate().grow(1.0).min_w(0.0) } else { title.wrap() };
     block.child(title).children(time.map(|time| text(time).font(style(11.0, 400.0)).color(color("#616161")).truncate().min_w(0.0)))
@@ -200,18 +200,25 @@ pub fn month<A: Actions + 'static>(s: &UiState<A>) -> El {
 }
 
 pub fn date_picker<A: Actions + 'static>(s: &UiState<A>) -> El {
+    month_grid(s, "picker")
+        .key("calendar-picker").w(280.0).padding(10.0).radius(8.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
+        .anchored("calendar-date-picker", Side::Bottom, Align::Start, 4.0)
+        .modal(true, |s: &mut UiState<A>| s.screens.date_picker = false)
+}
+
+/// A month to choose a day from, with arrows; its keys start with `prefix`. The header's
+/// date popup and the left pane both draw it.
+pub fn month_grid<A: Actions + 'static>(s: &UiState<A>, prefix: &str) -> El {
     let month = s.screens.picker_month;
     let first = month.with_day(1).unwrap_or(month);
     let start = first - Duration::days(i64::from(first.weekday().num_days_from_monday()));
-    let mut picker = col().key("calendar-picker").w(280.0).padding(10.0).gap(4.0).radius(8.0).fill(color("#FFFFFF")).border(1.0, color("#E0E0E0"))
-        .anchored("calendar-date-picker", Side::Bottom, Align::Start, 4.0)
-        .modal(true, |s: &mut UiState<A>| s.screens.date_picker = false)
+    let mut picker = col().w_full().gap(4.0)
         .child(row().w_full().gap(4.0).center_y()
-            .child(crate::controls::icon_button::<A>("picker-previous", "keyboard_arrow_left", "Previous month", false, |s: &mut UiState<A>, _| {
+            .child(crate::controls::icon_button::<A>(&format!("{prefix}-previous"), "keyboard_arrow_left", "Previous month", false, |s: &mut UiState<A>, _| {
                 s.screens.picker_month = s.screens.picker_month.checked_sub_months(chrono::Months::new(1)).unwrap_or(s.screens.picker_month);
             }))
             .child(text(month.format("%B %Y").to_string()).font(style(13.0, 600.0)).color(color("#242424")).grow(1.0))
-            .child(crate::controls::icon_button::<A>("picker-next", "keyboard_arrow_right", "Next month", false, |s: &mut UiState<A>, _| {
+            .child(crate::controls::icon_button::<A>(&format!("{prefix}-next"), "keyboard_arrow_right", "Next month", false, |s: &mut UiState<A>, _| {
                 s.screens.picker_month = s.screens.picker_month.checked_add_months(chrono::Months::new(1)).unwrap_or(s.screens.picker_month);
             })));
     for week in 0..6 {
@@ -219,7 +226,7 @@ pub fn date_picker<A: Actions + 'static>(s: &UiState<A>) -> El {
         for day in 0..7 {
             let date = start + Duration::days(week * 7 + day);
             line = line.child(crate::controls::button::<A>(
-                &format!("picker-date-{date}"),
+                &format!("{prefix}-date-{date}"),
                 &date.day().to_string(),
                 if date == s.screens.calendar_date { crate::controls::Variant::Primary } else { crate::controls::Variant::Secondary },
                 crate::controls::Size::Sm,

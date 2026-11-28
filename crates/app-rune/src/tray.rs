@@ -25,11 +25,14 @@ struct Shown {
     do_not_disturb: bool,
     mention: bool,
     icon: AppIcon,
+    /// The "Show in tray" setting; off, the icon is taken down.
+    visible: bool,
 }
 
 #[derive(Default)]
 pub struct State {
-    tray: Option<(Tray, Handler)>,
+    /// The handler outlives the icon so that turning the setting back on can rebuild it.
+    tray: Option<(Option<Tray>, Handler)>,
     shown: Option<Shown>,
     /// Chats with an @mention that arrived while they were not in front (GPUI `unread_mentions`).
     pub mentions: HashSet<String>,
@@ -90,14 +93,15 @@ pub fn install<A: Actions + 'static>(s: &mut UiState<A>, handle: AppHandle<UiSta
         _ => {}
     });
     let shown = shown(s);
-    let Some(tray) = create(shown, &handler) else { return false };
+    let tray = if shown.visible { create(shown, &handler) } else { None };
+    let installed = tray.is_some();
     s.tray = State { tray: Some((tray, handler)), shown: Some(shown), mentions: std::mem::take(&mut s.tray.mentions) };
-    true
+    installed
 }
 
 fn shown<A: Actions>(s: &UiState<A>) -> Shown {
     let notify = &s.settings.prefs.notify;
-    Shown { sound: notify.sounds.notification_sound, do_not_disturb: notify.do_not_disturb, mention: !s.tray.mentions.is_empty(), icon: s.appearance.app_icon }
+    Shown { sound: notify.sounds.notification_sound, do_not_disturb: notify.do_not_disturb, mention: !s.tray.mentions.is_empty(), icon: s.appearance.app_icon, visible: notify.show_in_tray }
 }
 
 /// Drops mentions that were read or are in front, then redraws the tray if anything changed.
@@ -112,10 +116,12 @@ pub fn sync<A: Actions>(s: &mut UiState<A>) {
     let previous = s.tray.shown.replace(shown);
     let Some((tray, handler)) = &mut s.tray.tray else { return };
     // ponytail: Rune's tray cannot swap its icon, so a new dot or app icon rebuilds the tray.
-    if previous.is_some_and(|previous| previous.mention == shown.mention && previous.icon == shown.icon) {
-        tray.set_menu(menu(shown));
+    if !shown.visible {
+        *tray = None;
+    } else if let (Some(icon), true) = (tray.as_mut(), previous.is_some_and(|previous| previous.mention == shown.mention && previous.icon == shown.icon)) {
+        icon.set_menu(menu(shown));
     } else if let Some(rebuilt) = create(shown, handler) {
-        *tray = rebuilt;
+        *tray = Some(rebuilt);
     }
 }
 
@@ -125,7 +131,7 @@ mod tests {
 
     #[test]
     fn the_menu_checks_mute_and_do_not_disturb_and_the_dot_marks_a_mention() {
-        let shown = Shown { sound: false, do_not_disturb: true, mention: false, icon: AppIcon::RustyTeams };
+        let shown = Shown { sound: false, do_not_disturb: true, mention: false, icon: AppIcon::RustyTeams, visible: true };
         let labels: Vec<String> = menu(shown).into_iter().filter_map(|item| match item { TrayItem::Action { label, .. } => Some(label), _ => None }).collect();
         assert_eq!(labels, ["Open", "✓ Mute sound", "✓ Do not disturb", "Notifications", "Quit"]);
         let plain = icon(AppIcon::RustyTeams, false).unwrap();

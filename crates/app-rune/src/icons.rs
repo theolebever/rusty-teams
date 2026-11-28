@@ -12,6 +12,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("mic", include_str!("../../app/assets/symbols/mic.svg")),
     ("mic_off", include_str!("../../app/assets/symbols/mic_off.svg")),
     ("share", include_str!("../../app/assets/symbols/share.svg")),
+    ("videocam_off", include_str!("../../app/assets/symbols/videocam_off.svg")),
+    ("grid_view", include_str!("../../app/assets/symbols/grid_view.svg")),
     ("back_hand", include_str!("../../app/assets/symbols/back_hand.svg")),
     ("add", include_str!("../assets/fluent/add.svg")),
     ("alternate_email", include_str!("../assets/fluent/alternate_email.svg")),

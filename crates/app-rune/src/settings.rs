@@ -6,7 +6,8 @@ use app_backend::appearance::{AppIcon, ThemeChoice};
 use app_backend::notify::rules;
 use app_backend::notify::sounds::AlertSound;
 use app_backend::schemes;
-use calling::DeviceChoice;
+use app_base::ui_locale::tr;
+use calling::{CameraEffects, DeviceChoice};
 use rune::*;
 use teams_core::{ChatSettingChange, ChatSettingsDocument, EnterKeyBehavior};
 use crate::controls::{self, Size, Variant};
@@ -54,6 +55,7 @@ pub struct Preferences {
     pub camera: DeviceChoice,
     pub microphone: DeviceChoice,
     pub speaker: DeviceChoice,
+    pub effects: CameraEffects,
     pub translation: Option<teams_core::LanguageSettings>,
     pub languages: Vec<teams_core::Language>,
 }
@@ -79,6 +81,7 @@ pub enum Change {
     MutedSection(bool),
     Translation(serde_json::Value),
     Device(Device, DeviceChoice),
+    Effects(CameraEffects),
 }
 
 impl Preferences {
@@ -97,6 +100,7 @@ impl Preferences {
             Change::Device(Device::Camera, choice) => self.camera = choice.clone(),
             Change::Device(Device::Microphone, choice) => self.microphone = choice.clone(),
             Change::Device(Device::Speaker, choice) => self.speaker = choice.clone(),
+            Change::Effects(effects) => self.effects = *effects,
         }
     }
 }
@@ -115,6 +119,10 @@ pub enum Section {
 }
 
 impl Section {
+    /// The navigation groups in GPUI's order (`settings/nav.rs`): Teams settings, then the
+    /// "Rusty Teams" group, then About pinned at the bottom.
+    const TEAMS: [Section; 6] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Calls, Self::Devices];
+    const RUSTY: [Section; 1] = [Self::Agents];
     const ALL: [Section; 8] = [Self::General, Self::Notifications, Self::Appearance, Self::Chats, Self::Calls, Self::Devices, Self::Agents, Self::About];
 
     fn label(self) -> &'static str {
@@ -133,11 +141,11 @@ impl Section {
     /// The setting titles on the pane, for the search box (GPUI `settings/nav.rs`).
     fn terms(self) -> &'static [&'static str] {
         match self {
-            Self::General => &[AUTO_START, BACKGROUND, CLOSE_TO_TRAY, "Up arrow in compose box", "Edit last message", "Navigate to messages", "Stay in compose", "Translation", "Language"],
+            Self::General => &[AUTO_START, BACKGROUND, SHOW_IN_TRAY, CLOSE_TO_TRAY, "Up arrow in compose box", "Edit last message", "Navigate to messages", "Stay in compose", "Translation", "Language"],
             Self::Notifications => &[PREVIEW, FLASH, SOUND, URGENT, CALL_SOUND, BUSY_SOUND, HIDE_IN_CALLS],
             Self::Appearance => &["Theme", "Color scheme", "App icon"],
             Self::Chats => &[RECEIPTS, ENTER, REACTIONS, SKIN_TONE, "Message density", "Compact", "Comfy", "Show message actions on right click", "Muted items"],
-            Self::Devices => &["Speaker", "Microphone", "Camera"],
+            Self::Devices => &["Speaker", "Microphone", "Camera", "Mirror my video", "Auto framing", "Adjust brightness", "Soft focus"],
             Self::Calls => &["Ringtones", "Forwarded calls", "Delegated calls", "Call queue"],
             Self::Agents => &["Agent", "Action", "Resume interrupted runs"],
             Self::About => &["Version", "Build"],
@@ -153,6 +161,7 @@ impl Section {
 const AUTO_START: &str = "Auto-start Teams";
 const BACKGROUND: &str = "Open application in background";
 const CLOSE_TO_TRAY: &str = "On close, keep the application running";
+const SHOW_IN_TRAY: &str = "Show icon in the tray";
 const PREVIEW: &str = "Show message preview";
 const FLASH: &str = "Flash taskbar when notifications are received";
 const SOUND: &str = "Play sounds with notifications";
@@ -182,6 +191,12 @@ pub fn change<A: Actions>(s: &mut UiState<A>, change: Change) {
         Change::Device(Device::Camera, choice) => s.calls.selected_camera = choice.clone(),
         Change::Device(Device::Microphone, choice) => s.calls.selected_input = choice.clone(),
         Change::Device(Device::Speaker, choice) => s.calls.selected_output = choice.clone(),
+        Change::Effects(effects) => {
+            s.calls.effects = *effects;
+            if s.calls.state.is_some() {
+                s.actions.call_command(calling::CallCommand::SetCameraEffects(*effects));
+            }
+        }
         _ => {}
     }
     s.actions.save_setting(change);
@@ -209,6 +224,11 @@ fn sentence_case(label: &str) -> String {
     chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + chars.as_str())
 }
 
+/// The muted help line under a setting row.
+fn detail(help: &str) -> El {
+    text(help.to_owned()).font(ts(12.0, 400.0)).color(color("#616161")).px(12.0).pb(4.0)
+}
+
 /// A setting row with a switch on the right; the whole row toggles.
 ///
 /// The shared primitive supplies the switch role, accessible name, checked state, focus and the
@@ -234,16 +254,28 @@ pub fn view<A: Actions + 'static>(s: &UiState<A>) -> El {
     if shown.is_empty() {
         nav = nav.child(text("No settings found").font(ts(13.0, 400.0)).color(color("#616161")).px(12.0));
     }
-    for section in &shown {
-        let section = *section;
-        let active = section == s.settings.section;
-        nav = nav.child(controls::menu_item(
-            &format!("settings-nav-{section:?}"),
-            section.label(),
-            None,
-            active,
-            move |s: &mut UiState<A>| select(s, section),
-        ));
+    let item = |section: Section| controls::menu_item(
+        &format!("settings-nav-{section:?}"),
+        section.label(),
+        None,
+        section == s.settings.section,
+        move |s: &mut UiState<A>| select(s, section),
+    );
+    let shown_in = |group: &[Section]| group.iter().copied().filter(|section| shown.contains(section)).collect::<Vec<_>>();
+    for section in shown_in(&Section::TEAMS) {
+        nav = nav.child(item(section));
+    }
+    let rusty = shown_in(&Section::RUSTY);
+    if !rusty.is_empty() {
+        nav = nav.child(el().key("settings-nav-rusty-separator").w_full().h(1.0).mt(8.0).fill(color("#E0E0E0")))
+            .child(text("RUSTY TEAMS").font(ts(12.0, 600.0)).color(color("#616161")).px(12.0).pt(12.0).pb(6.0));
+        for section in rusty {
+            nav = nav.child(item(section));
+        }
+    }
+    // About stays at the bottom of the navigation, as in GPUI.
+    if shown.contains(&Section::About) {
+        nav = nav.child(el().grow(1.0)).child(item(Section::About));
     }
     // A search that hides the open section shows its first match instead.
     let section = if shown.contains(&s.settings.section) { s.settings.section } else { shown.first().copied().unwrap_or(s.settings.section) };
@@ -272,13 +304,19 @@ fn select<A: Actions>(s: &mut UiState<A>, section: Section) {
 
 fn general<A: Actions + 'static>(s: &UiState<A>) -> El {
     let prefs = &s.settings.prefs;
-    let (auto_start, background, close_to_tray) = (prefs.auto_start, prefs.open_in_background, prefs.notify.close_to_tray);
+    let (auto_start, background, close_to_tray, show_in_tray) = (prefs.auto_start, prefs.open_in_background, prefs.notify.close_to_tray, prefs.notify.show_in_tray);
     let mut pane = col().w_full()
         .child(caption("System"))
         .child(toggle("settings-auto-start", AUTO_START, auto_start, true, move |s: &mut UiState<A>| change(s, Change::AutoStart(!auto_start))))
         .child(toggle("settings-open-in-background", BACKGROUND, background, auto_start, move |s: &mut UiState<A>| change(s, Change::OpenInBackground(!background))))
-        .child(toggle("settings-close-to-tray", CLOSE_TO_TRAY, close_to_tray, true, |s: &mut UiState<A>| notify(s, |n| n.close_to_tray = !n.close_to_tray)))
-        .child(caption("Up arrow in compose box"));
+        .child(toggle("settings-show-in-tray", &tr("settings.general.show_in_tray"), show_in_tray, true, |s: &mut UiState<A>| notify(s, |n| n.show_in_tray = !n.show_in_tray)))
+        .child(detail(&tr("settings.general.show_in_tray_detail")));
+    if show_in_tray {
+        pane = pane
+            .child(toggle("settings-close-to-tray", CLOSE_TO_TRAY, close_to_tray, true, |s: &mut UiState<A>| notify(s, |n| n.close_to_tray = !n.close_to_tray)))
+            .child(detail(&tr("settings.general.close_to_tray_detail")));
+    }
+    pane = pane.child(caption("Compose box")).child(text("Up arrow in compose box").font(ts(14.0, 400.0)).color(color("#242424")).px(12.0).pt(8.0));
     for (label, behavior) in [("Edit last message", teams_core::UpArrowBehavior::EditLastMessage), ("Navigate to messages", teams_core::UpArrowBehavior::NavigateToMessages), ("Stay in compose", teams_core::UpArrowBehavior::StayInCompose)] {
         pane = pane.child(choice(format!("settings-up-{behavior:?}"), label, prefs.chat.settings().up_arrow == behavior, move |s: &mut UiState<A>| change(s, Change::Chat(ChatSettingChange::UpArrow(behavior)))));
     }
@@ -456,6 +494,40 @@ fn devices<A: Actions + 'static>(s: &UiState<A>) -> El {
             }));
         }
     }
+    pane.child(camera_effects::<A>(prefs.effects))
+}
+
+/// GPUI's strength choices for the soft focus effect (`settings/devices.rs`).
+const SOFT_FOCUS_LEVELS: [(&str, u8); 3] = [("Low", 25), ("Medium", 50), ("High", 75)];
+
+fn camera_effects<A: Actions + 'static>(effects: CameraEffects) -> El {
+    type Field = fn(&mut CameraEffects) -> &mut bool;
+    let rows: [(&str, &str, bool, Field); 4] = [
+        ("mirror", "Mirror my video", effects.mirror, |e| &mut e.mirror),
+        ("framing", "Auto framing", effects.auto_framing, |e| &mut e.auto_framing),
+        ("brightness", "Adjust brightness", effects.adjust_brightness, |e| &mut e.adjust_brightness),
+        ("soft-focus", "Soft focus", effects.soft_focus, |e| &mut e.soft_focus),
+    ];
+    let mut pane = col().w_full();
+    for (key, label, on, field) in rows {
+        pane = pane.child(toggle(&format!("settings-effect-{key}"), label, on, true, move |s: &mut UiState<A>| {
+            let mut changed = s.settings.prefs.effects;
+            *field(&mut changed) = !on;
+            change(s, Change::Effects(changed));
+        }));
+    }
+    if effects.soft_focus {
+        let mut levels = row().w_full().gap(6.0).px(12.0);
+        for (label, level) in SOFT_FOCUS_LEVELS {
+            levels = levels.child(controls::chip(
+                &format!("settings-soft-focus-{level}"),
+                label,
+                effects.soft_focus_strength == level,
+                move |s: &mut UiState<A>| change(s, Change::Effects(CameraEffects { soft_focus_strength: level, ..s.settings.prefs.effects })),
+            ));
+        }
+        pane = pane.child(caption("Soft focus strength")).child(levels);
+    }
     pane
 }
 
@@ -537,6 +609,55 @@ mod tests {
         assert!(Section::General.matches("up arrow"));
         assert!(Section::Chats.matches("density"));
         assert!(Section::Chats.matches("right click"));
+    }
+
+    #[test]
+    fn navigation_follows_gpui_order_with_the_rusty_teams_group() {
+        let rt = settings_runtime();
+        let elements = rt.elements();
+        let y = |key: &str| by_key(&elements, key).rect[1];
+        let order = ["General", "Notifications", "Appearance", "Chats", "Calls", "Devices"].map(|name| y(&format!("settings-nav-{name}")));
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "Teams group is in order");
+        assert!(order[5] < y("settings-nav-rusty-separator"));
+        assert!(y("settings-nav-rusty-separator") < y("settings-nav-Agents"));
+        assert!(y("settings-nav-Agents") < y("settings-nav-About"), "About is pinned below the group");
+        assert!(elements.iter().any(|e| e.text.as_deref() == Some("RUSTY TEAMS")));
+    }
+
+    #[test]
+    fn a_search_that_hides_the_rusty_group_hides_its_separator_and_title() {
+        let mut rt = settings_runtime();
+        rt.update(|s, _| s.settings.search = TextEdit::new("receipts"));
+        rt.frame(0.0);
+        let elements = rt.elements();
+        assert!(rt.find("settings-nav-rusty-separator").is_none());
+        assert!(elements.iter().all(|e| e.text.as_deref() != Some("RUSTY TEAMS")));
+    }
+
+    #[test]
+    fn show_in_tray_is_saved_and_gates_the_close_to_tray_row() {
+        let mut rt = settings_runtime();
+        assert!(rt.find("settings-close-to-tray").is_some());
+        click(&mut rt, "settings-show-in-tray");
+        assert!(!rt.state.settings.prefs.notify.show_in_tray);
+        assert!(rt.find("settings-close-to-tray").is_none(), "close to tray needs the icon");
+        assert!(matches!(rt.state.actions.saved.borrow().last(), Some(Change::Notify(n)) if !n.show_in_tray));
+        assert!(Section::General.matches("tray"));
+    }
+
+    #[test]
+    fn camera_effects_are_saved_and_found_by_search() {
+        let mut rt = settings_runtime();
+        rt.update(|s, _| s.settings.section = Section::Devices);
+        rt.frame(0.0);
+        click(&mut rt, "settings-effect-brightness");
+        let expected = CameraEffects { adjust_brightness: true, ..CameraEffects::default() };
+        assert_eq!(rt.state.calls.effects, expected, "the next call starts with it");
+        assert_eq!(rt.state.actions.saved.borrow().last(), Some(&Change::Effects(expected)));
+        click(&mut rt, "settings-effect-soft-focus");
+        click(&mut rt, "settings-soft-focus-25");
+        assert_eq!(rt.state.settings.prefs.effects.soft_focus_strength, 25);
+        assert!(Section::Devices.matches("mirror my video"));
     }
 
     #[test]

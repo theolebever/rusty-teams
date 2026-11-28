@@ -41,7 +41,7 @@ pub fn open<A: Actions>(s: &mut UiState<A>) {
 
 /// A directory answer is kept only by the drafts still holding the query it was asked for.
 pub fn apply_people<A: Actions>(s: &mut UiState<A>, query: &str, rows: Vec<Person>) {
-    for draft in [&mut s.chatlist.manage.new_chat, &mut s.chatlist.manage.add, &mut s.meeting.people] {
+    for draft in [&mut s.chatlist.manage.new_chat, &mut s.chatlist.manage.add, &mut s.meeting.people, &mut s.calls.dial] {
         if draft.query.text.trim() == query {
             draft.results = rows.clone();
         }

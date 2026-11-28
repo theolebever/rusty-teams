@@ -469,6 +469,7 @@ impl<A: Actions> UiState<A> {
                 self.calls.selected_camera = prefs.camera.clone();
                 self.calls.selected_input = prefs.microphone.clone();
                 self.calls.selected_output = prefs.speaker.clone();
+                self.calls.effects = prefs.effects;
                 self.settings.prefs = *prefs;
             }
             Update::Activity(snapshot) => self.screens.activity = snapshot,

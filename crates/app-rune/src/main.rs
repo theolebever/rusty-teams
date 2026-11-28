@@ -5,7 +5,6 @@
 
 mod account_picker;
 mod accounts;
-mod agenda;
 mod agent_panel;
 mod agent_runs;
 mod agent_settings;
@@ -32,10 +31,6 @@ mod call_window;
 mod window_icon;
 mod calls_backend;
 mod calendar_grid;
-/// The path app-call-model's included agenda source imports its all-day rule from.
-mod week_grid {
-    pub(crate) use crate::calendar_grid::model::is_effective_all_day;
-}
 mod icons;
 mod cards;
 mod card_state;
@@ -299,7 +294,8 @@ fn main() {
     })
     .on_close(|state, tx| {
         view_composer::persist_draft(state);
-        if !state.settings.prefs.notify.close_to_tray { tx.quit(); }
+        let notify = &state.settings.prefs.notify;
+        if !(notify.show_in_tray && notify.close_to_tray) { tx.quit(); }
     })
     .on_quit(|state, _| {
         state.actions.shutdown();
@@ -322,9 +318,11 @@ fn main() {
         .options(WindowOptions { min_size: Some((560.0, 420.0)), ..Default::default() }));
     state.call_window = Some(call_window::CallWindow::new(call_handle));
     let has_tray = tray::install(&mut state, app.handle());
+    // With the icon turned off it may come back from Settings, so keep running; `on_close` quits.
+    let keep_running = has_tray || !state.settings.prefs.notify.show_in_tray;
     let app = app.init(move || state);
     let app = if hidden && has_tray { app.windowless() } else { app };
-    if has_tray { app.keep_running().run() } else { app.run() }
+    if keep_running { app.keep_running().run() } else { app.run() }
 }
 
 /// Demo only: fake actions and sample data, so the view can be looked at without a backend.

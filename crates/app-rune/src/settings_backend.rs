@@ -46,6 +46,7 @@ pub fn load(store: &Store) -> Preferences {
         camera: load_device(store, Device::Camera),
         microphone: load_device(store, Device::Microphone),
         speaker: load_device(store, Device::Speaker),
+        effects: state::call::load_camera_effects(store),
         translation: store.meta("translation_settings").ok().flatten()
             .and_then(|json| serde_json::from_str(&json).ok()).and_then(|value| teams_core::parse_language_settings(&value).ok()),
         languages: store.meta("translation_languages").ok().flatten()
@@ -107,6 +108,7 @@ pub fn save(shared: &Arc<Shared>, change: Change) {
             let key = if matches!(change, Change::Markdown(_)) { state::chat_settings_actions::META_MARKDOWN_MODE } else { state::chat_settings_actions::META_ACTIONS_ON_RIGHT_CLICK };
             if let Err(error) = store.set_meta(key, if on { "true" } else { "false" }) { republish(&shared, error); }
         }
+        Change::Effects(effects) => state::call::save_camera_effects(store, effects),
         Change::Device(device, choice) => {
             let value = match &choice { DeviceChoice::SystemDefault => DEFAULT_DEVICE, DeviceChoice::Device(key) => key };
             if let Err(error) = store.set_meta(device_key(device), value) { return republish(&shared, error); }
