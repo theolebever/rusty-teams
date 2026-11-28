@@ -12,36 +12,13 @@
     if (key.endsWith('active-account-filters') && entry.homeAccountId) activeHome = entry.homeAccountId;
     if (typeof entry.secret === 'string') entries.push(entry);
   };
-  // Newer MSAL.js seals its localStorage cache: AES-GCM under a key from the msal.cache.encryption session cookie.
+  // Newer MSAL.js seals its localStorage cache; the shared helper (unseal.js) opens what it can.
   const unseal = async () => {
-    const cookie = document.cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('msal.cache.encryption='));
-    let sealing = null;
-    try { sealing = cookie && JSON.parse(decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1))); } catch (error) {}
-    if (!sealing || !sealing.key || !sealing.id) return;
-    const bytes = (text) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(text.length / 4) * 4, '=')),
-      (character) => character.charCodeAt(0));
+    const unsealEntries = __UNSEAL__;
     const memo = (window.__rustyTeamsUnsealed = window.__rustyTeamsUnsealed || new Map());
-    const base = await crypto.subtle.importKey('raw', bytes(sealing.key), 'HKDF', false, ['deriveKey']);
-    for (const [key, entry] of sealed) {
-      if (entry.id !== sealing.id) continue;
-      if (!memo.has(entry.nonce)) {
-        // MSAL binds an entry to the client id in its key, or to an empty context when the key has none.
-        const contexts = [...(key.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) || []), ''];
-        for (const context of new Set(contexts)) {
-          try {
-            const derived = await crypto.subtle.deriveKey(
-              {name: 'HKDF', salt: bytes(entry.nonce), hash: 'SHA-256', info: new TextEncoder().encode(context)},
-              base, {name: 'AES-GCM', length: 256}, false, ['decrypt']);
-            const data = await crypto.subtle.decrypt({name: 'AES-GCM', iv: new Uint8Array(12)}, derived, bytes(entry.data));
-            memo.set(entry.nonce, JSON.parse(new TextDecoder().decode(data)));
-            break;
-          } catch (error) {}
-        }
-      }
-      if (memo.has(entry.nonce)) {
-        take(key, memo.get(entry.nonce));
-        opened++;
-      }
+    for (const [key, entry] of await unsealEntries(sealed, memo)) {
+      take(key, entry);
+      opened++;
     }
   };
   // Teams keeps megabytes in localStorage: parse it only when the in-page token memo misses.

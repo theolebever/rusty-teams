@@ -440,6 +440,12 @@ impl CallEngine {
                 advance(&mut state, CallSignal::LocalLeave, &control);
                 None
             }
+            Err(error)
+                if accept_found_no_call(&error) && matches!(state, CallState::Connecting) =>
+            {
+                advance(&mut state, CallSignal::LocalLeave, &control);
+                None
+            }
             Err(error) => {
                 advance(&mut state, CallSignal::Error(error.to_string()), &control);
                 Some(error)
@@ -470,6 +476,18 @@ impl CallEngine {
             None => Ok(report),
         }
     }
+}
+
+/// Teams answers 404 when the caller already hung up. While we are still connecting
+/// that is a cancelled ring, not a failed call.
+pub(super) fn accept_found_no_call(error: &Error) -> bool {
+    let Error::Signaling(reason) = error else {
+        return false;
+    };
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("post acceptance")
+        && reason.contains("http 404")
+        && reason.contains("does not exist")
 }
 
 async fn setup_step<T, E>(
@@ -680,6 +698,7 @@ async fn drive(
     };
     let mut layout_plan: OfferPlan;
     let mut direct_video_mid: Option<String> = None;
+    let mut initial_share_mid: Option<String> = None;
     let mut sending_camera = false;
     let mut media_links: BTreeMap<String, String> = BTreeMap::new();
 
@@ -793,6 +812,7 @@ async fn drive(
             .await?;
             layout_plan = answered.remote.plan();
             direct_video_mid = answered.camera_mid.clone();
+            initial_share_mid = answered.receiving_share_mid.clone();
             timeline.record(
                 "setRemoteDescription",
                 format!(
@@ -920,6 +940,7 @@ async fn drive(
     let mut capability = MeetingCapability::default();
     let mut previous_packets = 0u64;
     let mut ticks = 0u32;
+    let mut host_cpu = std::collections::HashMap::new();
     let mut segmentation_model: Option<&'static str> = None;
     let mut health_sampler = HealthSampler::default();
     let mut quality_tracker = QualityTracker::default();
@@ -932,6 +953,10 @@ async fn drive(
     let mut video = VideoReceive::new(own_mri.clone(), VideoRouter::default());
     if let (Some(mid), Some(mri)) = (&direct_video_mid, &peer_mri) {
         video.router().set(mid, Some(VideoKey::Person(mri.clone())));
+    }
+    if let Some(mid) = &initial_share_mid {
+        video.router().set(mid, Some(VideoKey::Screen));
+        control.send(CallUpdate::ScreenShare(peer_mri.clone()));
     }
     if sending_camera {
         control.send(CallUpdate::Camera(true));
@@ -996,7 +1021,7 @@ async fn drive(
     let mut portal_pending: Option<ShareKind> = None;
     let mut glare_resend: Option<GlareResend> = None;
     let mut deferred_changes: Vec<Change> = Vec::new();
-    let mut remote_direct_share: Option<String> = None;
+    let mut remote_direct_share: Option<String> = initial_share_mid.clone();
     let mut sent_replacement: Option<Replacement> = None;
     let (echo_add_tx, mut echo_add_rx) = mpsc::unbounded_channel::<Result<()>>();
     let mut echo_add_pending = false;
@@ -2803,6 +2828,20 @@ async fn drive(
                         segmentation_model = Some(model);
                     }
                 }
+                if crate::host_load::recorded_on_this_platform()
+                    && ticks.is_multiple_of(HEALTH_EVERY_TICKS)
+                {
+                    let current = crate::host_load::thread_cpu();
+                    let deltas = crate::host_load::cpu_deltas(&current, &mut host_cpu);
+                    timeline.record(
+                        "host load",
+                        crate::host_load::host_load_line(
+                            &deltas,
+                            &local_video.effects_label(),
+                            crate::host_load::thermal_state(),
+                        ),
+                    );
+                }
                 if ticks.is_multiple_of(HEALTH_EVERY_TICKS) {
                     control.send(CallUpdate::Sample(StatsSample {
                         audio_in_packets: snapshot.inbound_packets,
@@ -3061,6 +3100,23 @@ fn far_future() -> Instant {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_call_on_accept_while_connecting_is_a_cancel() {
+        let gone = Error::Signaling(
+            "POST acceptance answered HTTP 404 {\"Message\":\"The requested call does not exist.\"}"
+                .into(),
+        );
+        assert!(accept_found_no_call(&gone));
+        let other = Error::Signaling("POST acceptance answered HTTP 500 boom".into());
+        assert!(!accept_found_no_call(&other));
+        let roster = Error::Signaling(
+            "POST roster answered HTTP 404 {\"Message\":\"The requested call does not exist.\"}"
+                .into(),
+        );
+        assert!(!accept_found_no_call(&roster));
+        assert!(!accept_found_no_call(&Error::Cancelled));
+    }
+
     #[test]
     fn gathering_settles_shortly_after_a_udp_relay_or_when_complete() {
         assert!(!gathering_settled(false, None));

@@ -51,6 +51,7 @@ pub struct Timeouts {
     pub probe: Duration,
     pub poll: Duration,
     pub profile_release: Duration,
+    pub msal_key: Duration,
     pub jitter_min: Duration,
     pub jitter_max: Duration,
 }
@@ -62,6 +63,7 @@ impl Default for Timeouts {
             stop: Duration::from_secs(15),
             probe: Duration::from_secs(5),
             poll: Duration::from_millis(250),
+            msal_key: Duration::from_millis(500),
             profile_release: Duration::from_secs(2),
             jitter_min: Duration::ZERO,
             jitter_max: Duration::ZERO,
@@ -294,6 +296,45 @@ impl Browser {
             .unwrap_or(false)
     }
 
+    /// True when the Teams page holds a still-valid access token, plain or decrypted from a
+    /// sealed cache entry. Key names and expired unsealed entries do not count.
+    pub async fn teams_sign_in_ready(&self) -> bool {
+        let Ok(tabs) = self.tabs().await else {
+            return false;
+        };
+        let Some(tab) = targets::app_tab(&tabs, App::Teams) else {
+            return false;
+        };
+        if tab.parked {
+            return false;
+        }
+        let expression = crate::sign_in_ready::PAGE_EXPRESSION.as_str();
+        if let Some(bidi) = &self.inner.bidi {
+            let evaluate = tokio::time::timeout(
+                self.inner.timeouts.probe,
+                bidi.evaluate(&tab.id, expression),
+            );
+            return match evaluate.await {
+                Ok(Ok(value)) => crate::sign_in_ready::sign_in_ready_from_page(&value),
+                _ => false,
+            };
+        }
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/page/{}",
+            self.inner.config.port, tab.id
+        );
+        let params = json!({
+            "expression": expression,
+            "returnByValue": true,
+            "awaitPromise": true
+        });
+        cdp_call(&url, "Runtime.evaluate", params, self.inner.timeouts.probe)
+            .await
+            .ok()
+            .and_then(|value| value.pointer("/result/value").cloned())
+            .is_some_and(|value| crate::sign_in_ready::sign_in_ready_from_page(&value))
+    }
+
     pub async fn login_window(&self) -> Result<(), BrowserError> {
         let _guard = self.inner.operation.lock().await;
         if self.is_visible_managed() && self.is_running().await {
@@ -501,6 +542,12 @@ impl Browser {
             let port = self.inner.config.port;
             let _ = tokio::task::spawn_blocking(move || launcher.terminate_listener(port)).await;
         } else if let Some(info) = self.version().await {
+            let budget = self.inner.timeouts.msal_key;
+            if let Err(error) =
+                tokio::time::timeout(budget, keep_msal_cache_key(&info.websocket_url)).await
+            {
+                log::warn!("MSAL cache key not kept within the {budget:?} stop budget: {error}");
+            }
             close_over_cdp(&info.websocket_url).await;
         }
     }
@@ -569,6 +616,27 @@ async fn cdp_call(
     tokio::time::timeout(timeout, exchange)
         .await
         .map_err(|_| BrowserError::Cdp(format!("{method} timed out")))?
+}
+
+/// Gives MSAL's session-cookie cache key an expiry so the next start can still read the token
+/// cache (#84). Best effort: a failure only means one more sign-in, so it is logged and the stop goes on.
+async fn keep_msal_cache_key(websocket_url: &str) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let outcome = async {
+        let cookies = cdp_call(websocket_url, "Storage.getCookies", json!({}), CDP_TIMEOUT).await?;
+        let Some(params) = crate::msal_key::persisted_key_cookies(&cookies, now_secs) else {
+            return Ok(());
+        };
+        cdp_call(websocket_url, "Storage.setCookies", params, CDP_TIMEOUT)
+            .await
+            .map(|_| ())
+    }
+    .await;
+    if let Err(error) = outcome {
+        log::warn!("MSAL cache key not kept across the restart: {error}");
+    }
 }
 
 async fn close_over_cdp(websocket_url: &str) {

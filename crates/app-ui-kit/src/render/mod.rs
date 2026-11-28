@@ -2,8 +2,9 @@ pub use app_base::blocks;
 pub mod elements;
 mod flow_text;
 pub mod hooks;
+mod link_tooltip;
 mod selectable;
-mod syntax;
+pub(crate) mod syntax;
 
 pub use blocks::{
     Block, TableCell, layout_blocks, layout_card_blocks, strip_image_placeholders, table_images,

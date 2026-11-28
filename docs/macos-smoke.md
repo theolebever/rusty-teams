@@ -16,6 +16,7 @@ Run on a real Mac (`.app` from `scripts/build-macos.sh` or a release zip). Unit 
 3. Pick a display or window: share banner shows; stop share leaves the call up.
 4. Cancel the picker: no share, call stays connected, no error toast.
 5. Prefer a second person for 1:1 ring / accept when available (ROADMAP still Partial without that).
+6. Camera on, no blur, standout, auto framing, brightness, or soft focus, and no share, for one minute. The call report (`host load`, every two seconds) names the threads that used CPU, says those effects are off, and states thermal state `nominal`, `fair`, `serious`, or `critical`. The next capture change follows the hottest thread in that report. This minute is the gate; it is not a substitute for guessing a GPU path.
 
 ## Desktop integration
 
@@ -25,7 +26,7 @@ Run on a real Mac (`.app` from `scripts/build-macos.sh` or a release zip). Unit 
 
 ## Packaging
 
-1. Unsigned local build: TCC prompts for mic / camera / screen when first used.
+1. Ad hoc signed local build (no `MACOS_CODESIGN_IDENTITY`): TCC prompts for mic / camera / screen when first used. Each rebuild changes the code hash, so macOS may ask again; `tccutil reset ScreenCapture org.rusty-teams.teams` (or `Camera` / `Microphone`) clears a stale entry.
 2. Signed + notarized build (when `MACOS_CODESIGN_IDENTITY` / `MACOS_NOTARY_PROFILE` are set): Gatekeeper opens without a right-click override.
 
 ## Report

@@ -15,7 +15,8 @@ const POLL_STEP: Duration = Duration::from_millis(100);
 const CHECK_WAIT: Duration = Duration::from_millis(250);
 const HIDE_POLL: Duration = Duration::from_millis(500);
 const HIDE_STABLE_CHECKS: u32 = 4;
-const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+// MSAL key budget (500 ms) + CDP close (up to 3 s) + profile release (2 s) must fit.
+const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 
 static LINUX_BROWSER: OnceLock<browser::Browser> = OnceLock::new();
 static LIVE_RETRY: OnceLock<Mutex<Option<Arc<Notify>>>> = OnceLock::new();
@@ -157,7 +158,7 @@ impl HideAfterLogin {
         self.stable = 0;
     }
 
-    fn step(&mut self, status: Option<&browser::Status>, has_msal_cache: bool) -> bool {
+    fn step(&mut self, status: Option<&browser::Status>, session_ready: bool) -> bool {
         let Some(status) = status else {
             self.stable = 0;
             return false;
@@ -171,7 +172,7 @@ impl HideAfterLogin {
                 .tabs
                 .iter()
                 .any(|tab| tab.app == Some(browser::App::Teams) && !tab.parked);
-        if !teams_loaded || !has_msal_cache {
+        if !teams_loaded || !session_ready {
             self.stable = 0;
             return false;
         }
@@ -198,7 +199,7 @@ async fn hide_after_login(browser: browser::Browser, headless_notify: Arc<Notify
             continue;
         }
         let status = browser.status().await.ok();
-        let has_msal_cache = match status.as_ref() {
+        let session_ready = match status.as_ref() {
             Some(status)
                 if status.running
                     && status.mode == browser::Mode::Visible
@@ -208,11 +209,11 @@ async fn hide_after_login(browser: browser::Browser, headless_notify: Arc<Notify
                         .iter()
                         .any(|tab| tab.app == Some(browser::App::Teams) && !tab.parked) =>
             {
-                browser.teams_has_msal_cache().await
+                browser.teams_sign_in_ready().await
             }
             _ => false,
         };
-        if tracker.step(status.as_ref(), has_msal_cache) {
+        if tracker.step(status.as_ref(), session_ready) {
             log::info!("Teams sign-in finished: moving Chrome to the background");
             publish_sign_in(BrowserSignInState::Finishing);
             if let Err(error) = browser.headless().await {
@@ -539,5 +540,25 @@ mod tests {
         for _ in 0..HIDE_STABLE_CHECKS + 2 {
             assert!(!tracker.step(Some(&stuck_login), true));
         }
+    }
+
+    #[test]
+    fn key_names_without_a_usable_token_keep_the_window_open() {
+        let mut tracker = HideAfterLogin::default();
+        let teams = status(
+            browser::Mode::Visible,
+            browser::LoginState::NotRequired,
+            vec![tab(Some(browser::App::Teams), false, false)],
+        );
+        for _ in 0..HIDE_STABLE_CHECKS + 2 {
+            assert!(!tracker.step(Some(&teams), false));
+        }
+    }
+
+    #[test]
+    fn stop_timeout_covers_browser_shutdown() {
+        let timeouts = browser::Timeouts::default();
+        let worst_case = timeouts.msal_key + timeouts.profile_release + Duration::from_secs(3);
+        assert!(STOP_TIMEOUT >= worst_case);
     }
 }

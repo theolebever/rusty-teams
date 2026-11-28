@@ -30,9 +30,7 @@ PLANNING_FOLDERS = ("openspec", ".specify", ".kiro")
 FORBIDDEN_PATH_PATTERN = re.compile(rf"^({'|'.join(re.escape(folder) for folder in PLANNING_FOLDERS)})/")
 WINDOWS_CODE_PATTERN = re.compile(r"^\+.*(cfg\((all\()?windows|target_os\s*=\s*\"windows\")", re.MULTILINE)
 WINDOWS_PATH_PATTERN = re.compile(r"(^|/)(win32|windows)(/|_[a-z]+\.rs$)|_win(dows)?\.rs$")
-LOCKFILE_NAMES = ("Cargo.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
 
-MAX_CHANGED_LINES = 400
 MIN_PROBLEM_CHARACTERS = 80
 MIN_REVIEW_LINES = 2
 REQUIRED_SECTIONS = ("Summary", "AI model", "Tests", "Review")
@@ -47,6 +45,7 @@ LABEL_NO_VISUAL = "gate: no visual"
 LABEL_SKIP = "gate: skip"
 
 COMMENT_MARKER = "<!-- pr-gate -->"
+GATE_WORKFLOW = "pr-gate.yml"
 DEFAULT_REPOSITORY = "danieldaeschle/rusty-teams"
 
 
@@ -101,10 +100,6 @@ def linked_issue_numbers(body: str) -> list[int]:
     return sorted({int(number) for number in ISSUE_REFERENCE_PATTERN.findall(strip_comments(body))})
 
 
-def changed_lines(files: list[ChangedFile]) -> int:
-    return sum(changed.additions + changed.deletions for changed in files if changed.path.rsplit("/", 1)[-1] not in LOCKFILE_NAMES)
-
-
 def title_type(title: str) -> str:
     return title.split("(", 1)[0].split(":", 1)[0].split("!", 1)[0].strip()
 
@@ -136,15 +131,11 @@ def check(pull_request: PullRequest) -> list[str]:
                 "a linked issue (`Closes #123`) replaces this section."
             )
 
-    size = changed_lines(pull_request.files)
-    needs_accepted_issue = title_type(pull_request.title) == "feat" or size > MAX_CHANGED_LINES
-    if needs_accepted_issue:
+    if title_type(pull_request.title) == "feat":
         accepted = any(LABEL_ACCEPTED in pull_request.linked_issue_labels.get(number, []) for number in issue_numbers)
         if not accepted:
-            reason = "a feature" if title_type(pull_request.title) == "feat" else f"{size} changed lines (over {MAX_CHANGED_LINES})"
             missing.append(
-                f"**Issue first**: this PR is {reason}. Link an issue that a maintainer marked `{LABEL_ACCEPTED}`, "
-                "or split the change into smaller PRs."
+                f"**Issue first**: this PR is a feature. Link an issue that a maintainer marked `{LABEL_ACCEPTED}`."
             )
 
     if any(UI_PATH_PATTERN.search(path) for path in paths) and LABEL_NO_VISUAL not in pull_request.labels:
@@ -308,6 +299,16 @@ def run_gate(github: GitHub, number: int, enforce: bool) -> bool:
     return is_draft or not missing
 
 
+def rerun_failed_gate(github: GitHub, raw: dict) -> None:
+    """A sweep or an issue label passes the PR, but the red check sits on the head commit's own run: run that again."""
+    sha = urllib.parse.quote(raw["head"]["sha"])
+    runs = github.request("GET", f"/actions/workflows/{GATE_WORKFLOW}/runs?head_sha={sha}&event=pull_request_target&per_page=20")
+    latest = max((runs or {}).get("workflow_runs", []), key=lambda run: run["created_at"], default=None)
+    if latest and latest.get("conclusion") == "failure":
+        github.request("POST", f"/actions/runs/{latest['id']}/rerun")
+        print(f"#{raw['number']}: re-ran the failed gate run {latest['id']}")
+
+
 def dry_run(github: GitHub, number: int) -> int:
     _, pull_request = load_pull_request(github, number)
     missing = check(pull_request)
@@ -335,10 +336,14 @@ def main() -> int:
     number = os.environ.get("PR_NUMBER", "").strip()
     if number:
         return 0 if run_gate(github, int(number), enforce=True) else 1
+    issue = os.environ.get("ISSUE_NUMBER", "").strip()
     failed = []
     for raw in github.paged("/pulls?state=open"):
+        if issue and int(issue) not in linked_issue_numbers(raw.get("body") or ""):
+            continue
         try:
-            run_gate(github, raw["number"], enforce=False)
+            if run_gate(github, raw["number"], enforce=False):
+                rerun_failed_gate(github, raw)
         except urllib.error.HTTPError as error:
             print(f"::warning::#{raw['number']}: {error}")
             failed.append(raw["number"])

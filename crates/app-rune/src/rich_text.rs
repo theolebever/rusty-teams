@@ -113,9 +113,17 @@ fn blocks<A: Actions + 'static>(spans: &[Md], size: f32, color: Color, own: bool
             Md::CodeBlock { language, code } => {
                 use app_base::syntax::Token;
                 let highlights = language.as_deref().and_then(|language| app_base::syntax::highlight(code, language)).unwrap_or_default();
-                let spans = highlights.into_iter().map(|(range, token)| {
-                    let color = match token { Token::Keyword => palette.accent, Token::String => palette.green, Token::Number => palette.amber, Token::Comment => palette.text_muted };
-                    rune::Span::new(range.start, range.end).color(rgb(color))
+                // The colours of GPUI's `token_style`; bold and italic marks keep the text colour.
+                let spans = highlights.into_iter().filter_map(|(range, token)| {
+                    let color = match token {
+                        Token::Keyword | Token::Tag | Token::Heading => palette.accent_text,
+                        Token::String | Token::Number | Token::Link => palette.accent_soft,
+                        Token::Comment => palette.text_faint,
+                        Token::Type => palette.green,
+                        Token::Title | Token::Attribute => palette.amber,
+                        Token::Strong | Token::Emphasis => return None,
+                    };
+                    Some(rune::Span::new(range.start, range.end).color(rgb(color)))
                 }).collect();
                 col().key(format!("rich-code-{index}")).w_full().padding(8.0).radius(4.0).fill(rgb(palette.row_hover))
                     .child(rune::rich(code.clone(), spans).font(ts(size, 400.0).family(rune::tok::Family::Named("Consolas"))).color(color).wrap())
